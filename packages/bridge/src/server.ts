@@ -2,8 +2,11 @@
  * Deployed (full) bridge: wires state, Portal link, routing, MCP, OAuth, person surfaces and the
  * internal API onto two listeners (BRIDGE §3). Used by bridge-server and `tealbrick bridge run`.
  */
+
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import { hostname } from "node:os";
+import { join } from "node:path";
 import type { ManifestApi } from "./api.ts";
 import { CallRouter } from "./calls.ts";
 import { BridgeContext } from "./context.ts";
@@ -37,6 +40,41 @@ export interface RunningBridge {
 /** One request id per request; never derived from client input. */
 function requestIdOf(ctx: BridgeContext): string {
   return `req_${ctx.api.ulid()}`;
+}
+
+/**
+ * Own-infrastructure bridge without a provider-generated KEK: create it once under TB_DATA_DIR
+ * (0600, excluded from backups by living outside bridge/), CORE I3 / CREDENTIALS §9.1.
+ */
+export function ownInfraEnv(env: NodeJS.ProcessEnv, api: ManifestApi): NodeJS.ProcessEnv {
+  if (env.TB_KEK || !env.TB_DATA_DIR) return env;
+  const path = join(env.TB_DATA_DIR, "kek");
+  if (!existsSync(path)) {
+    mkdirSync(env.TB_DATA_DIR, { recursive: true, mode: 0o700 });
+    writeFileSync(path, api.opaqueValue("tbe_").slice(4), { mode: 0o600, flag: "wx" });
+  }
+  return { ...env, TB_KEK: readFileSync(path, "utf8").trim() };
+}
+
+/** Enrols (or re-enrols on a new code) and stops: `tealbrick bridge enrol` (CLI.md §5). */
+export async function enrolBridge(o: { api: ManifestApi; env: NodeJS.ProcessEnv; logger?: Logger; fetch?: typeof fetch; form?: "deployed" | "own_infra" }): Promise<{ bridgeId: string; workspaceId: string }> {
+  const env = o.env;
+  if (!env.TB_DATA_DIR) throw new Error("TB_DATA_DIR is required");
+  const state = new BridgeState(env.TB_DATA_DIR, o.api, keksFromEnv(env, o.api));
+  state.load();
+  const ctx = new BridgeContext({
+    api: o.api,
+    state,
+    logger: o.logger ?? jsonLogger(),
+    portalUrl: assertOrigin(env.TB_PORTAL_URL ?? "", "TB_PORTAL_URL"),
+    publicUrl: assertOrigin(env.TB_PUBLIC_URL ?? "", "TB_PUBLIC_URL"),
+    internalUrl: `http://${hostname()}:${Number(env.TB_INTERNAL_PORT ?? 8788)}`,
+    form: o.form ?? "own_infra",
+    ...(o.fetch ? { fetch: o.fetch } : {}),
+  });
+  await ensureEnrolled(ctx, env.TB_ENROL_CODE);
+  if (!ctx.identity) throw new Error("enrolment failed");
+  return { bridgeId: ctx.identity.bridgeId, workspaceId: ctx.identity.workspaceId };
 }
 
 export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge> {

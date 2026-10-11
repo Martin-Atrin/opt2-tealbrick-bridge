@@ -24,7 +24,10 @@ Owner mode (person session; reads and drafts only):
   register agents --file <agents.json> [--draft <drf>]
 Harness:
   connect <claude-desktop|codex|claude-code|generic> [--agent <agt>] [--remote|--local] [--write [--yes]] [--bridge <url>]
-Agent mode, bridge, admin (not part of this build section): agent, bridge, admin, standalone
+Agent mode (agent items only):
+  agent login [--agent <agt>]... | --file <agents.json>] [--harness <id>] [--label <machine>] | status | logout | list
+Local bridge: bridge serve --stdio [--agent <agt>]   Own infrastructure: bridge enrol --code - [--data-dir <d>] | bridge run [--data-dir <d>]
+Standalone: standalone owner-key --ws <ws>   admin pause|resume [--agent] | revoke-connection <con> | ticket launch <product>|keys  --ws <ws> --bridge <url>
 Global flags: --json  --portal <url>  --ws <ws_...>  --agent <agt_...>  --yes  --code -
 Exit codes: 0 ok, 1 unexpected, 2 usage, 3 not signed in, 4 wrong credential kind, 5 refused,
             6 not found, 7 conflict, 8 validation failed, 9 network, 10 device flow denied/expired

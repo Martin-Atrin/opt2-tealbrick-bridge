@@ -115,14 +115,11 @@ describe("owner commands: envelope, exit codes, credential kind", () => {
     assert.equal(r.code, 2);
   });
 
-  it("usage errors exit 2; lead stubs exit 1", async () => {
+  it("usage errors exit 2 (also for unknown agent/bridge/admin/standalone subcommands)", async () => {
     assert.equal((await h.run(["nope", "--json"])).code, 2);
     assert.equal((await h.run(["--bogus", "--json"])).code, 2);
     assert.equal((await h.run(["--json"])).code, 2);
-    const stub = await h.run(["agent", "list", "--json"]);
-    assert.equal(stub.code, 1);
-    assert.match(stub.json.error.message, /not implemented in this worker/);
-    for (const g of ["bridge", "admin", "standalone"]) assert.equal((await h.run([g, "x"])).code, 1);
+    for (const g of ["agent", "bridge", "standalone"]) assert.equal((await h.run([g, "x"])).code, 2);
   });
 
   it("catalog --search filters locally over intents and keywords", async () => {

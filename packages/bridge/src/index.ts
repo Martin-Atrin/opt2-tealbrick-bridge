@@ -12,7 +12,7 @@ export { redact } from "./calls.ts";
 export type { BridgeContext } from "./context.ts";
 export { BRIDGE_VERSION, MCP_VERSIONS, SDK_MAJORS } from "./context.ts";
 export { type RelayOptions, type RelaySigner, type RelayStatus, type RunningRelay, startRelay } from "./relay.ts";
-export { type BridgeServerOptions, type RunningBridge, startBridge } from "./server.ts";
+export { type BridgeServerOptions, enrolBridge, ownInfraEnv, type RunningBridge, startBridge } from "./server.ts";
 export { jsonLogger, type Logger, silentLogger } from "./util.ts";
 
 /** Two forms of the same package (DECISION-LOG C5). */
