@@ -1,0 +1,9 @@
+{
+  "name": "@opt2-tealbrick/cli",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "tealbrick CLI: owner mode (drafts), agent mode (agent cards), local bridge relay, harness connection instructions.",
+  "exports": { ".": "./src/index.ts" },
+  "engines": { "node": ">=24" }
+}

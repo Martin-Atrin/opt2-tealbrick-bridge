@@ -1,0 +1,12 @@
+# Interim pipeline until the shared template from opt2-tealbrick-platform (ci/) exists.
+# Replace this file with the template include when Lead · Platform publishes it.
+when:
+  - event: [push, pull_request, manual]
+
+steps:
+  - name: check
+    image: node:24-alpine
+    commands:
+      - npm ci --no-audit --no-fund
+      - npm run check
+      - rm -rf node_modules

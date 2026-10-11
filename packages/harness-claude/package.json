@@ -1,0 +1,9 @@
+{
+  "name": "@opt2-tealbrick/harness-claude",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Claude Agent SDK harness adapter: session, sandbox, env scrub, skills. No policy.",
+  "exports": { ".": "./src/index.ts" },
+  "engines": { "node": ">=24" }
+}

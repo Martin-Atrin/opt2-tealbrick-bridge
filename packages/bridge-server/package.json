@@ -1,0 +1,9 @@
+{
+  "name": "@opt2-tealbrick/bridge-server",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Deployed bridge: Docker entry on the workspace private network.",
+  "exports": { ".": "./src/index.ts" },
+  "engines": { "node": ">=24" }
+}

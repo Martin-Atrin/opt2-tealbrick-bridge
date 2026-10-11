@@ -1,0 +1,9 @@
+{
+  "name": "@opt2-tealbrick/harness-eve",
+  "version": "0.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Eve harness adapter: MCP connection to the bridge. No policy.",
+  "exports": { ".": "./src/index.ts" },
+  "engines": { "node": ">=24" }
+}
