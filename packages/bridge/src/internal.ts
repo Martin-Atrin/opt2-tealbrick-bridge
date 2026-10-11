@@ -9,7 +9,7 @@ import { type InstanceAssertionClaims, type InstanceId, LIFETIME_S, TYP } from "
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import { isRefusal, type Json, type KeySet } from "./api.ts";
 import type { CallRouter } from "./calls.ts";
-import { type BridgeContext, SDK_MAJORS } from "./context.ts";
+import { type BridgeContext, SDK_MAJORS, sdkMajorOf } from "./context.ts";
 import type { AppRuntime } from "./table.ts";
 import { BridgeError, envelope, headerValue, isRecord, nowS, parseJson, readBody, sendError, sendJson, statusFor } from "./util.ts";
 
@@ -113,8 +113,8 @@ export class InternalApi {
       ctx.reject({ kind: "claim", code: "code_invalid" });
       throw new BridgeError("code_invalid", 403);
     }
-    const major = Number.parseInt(String(r.sdkVersion).split(".")[0] ?? "", 10);
-    if (!SDK_MAJORS.includes(major)) throw new BridgeError("sdk_major_unsupported", 400);
+    const major = sdkMajorOf(r.sdkVersion);
+    if (major === undefined || !SDK_MAJORS.includes(major)) throw new BridgeError("sdk_major_unsupported", 400);
     const service = entry.kind === "service" ? entry.service : undefined;
     if ((r.service ?? undefined) !== service) throw new BridgeError("code_invalid", 403);
     const app = t.apps.get(entry.ins);

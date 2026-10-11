@@ -110,10 +110,18 @@ describe(`deployed bridge (${real ? "real manifest crypto" : "test double"})`, (
   test("claim, key page and key fetch: only declared keys, values never in status", async () => {
     const api = w.api;
     const appKey = await api.generateKeyPair();
+    const tooNew = await fetch(`${w.internalUrl}/tb/v1/claim`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ code: APP_CODE, instancePublicKey: appKey.publicJwk, manifestDigest: w.bridge.ctx.table?.config.apps[0]?.manifestDigest, version: "1.0.0", sdkVersion: "2.0.0" }),
+    });
+    assert.equal(tooNew.status, 400, "SDK major 2 is not served (C44: 0.x and 1.x are major 1)");
+    assert.equal((await tooNew.json()).error.code, "sdk_major_unsupported");
+    // SDK 0.1.2 counts as major 1 and is accepted (C44); the refused claim did not use up the code
     const claim = await fetch(`${w.internalUrl}/tb/v1/claim`, {
       method: "POST",
       headers: { "content-type": "application/json" },
-      body: JSON.stringify({ code: APP_CODE, instancePublicKey: appKey.publicJwk, manifestDigest: w.bridge.ctx.table?.config.apps[0]?.manifestDigest, version: "1.0.0", sdkVersion: "1.0.0" }),
+      body: JSON.stringify({ code: APP_CODE, instancePublicKey: appKey.publicJwk, manifestDigest: w.bridge.ctx.table?.config.apps[0]?.manifestDigest, version: "1.0.0", sdkVersion: "0.1.2" }),
     });
     assert.equal(claim.status, 200);
     const cr = await claim.json();
