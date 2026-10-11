@@ -1,6 +1,6 @@
 /** Versions reported by `tealbrick --version --json` ({cli, bridge, spec}). */
 export const CLI_VERSION = "0.1.0";
-export const BRIDGE_VERSION = "0.1.0";
+export { BRIDGE_VERSION } from "@opt2-tealbrick/bridge";
 
 /**
  * Build-time Portal origin of this release. Empty until a release fixes it: the CLI then

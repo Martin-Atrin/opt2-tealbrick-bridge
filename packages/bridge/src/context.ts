@@ -13,7 +13,7 @@ import type { Rejection, Table } from "./table.ts";
 import type { Logger } from "./util.ts";
 import { nowS } from "./util.ts";
 
-export const BRIDGE_VERSION = "0.1.0";
+export const BRIDGE_VERSION = "0.1.2";
 export const SDK_MAJORS = [1];
 export const MCP_VERSIONS = ["2025-06-18", "2025-03-26"];
 

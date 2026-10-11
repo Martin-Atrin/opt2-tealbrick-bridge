@@ -10,7 +10,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "biome check . && node scripts/check-literals.ts",
     "test": "pnpm -r run build && node --test --test-timeout=60000 \"packages/*/test/**/*.test.ts\"",
-    "conformance": "node --test \"packages/*/test/conformance/**/*.test.ts\"",
+    "conformance": "pnpm -r run build && node --test --test-timeout=60000 packages/bridge/test/bridge.test.ts",
     "build": "pnpm -r run build"
   },
   "devDependencies": {
