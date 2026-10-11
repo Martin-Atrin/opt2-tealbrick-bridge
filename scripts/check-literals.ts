@@ -16,7 +16,8 @@ const banned: Array<[RegExp, string]> = [
   [/taild2144d|\bfoxy\b|\bneuu\b|fed-main/i, 'home infrastructure name'],
 ];
 // Product names may appear in harness docs, never in bridge code paths.
-const productInCore = /\b(knowledge|connect|gbrain|composio)\b/i;
+// (quoted product ids, upstream engine names; "connect" as an English verb is fine)
+const productInCore = /["'`](knowledge|connect)["'`]|\b(gbrain|composio|open.?notebook|hindsight)\b/i;
 
 const roots = ['packages'];
 const problems: string[] = [];

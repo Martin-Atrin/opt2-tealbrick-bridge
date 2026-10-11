@@ -30,3 +30,6 @@ secrets/
 .idea/
 .vscode/*
 !.vscode/extensions.json
+
+# opt2 CI runner scratch
+.tb-ci/

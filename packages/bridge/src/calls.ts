@@ -1,0 +1,452 @@
+/**
+ * The per-call routing pipeline (BRIDGE §8): resolve → select grant → validate input → gate() →
+ * before hooks → context hooks → config age → re-gate → forward → after hooks → result.
+ * The bridge gates; the app's authorize() decides run/hold (C10). The bridge never counts or holds.
+ */
+import type {
+  AfterHookResponse,
+  BeforeHookResponse,
+  ContextHookResponse,
+  HookEntry,
+  JsonObject,
+  JsonValue,
+  OpResult,
+} from "@opt2-tealbrick/spec/bridge";
+import { BRIDGE_OP_PATH, type BridgeOp, type CallId, type InstanceId, LIFETIME_S, TYP } from "@opt2-tealbrick/spec/credentials";
+import { type CrudAction, type DynamicCatalogEntry, type DynamicResolution, EFFECTS, type Effect, type HoldFamily } from "@opt2-tealbrick/spec/manifest";
+import type { Json, OperationView } from "./api.ts";
+import type { BridgeContext } from "./context.ts";
+import { type AppRuntime, grantKey, insRef, pauseFor, type Table, trustFor } from "./table.ts";
+import { BridgeError, isRecord, nowS } from "./util.ts";
+
+export type Caller =
+  | { type: "agent"; agt: `agt_${string}`; con: `con_${string}` }
+  | { type: "app"; ins: InstanceId; grant: string };
+
+export interface Target {
+  app: AppRuntime;
+  op: OperationView;
+  /** dynamic op: the concrete tool (list entry or `_call` tool) */
+  tool?: string;
+}
+
+export interface CallRequest {
+  caller: Caller;
+  target: Target;
+  input: Json;
+  idempotencyKey?: string;
+  parentCall?: CallId;
+  signal?: AbortSignal;
+}
+
+export type CallOutcome = OpResult<JsonValue>;
+
+const RESOLVE_TTL_MS = 5 * 60_000;
+const APP_TIMEOUT_MS = 30_000;
+const MAX_RESULT_BYTES = 4 * 1024 * 1024;
+
+/** Calls currently in flight: hook re-entry and companion depth (BRIDGE §8.2). */
+interface Active {
+  inHook: boolean;
+  depth: number;
+}
+
+export class CallRouter {
+  private readonly ctx: BridgeContext;
+  private readonly active = new Map<CallId, Active>();
+  private readonly resolveCache = new Map<string, { at: number; value: DynamicResolution }>();
+  private readonly catalogCache = new Map<string, { at: number; entries: DynamicCatalogEntry[] }>();
+  readonly counters = new Map<string, number>();
+
+  constructor(ctx: BridgeContext) {
+    this.ctx = ctx;
+    ctx.on("table", () => {
+      this.catalogCache.clear();
+    });
+  }
+
+  private count(key: string): void {
+    this.counters.set(key, (this.counters.get(key) ?? 0) + 1);
+  }
+
+  // ── bridge-only SDK calls (catalog, resolve, mark, scope summary; C16 B5) ──
+  async bridgeOp<T>(app: AppRuntime, bop: BridgeOp, body: Record<string, unknown>, timeoutMs = 2_000): Promise<T> {
+    const id = this.ctx.identity;
+    if (!id) throw new BridgeError("app_unavailable", 503);
+    const now = nowS();
+    const call = `call_${this.ctx.api.ulid()}` as CallId;
+    const claims = {
+      iss: this.ctx.bridgeRef,
+      sub: this.ctx.bridgeRef,
+      aud: insRef(app.entry.ins),
+      iat: now,
+      exp: now + LIFETIME_S.proof,
+      jti: this.ctx.api.ulid(),
+      call,
+      bop,
+      ...(typeof body.op === "string" ? { op: body.op } : {}),
+      in: this.ctx.api.digest(body as Json),
+    };
+    const proof = await this.ctx.api.signJws(TYP.callProof, claims, id.key);
+    const res = await this.ctx.fetch(new URL(`/tb/v1/bridge/${BRIDGE_OP_PATH[bop]}`, app.entry.internalUrl), {
+      method: "POST",
+      headers: { "content-type": "application/json", "TB-Call": proof },
+      body: JSON.stringify(body),
+      redirect: "error",
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    if (!res.ok) {
+      await res.body?.cancel().catch(() => undefined);
+      throw new BridgeError("app_error", 502, `bridge op ${bop} answered ${res.status}`);
+    }
+    return (await res.json()) as T;
+  }
+
+  async catalog(app: AppRuntime, op: string): Promise<DynamicCatalogEntry[]> {
+    const key = `${app.entry.ins}|${op}`;
+    const hit = this.catalogCache.get(key);
+    if (hit && Date.now() - hit.at < RESOLVE_TTL_MS) return hit.entries;
+    const entries = await this.bridgeOp<DynamicCatalogEntry[]>(app, "catalog", { op });
+    const list = Array.isArray(entries) ? entries.slice(0, 256) : [];
+    this.catalogCache.set(key, { at: Date.now(), entries: list });
+    return list;
+  }
+
+  async search(app: AppRuntime, op: string, query: string, limit?: number): Promise<DynamicCatalogEntry[]> {
+    const entries = await this.bridgeOp<DynamicCatalogEntry[]>(app, "catalog", { op, query, ...(limit ? { limit } : {}) });
+    return Array.isArray(entries) ? entries : [];
+  }
+
+  private async resolve(app: AppRuntime, op: string, tool: string): Promise<DynamicResolution> {
+    const key = `${app.entry.ins}|${op}|${tool}`;
+    const hit = this.resolveCache.get(key);
+    if (hit && Date.now() - hit.at < RESOLVE_TTL_MS) return hit.value;
+    let value: DynamicResolution;
+    try {
+      value = await this.bridgeOp<DynamicResolution>(app, "resolve", { op, tool });
+    } catch {
+      throw new BridgeError("dynamic_resolve_failed", 503);
+    }
+    if (!isRecord(value) || !Array.isArray(value.crud) || !(EFFECTS as readonly string[]).includes(value.effect as string)) {
+      throw new BridgeError("dynamic_resolve_failed", 503);
+    }
+    if (this.resolveCache.size > 5000) this.resolveCache.clear();
+    this.resolveCache.set(key, { at: Date.now(), value });
+    return value;
+  }
+
+  /** Effective op for gate() and hooks: dynamic ops take crud/effect/holdFamily from resolve, within ceilings. */
+  private async effectiveOp(t: Target): Promise<OperationView> {
+    const op = t.op;
+    if (op.standard || !op.dynamic) return op;
+    if (!t.tool) throw new BridgeError("input_invalid", 400, "dynamic tool missing");
+    const r = await this.resolve(t.app, op.id, t.tool);
+    const ceilingIdx = EFFECTS.indexOf(op.dynamic.effectCeiling);
+    if (!r.crud.every((c) => op.dynamic?.crudCeiling.includes(c)) || EFFECTS.indexOf(r.effect) > ceilingIdx) {
+      throw new BridgeError("dynamic_ceiling_exceeded", 403);
+    }
+    return { ...op, crud: r.crud as CrudAction[], effect: r.effect as Effect, ...(r.holdFamily ? { holdFamily: r.holdFamily as HoldFamily } : {}) };
+  }
+
+  private selectGrant(t: Table, caller: Caller, target: InstanceId): string {
+    if (caller.type === "app") return caller.grant;
+    const g = t.grants.get(grantKey(`tb:agt:${caller.agt}`, insRef(target)));
+    if (!g) throw new BridgeError("no_grant", 403);
+    return g.token;
+  }
+
+  private runGate(t: Table, caller: Caller, target: Target, op: OperationView, grant: string): void {
+    const now = nowS();
+    const paused =
+      caller.type === "agent"
+        ? pauseFor(t, caller.agt, caller.con, target.app.entry.ins)
+        : { ...pauseFor(t, undefined, undefined, target.app.entry.ins), instance: t.pausedInstances.has(target.app.entry.ins) || t.pausedInstances.has(caller.ins) };
+    const d = this.ctx.api.gate({ paused, grant, trust: trustFor(t, target.app.entry.ins, now), op, declaredScopeTypes: target.app.scopeTypes });
+    if (d.decision !== "pass") throw new BridgeError(d.reason, undefined as never);
+    // companion: the presented grant's subject must be the asserting instance (CREDENTIALS §11)
+    if (caller.type === "app") {
+      const v = this.ctx.api.verifyGrant(grant, trustFor(t, target.app.entry.ins, now));
+      if (!("claims" in v) || v.claims.sub !== insRef(caller.ins)) throw new BridgeError("grant_invalid", 403);
+    }
+  }
+
+  private matchingHooks(t: Table, phase: HookEntry["phase"], target: Target, op: OperationView): HookEntry[] {
+    return t.hooks
+      .filter((h) => h.phase === phase)
+      .filter((h) => h.match.products.includes("*") || h.match.products.includes(target.app.entry.product))
+      .filter((h) => !h.match.operations || h.match.operations.includes(op.id))
+      .filter((h) => !h.match.effects || h.match.effects.includes(op.effect))
+      .sort((a, b) => a.order - b.order || a.product.localeCompare(b.product));
+  }
+
+  private async callHook<R>(t: Table, h: HookEntry, call: CallId, request: Record<string, unknown>, callerRef: string, input: Json | undefined): Promise<R> {
+    const app = t.apps.get(h.ins);
+    if (!app || t.pausedInstances.has(h.ins)) throw new BridgeError("hook_failed", 503);
+    const id = this.ctx.identity;
+    if (!id) throw new BridgeError("hook_failed", 503);
+    const now = nowS();
+    const context = (request.context ?? {}) as Json;
+    const proof = await this.ctx.api.signJws(
+      TYP.callProof,
+      {
+        iss: this.ctx.bridgeRef,
+        sub: callerRef,
+        aud: insRef(h.ins),
+        iat: now,
+        exp: now + LIFETIME_S.proof,
+        jti: this.ctx.api.ulid(),
+        call,
+        hook: h.hookId,
+        phase: h.phase,
+        ctx: this.ctx.api.digest(context),
+        ...(input !== undefined ? { in: this.ctx.api.digest(input) } : {}),
+      },
+      id.key,
+    );
+    const started = Date.now();
+    try {
+      const res = await this.ctx.fetch(new URL(`/tb/v1/hooks/${h.hookId}`, app.entry.internalUrl), {
+        method: "POST",
+        headers: { "content-type": "application/json", "TB-Call": proof },
+        body: JSON.stringify(request),
+        redirect: "error",
+        signal: AbortSignal.timeout(Math.min(Math.max(h.timeoutMs, 100), 2_000)),
+      });
+      if (!res.ok) throw new Error(String(res.status));
+      return (await res.json()) as R;
+    } finally {
+      this.count(`hook|${h.id}|${Date.now() - started > h.timeoutMs ? "slow" : "done"}`);
+    }
+  }
+
+  /** Runs one call through the pipeline. Throws BridgeError for refusals; returns ok/held results. */
+  async route(req: CallRequest): Promise<{ call: CallId; result: CallOutcome }> {
+    const ctx = this.ctx;
+    const t0 = ctx.table;
+    if (!t0) throw new BridgeError("config_expired", 503);
+    const call = `call_${ctx.api.ulid()}` as CallId;
+    const started = Date.now();
+    const { caller, target } = req;
+    const callerRef = caller.type === "agent" ? `tb:agt:${caller.agt}` : `tb:ins:${caller.ins}`;
+    let code = "ok";
+    // companion re-entry and depth (BRIDGE §8.2)
+    let depth = 0;
+    if (caller.type === "app" && req.parentCall) {
+      const parent = this.active.get(req.parentCall);
+      if (parent?.inHook) throw new BridgeError("hook_reentry", 409);
+      depth = (parent?.depth ?? 0) + 1;
+      if (depth > 3) throw new BridgeError("call_depth_exceeded", 409);
+    }
+    const active: Active = { inHook: false, depth };
+    this.active.set(call, active);
+    try {
+      if (target.app.down || !target.app.manifest) throw new BridgeError("app_unavailable", 503);
+      const op = await this.effectiveOp(target);
+      const grant = this.selectGrant(t0, caller, target.app.entry.ins);
+      // 4. input against the op schema (dynamic: the fixed DynamicCallInput shape)
+      const v = ctx.api.validateInput(target.op, req.input);
+      if (!v.ok) throw new BridgeError("input_invalid", 400, v.errors.slice(0, 3).join("; "));
+      if (!target.op.standard && target.op.idempotency === "required" && !req.idempotencyKey) {
+        throw new BridgeError("input_invalid", 400, "idempotency key required");
+      }
+      // 5. gate
+      this.runGate(t0, caller, target, op, grant);
+      const callInfo = {
+        id: call,
+        ws: t0.ws,
+        caller:
+          caller.type === "agent"
+            ? { type: "agent" as const, id: caller.agt, ...(t0.agents.get(caller.agt) ? { mode: t0.agents.get(caller.agt)?.mode } : {}) }
+            : { type: "app" as const, id: caller.ins },
+        target: {
+          instance: target.app.entry.ins,
+          product: target.app.entry.product,
+          op: op.id,
+          crud: op.crud,
+          effect: op.effect,
+          ...(!op.standard && op.holdFamily ? { holdFamily: op.holdFamily } : {}),
+        },
+        input: req.input as JsonValue,
+      };
+      let context: JsonObject = {};
+      // 6. before hooks (fail closed)
+      active.inHook = true;
+      for (const h of this.matchingHooks(t0, "before", target, op)) {
+        let r: BeforeHookResponse;
+        try {
+          r = await this.callHook<BeforeHookResponse>(t0, h, call, { phase: "before", call: callInfo, context }, callerRef, req.input);
+        } catch {
+          throw new BridgeError("hook_failed", 503, `hook ${h.id} failed`);
+        }
+        if (!isRecord(r) || typeof r.allow !== "boolean") throw new BridgeError("hook_failed", 503, `hook ${h.id} bad answer`);
+        if (!r.allow) throw new BridgeError("hook_denied", 403, typeof r.reason === "string" ? r.reason.slice(0, 200) : `denied by ${h.id}`);
+      }
+      // 7. context hooks (namespaced additions)
+      for (const h of this.matchingHooks(t0, "context", target, op)) {
+        let r: ContextHookResponse;
+        try {
+          r = await this.callHook<ContextHookResponse>(t0, h, call, { phase: "context", call: callInfo, context }, callerRef, req.input);
+        } catch {
+          throw new BridgeError("hook_failed", 503, `hook ${h.id} failed`);
+        }
+        if (!isRecord(r) || !isRecord(r.add)) throw new BridgeError("hook_failed", 503, `hook ${h.id} bad answer`);
+        for (const [k, val] of Object.entries(r.add)) {
+          if (!k.startsWith(`${h.product}.`)) throw new BridgeError("hook_failed", 503, `hook ${h.id} wrote outside its namespace`);
+          context = { ...context, [k]: val as JsonValue };
+        }
+      }
+      active.inHook = false;
+      // 8. config age; 9. re-gate on the current table (a pause applied during hooks wins)
+      if (ctx.configExpired()) throw new BridgeError("config_expired", 503);
+      const t1 = ctx.table ?? t0;
+      const target1 = t1 === t0 ? target : { ...target, app: t1.apps.get(target.app.entry.ins) ?? target.app };
+      const grant1 = t1 === t0 ? grant : this.selectGrant(t1, caller, target.app.entry.ins);
+      this.runGate(t1, caller, target1, op, grant1);
+      // 10. forward
+      const result = await this.forward(t1, call, callerRef, target1, op.id, grant1, req, context);
+      // 12. after hooks (ok only)
+      if (result.status === "ok") {
+        let output: JsonValue = result.output;
+        active.inHook = true;
+        for (const h of this.matchingHooks(t1, "after", target1, op)) {
+          let r: AfterHookResponse;
+          try {
+            r = await this.callHook<AfterHookResponse>(t1, h, call, { phase: "after", call: callInfo, context, output }, callerRef, req.input);
+            if (!isRecord(r)) throw new Error("shape");
+          } catch {
+            void this.bridgeOp(target1.app, "mark", { call, mark: "after_failed" }).catch(() => undefined);
+            throw new BridgeError("after_failed", 503, `after hook ${h.id} failed; output withheld`);
+          }
+          if (r.output !== undefined) output = r.output as JsonValue;
+          if (Array.isArray(r.redactions)) output = redact(output, r.redactions);
+        }
+        active.inHook = false;
+        return { call, result: { ...result, output: output as JsonValue } };
+      }
+      return { call, result };
+    } catch (e) {
+      code = e instanceof BridgeError ? e.code : "app_error";
+      throw e;
+    } finally {
+      this.active.delete(call);
+      this.count(`call|${target.app.entry.product}|${code}`);
+      ctx.log.info("bridge.call", {
+        call,
+        ...(caller.type === "agent" ? { agt: caller.agt } : { ins: caller.ins }),
+        product: target.app.entry.product,
+        op: target.op.id,
+        decision: code === "ok" ? "forwarded" : "refused",
+        code,
+        ms: Date.now() - started,
+        inDigest: safeDigest(ctx, req.input),
+      });
+    }
+  }
+
+  private async forward(t: Table, call: CallId, callerRef: string, target: Target, opId: string, grant: string, req: CallRequest, context: JsonObject): Promise<CallOutcome> {
+    const id = this.ctx.identity;
+    if (!id) throw new BridgeError("app_unavailable", 503);
+    const grantClaims = t.grants.get(grantKey(callerRef, insRef(target.app.entry.ins)))?.claims;
+    const gjti = grantClaims?.jti ?? peekJti(grant);
+    const input = req.input;
+    const now = nowS();
+    const proof = await this.ctx.api.signJws(
+      TYP.callProof,
+      {
+        iss: this.ctx.bridgeRef,
+        sub: callerRef,
+        aud: insRef(target.app.entry.ins),
+        iat: now,
+        exp: now + LIFETIME_S.proof,
+        jti: this.ctx.api.ulid(),
+        call,
+        gjti,
+        op: opId,
+        in: this.ctx.api.digest(input),
+        ctx: this.ctx.api.digest(context as Json),
+      },
+      id.key,
+    );
+    const body = JSON.stringify({ input, context, ...(req.idempotencyKey ? { idempotencyKey: req.idempotencyKey } : {}) });
+    const url = new URL(`/tb/v1/ops/${opId}`, target.app.entry.internalUrl);
+    const send = () =>
+      this.ctx.fetch(url, {
+        method: "POST",
+        headers: { "content-type": "application/json", authorization: `Bearer ${grant}`, "TB-Call": proof },
+        body,
+        redirect: "error",
+        signal: req.signal ? AbortSignal.any([req.signal, AbortSignal.timeout(APP_TIMEOUT_MS)]) : AbortSignal.timeout(APP_TIMEOUT_MS),
+      });
+    let res: Response;
+    try {
+      res = await send();
+    } catch (e) {
+      if (isTimeout(e)) throw new BridgeError("app_timeout", 504);
+      // one retry only if the connection failed before any byte was sent
+      if (!isPreConnect(e)) throw new BridgeError("app_unavailable", 503);
+      try {
+        res = await send();
+      } catch (e2) {
+        throw new BridgeError(isTimeout(e2) ? "app_timeout" : "app_unavailable", isTimeout(e2) ? 504 : 503);
+      }
+    }
+    const text = await res.text();
+    if (Buffer.byteLength(text) > MAX_RESULT_BYTES) throw new BridgeError("payload_too_large", 502);
+    let parsed: unknown;
+    try {
+      parsed = text ? JSON.parse(text) : undefined;
+    } catch {
+      throw new BridgeError("app_error", 502, "app answered non-JSON");
+    }
+    if (res.status === 200 && isRecord(parsed) && parsed.status === "ok") return parsed as CallOutcome;
+    if (res.status === 202 && isRecord(parsed) && parsed.status === "held" && typeof parsed.holdId === "string") return parsed as CallOutcome;
+    if (isRecord(parsed) && isRecord(parsed.error) && typeof parsed.error.code === "string") {
+      // app-side codes pass through unchanged
+      throw new BridgeError(parsed.error.code, res.status, typeof parsed.error.message === "string" ? parsed.error.message.slice(0, 500) : parsed.error.code);
+    }
+    throw new BridgeError("app_error", 502, `app answered ${res.status}`);
+  }
+}
+
+function peekJti(token: string): string {
+  try {
+    const p = JSON.parse(Buffer.from(token.split(".")[1] ?? "", "base64url").toString("utf8")) as { jti?: string };
+    return p.jti ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function safeDigest(ctx: BridgeContext, v: Json): string | undefined {
+  try {
+    return ctx.api.digest(v);
+  } catch {
+    return undefined;
+  }
+}
+
+const isTimeout = (e: unknown) => e instanceof Error && (e.name === "TimeoutError" || e.name === "AbortError");
+const PRE_CONNECT = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "ENETUNREACH", "EHOSTUNREACH", "UND_ERR_CONNECT_TIMEOUT"]);
+function isPreConnect(e: unknown): boolean {
+  const cause = (e as { cause?: { code?: string } })?.cause;
+  return !!cause?.code && PRE_CONNECT.has(cause.code);
+}
+
+/** Removes the members named by RFC 6901 pointers (after-hook `redactions`). */
+export function redact(value: JsonValue, pointers: readonly unknown[]): JsonValue {
+  const copy = structuredClone(value);
+  for (const p of pointers) {
+    if (typeof p !== "string" || !p.startsWith("/")) continue;
+    const parts = p.slice(1).split("/").map((s) => s.replace(/~1/g, "/").replace(/~0/g, "~"));
+    let node: unknown = copy;
+    for (let i = 0; i < parts.length - 1; i++) {
+      node = isRecord(node) || Array.isArray(node) ? (node as Record<string, unknown>)[parts[i] as string] : undefined;
+    }
+    const last = parts.at(-1) as string;
+    if (Array.isArray(node)) {
+      const i = Number(last);
+      if (Number.isInteger(i) && i >= 0 && i < node.length) node.splice(i, 1);
+    } else if (isRecord(node)) delete node[last];
+  }
+  return copy;
+}
