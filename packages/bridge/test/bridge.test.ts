@@ -69,7 +69,7 @@ describe(`deployed bridge (${real ? "real manifest crypto" : "test double"})`, (
 
   test("held results come back as a handle, not an error", async () => {
     const s = await session(w);
-    const r = await call(w, s, "notes__notes_send", {}, { "tealbrick/idempotencyKey": "send-12345678" });
+    const r = await call(w, s, "notes__notes_send", {}, { "tealbrick/idempotencyKey": "idem-call-two" });
     assert.equal(r.isError, false);
     assert.equal(r.structuredContent.status, "held");
     assert.equal(r.structuredContent.checkWith, "notes__tb_hold_status");
@@ -84,9 +84,9 @@ describe(`deployed bridge (${real ? "real manifest crypto" : "test double"})`, (
     assert.equal(del.structuredContent.error.code, "unknown_tool");
     const noKey = await call(w, s, "notes__notes_create", { title: "a" });
     assert.equal(noKey.structuredContent.error.code, "input_invalid");
-    const ok = await call(w, s, "notes__notes_create", { title: "a" }, { "tealbrick/idempotencyKey": "key-12345678" });
+    const ok = await call(w, s, "notes__notes_create", { title: "a" }, { "tealbrick/idempotencyKey": "idem-call-one" });
     assert.equal(ok.isError, undefined);
-    assert.equal(w.appLog.ops.at(-1)?.body.idempotencyKey, "key-12345678");
+    assert.equal(w.appLog.ops.at(-1)?.body.idempotencyKey, "idem-call-one");
   });
 
   test("skills: resources and the fallback tool render agent variables", async () => {
