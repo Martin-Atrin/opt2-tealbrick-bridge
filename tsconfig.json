@@ -12,7 +12,18 @@
     "verbatimModuleSyntax": true,
     "skipLibCheck": true,
     "resolveJsonModule": true,
-    "types": ["node"]
+    "types": [
+      "node"
+    ],
+    "paths": {
+      "@opt2-tealbrick/bridge": [
+        "./packages/bridge/src/index.ts"
+      ]
+    }
   },
-  "include": ["packages/*/src/**/*.ts", "packages/*/test/**/*.ts", "scripts/**/*.ts"]
+  "include": [
+    "packages/*/src/**/*.ts",
+    "packages/*/test/**/*.ts",
+    "scripts/**/*.ts"
+  ]
 }

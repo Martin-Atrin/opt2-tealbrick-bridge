@@ -4,5 +4,13 @@
   "paths": [
     "."
   ],
-  "images": []
+  "images": [
+    {
+      "name": "opt2-tealbrick-bridge-server",
+      "product": "bridge",
+      "productKind": "bridge",
+      "context": ".",
+      "dockerfile": "packages/bridge-server/Dockerfile"
+    }
+  ]
 }

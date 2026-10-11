@@ -59,7 +59,7 @@ export async function ensureEnrolled(ctx: BridgeContext, enrolCode: string | und
   ctx.log.info("bridge.enrolled", { bridge: r.bridgeId, ws: r.workspaceId, reenrol: !!existing });
 }
 
-async function portalRequest(ctx: BridgeContext, method: "GET" | "POST", pathAndQuery: string, body?: unknown, timeoutMs = 30_000): Promise<Response> {
+async function portalRequest(ctx: BridgeContext, method: "GET" | "POST", pathAndQuery: string, body?: unknown, timeoutMs = 30_000, abort?: AbortSignal): Promise<Response> {
   const id = ctx.identity;
   if (!id) throw new BridgeError("not_enrolled", 500);
   const raw = body === undefined ? undefined : Buffer.from(JSON.stringify(body), "utf8");
@@ -76,7 +76,7 @@ async function portalRequest(ctx: BridgeContext, method: "GET" | "POST", pathAnd
     headers: { "TB-Assert": assertion, ...(raw ? { "content-type": "application/json" } : {}) },
     ...(raw ? { body: raw } : {}),
     redirect: "error",
-    signal: AbortSignal.timeout(timeoutMs),
+    signal: abort ? AbortSignal.any([abort, AbortSignal.timeout(timeoutMs)]) : AbortSignal.timeout(timeoutMs),
   });
 }
 
@@ -313,7 +313,7 @@ export async function runConfigLoop(ctx: BridgeContext, signal: AbortSignal): Pr
     if (!id) return;
     const after = ctx.table?.rev ?? 0;
     try {
-      const res = await portalRequest(ctx, "GET", `${id.configPath}?after=${after}&wait=60`, undefined, 75_000);
+      const res = await portalRequest(ctx, "GET", `${id.configPath}?after=${after}&wait=60`, undefined, 75_000, signal);
       if (res.status === 304) {
         ctx.lastPull = nowS();
         backoff = 15_000;

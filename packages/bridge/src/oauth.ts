@@ -208,7 +208,7 @@ export class OAuthServer {
     if (!id || this.ctx.table?.standalone) return htmlPage(res, 400, "Not available", "<p>Approve in Portal is not available for this workspace. Use a pairing code.</p>");
     const now = nowS();
     const ref = this.ctx.bridgeRef;
-    const state = await this.ctx.api.signJws(
+    const state = await this.ctx.api.signAssertion(
       TYP.pairState,
       {
         iss: ref,
