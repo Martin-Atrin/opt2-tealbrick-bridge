@@ -1,0 +1,32 @@
+# dependencies and build output
+node_modules/
+dist/
+build/
+out/
+.next/
+.astro/
+coverage/
+.turbo/
+*.tsbuildinfo
+DerivedData/
+.build/
+
+# secrets: never commit (see README "No secrets")
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.p8
+*.mobileprovision
+.railway/
+.vercel/
+secrets/
+
+# local noise
+.DS_Store
+*.log
+.idea/
+.vscode/*
+!.vscode/extensions.json
