@@ -9,9 +9,9 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "biome check . && node scripts/check-literals.ts",
-    "test": "pnpm -r run build && node --test --test-timeout=60000 \"packages/*/test/**/*.test.ts\"",
-    "conformance": "pnpm -r run build && node --test --test-timeout=60000 packages/bridge/test/bridge.test.ts",
-    "build": "pnpm -r run build"
+    "test": "tsc -p packages/bridge/tsconfig.build.json && node --test --test-timeout=60000 \"packages/*/test/**/*.test.ts\"",
+    "conformance": "tsc -p packages/bridge/tsconfig.build.json && node --test --test-timeout=60000 packages/bridge/test/bridge.test.ts",
+    "build": "tsc -p packages/bridge/tsconfig.build.json && tsc -p packages/bridge-server/tsconfig.build.json && tsc -p packages/cli/tsconfig.build.json && tsc -p packages/harness-claude/tsconfig.build.json && tsc -p packages/harness-eve/tsconfig.build.json"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",
