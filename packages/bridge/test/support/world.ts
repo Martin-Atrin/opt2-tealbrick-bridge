@@ -8,9 +8,11 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { StatusReport, WorkspaceConfig } from "@opt2-tealbrick/spec/bridge";
+import type { Ed25519KeyPair, ManifestApi } from "../../src/api.ts";
+import { manifestApi } from "../../src/manifest-adapter.ts";
 import { type RunningBridge, startBridge } from "../../src/server.ts";
 import { silentLogger } from "../../src/util.ts";
-import { fakeApi, fakeKey, fakeSign } from "./fake-api.ts";
+import { fakeApi } from "./fake-api.ts";
 
 export const WS = "ws_01HZZZZZZZZZZZZZZZZZZZZZZZ";
 export const BRG = "brg_01HZZZZZZZZZZZZZZZZZZZZZZZ";
@@ -64,17 +66,21 @@ export interface World {
   publicUrl: string;
   internalUrl: string;
   portalKid: string;
-  agentKey: ReturnType<typeof fakeKey>;
+  api: ManifestApi;
+  agentKey: Ed25519KeyPair;
+  real: boolean;
+  agentAssertion(agt: string, con: string): Promise<string>;
+  signRaw(input: string): Promise<string>;
   acks: StatusReport[];
   appLog: AppLog;
   hookMode: { mode: "allow" | "deny" | "fail" };
   /** publish a new config revision (tweak: mutate the base config) */
-  publish(tweak?: (c: WorkspaceConfig) => void): number;
+  publish(tweak?: (c: WorkspaceConfig) => void): Promise<number>;
   rev(): number;
   close(): Promise<void>;
   agentToken(): Promise<string>;
   mcp(token: string, body: unknown, session?: string): Promise<{ status: number; json: any; session: string | null }>;
-  signPortal(typ: string, claims: object): string;
+  signPortal(typ: string, claims: object): Promise<string>;
 }
 
 async function listen(handler: (req: IncomingMessage, res: ServerResponse) => void): Promise<{ server: Server; url: string }> {
@@ -90,17 +96,18 @@ async function body(req: IncomingMessage): Promise<any> {
   return t ? JSON.parse(t) : undefined;
 }
 
-export async function makeWorld(opts: { withHook?: boolean } = {}): Promise<World> {
-  const api = fakeApi();
-  const portalKey = fakeKey();
-  const agentKey = fakeKey();
+export async function makeWorld(opts: { withHook?: boolean; real?: boolean } = {}): Promise<World> {
+  const real = !!opts.real;
+  const api = real ? manifestApi() : fakeApi();
+  const portalKey = await api.generateKeyPair();
+  const agentKey = await api.generateKeyPair();
   const acks: StatusReport[] = [];
   const appLog: AppLog = { ops: [], hooks: [] };
   const hookMode = { mode: "allow" as "allow" | "deny" | "fail" };
-  let bridgeKid = "";
+  let bridgeJwk: Ed25519KeyPair["publicJwk"] | undefined;
   let configJws = "";
   let rev = 0;
-  const sign = (typ: string, claims: object) => fakeSign(typ, claims, portalKey.kid);
+  const sign = (typ: string, claims: object) => api.signJws(typ as never, claims, portalKey);
 
   // ── fake app (notes) and hook app (guard) ──
   const app = await listen(async (req, res) => {
@@ -137,9 +144,9 @@ export async function makeWorld(opts: { withHook?: boolean } = {}): Promise<Worl
   });
 
   const brgRef = `tb:brg:${BRG}`;
-  const grant = (sub: string, crud: string[], extra: Record<string, unknown> = {}) =>
+  const grant = async (sub: string, crud: string[], extra: Record<string, unknown> = {}) =>
     sign("tb-grant+jwt", { iss: "tb:portal", sub, aud: `tb:ins:${INS}`, iat: now(), exp: now() + 43200, jti: api.ulid(), ws: WS, cnf: { brg: BRG }, crud, mode: "free", held: [], caps: {}, wf: [], polrev: 1, ...extra });
-  const slice = sign("tb-slice+jws", { v: 1, iss: "tb:portal", sub: `tb:ins:${INS}`, aud: `tb:ins:${INS}`, iat: now(), exp: now() + 43200, jti: api.ulid(), ws: WS, rev: 1, ins: INS, product: "notes" });
+  const slice = await sign("tb-slice+jws", { v: 1, iss: "tb:portal", sub: `tb:ins:${INS}`, aud: `tb:ins:${INS}`, iat: now(), exp: now() + 43200, jti: api.ulid(), ws: WS, rev: 1, ins: INS, product: "notes" });
   const base: WorkspaceConfig = {
     v: 1,
     iss: "tb:portal",
@@ -157,7 +164,7 @@ export async function makeWorld(opts: { withHook?: boolean } = {}): Promise<Worl
     revoked: { jtis: [] },
     connections: [{ con: CON, agt: AGT, method: "key", gen: 1, publicKey: agentKey.publicJwk, status: "active" }],
     instanceKeys: [],
-    grants: [grant(`tb:agt:${AGT}`, ["read", "create"])],
+    grants: [await grant(`tb:agt:${AGT}`, ["read", "create"])],
     apps: [
       { ins: INS as never, product: "notes", version: "1.0.0", sdkMajor: 1, manifestDigest: api.manifestDigest(notesManifest as never), internalUrl: app.url, entitled: true, slice },
       ...(opts.withHook ? [{ ins: HOOKINS as never, product: "guard", version: "1.0.0", sdkMajor: 1, manifestDigest: api.manifestDigest(hookManifest as never), internalUrl: hookApp.url, entitled: true, slice }] : []),
@@ -171,7 +178,7 @@ export async function makeWorld(opts: { withHook?: boolean } = {}): Promise<Worl
     keyRequirements: [{ name: "NOTES_API_KEY", label: "Notes key", ins: INS, product: "notes", required: true, source: "account_default", usedBy: ["app"] }],
     enrolCodes: [{ digest: api.opaqueDigest(APP_CODE), kind: "instance", ins: INS, product: "notes", exp: now() + 3600 }],
   };
-  const publish = (tweak?: (c: WorkspaceConfig) => void): number => {
+  const publish = async (tweak?: (c: WorkspaceConfig) => void): Promise<number> => {
     const c: WorkspaceConfig = structuredClone(base);
     rev += 1;
     c.rev = rev;
@@ -179,21 +186,26 @@ export async function makeWorld(opts: { withHook?: boolean } = {}): Promise<Worl
     c.exp = now() + 43200;
     c.jti = api.ulid();
     tweak?.(c);
-    configJws = sign("tb-config+jws", c);
+    configJws = await sign("tb-config+jws", c);
     return rev;
   };
-  publish();
+  await publish();
 
   const portal = await listen(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://x");
+    const chunks: Buffer[] = [];
+    for await (const c of req) chunks.push(c as Buffer);
+    const raw = Buffer.concat(chunks);
     if (url.pathname === "/api/v1/bridge/enrol") {
-      const b = await body(req);
-      bridgeKid = `kid-${b.publicKey.x.slice(0, 20)}`;
+      const b = JSON.parse(raw.toString("utf8"));
+      bridgeJwk = b.publicKey;
       return res
         .writeHead(200, { "content-type": "application/json" })
         .end(JSON.stringify({ bridgeId: BRG, workspaceId: WS, portalKeys: [{ jwk: portalKey.publicJwk, status: "active" }], configPath: "/api/v1/bridge/config", ackPath: "/api/v1/bridge/ack", waitMaxS: 60 }));
     }
-    if (!String(req.headers["tb-assert"] ?? "").endsWith(`.sig-${bridgeKid}`)) return res.writeHead(401).end();
+    const keys = bridgeJwk ? api.keySetFrom({ keys: [bridgeJwk] }, `tb:brg:${BRG}`) : { keys: [] };
+    const v = api.verifyAssertion(String(req.headers["tb-assert"] ?? ""), keys, { typ: "tb-bridge-assert+jwt", aud: "tb:portal", iss: [`tb:brg:${BRG}`], now: now(), maxLifetimeS: 60, request: { method: req.method ?? "GET", pathAndQuery: req.url ?? "/", ...(raw.length ? { body: raw } : {}) } });
+    if (!v.ok) return res.writeHead(401).end();
     if (url.pathname === "/api/v1/bridge/config") {
       const after = Number(url.searchParams.get("after"));
       const deadline = Date.now() + 300;
@@ -202,7 +214,7 @@ export async function makeWorld(opts: { withHook?: boolean } = {}): Promise<Worl
       return res.writeHead(304).end();
     }
     if (url.pathname === "/api/v1/bridge/ack") {
-      acks.push(await body(req));
+      acks.push(JSON.parse(raw.toString("utf8")));
       return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ accepted: true, configRevision: rev }));
     }
     res.writeHead(404).end();
@@ -220,8 +232,11 @@ export async function makeWorld(opts: { withHook?: boolean } = {}): Promise<Worl
   // wait for the first config
   for (let i = 0; i < 100 && !bridge.ctx.table; i++) await new Promise((r) => setTimeout(r, 20));
 
+  const agentAssertion = (agt: string, con: string) => api.signAssertion("tb-agent-assert+jwt", { iss: `tb:agt:${agt}`, sub: `tb:agt:${agt}`, aud: brgRef, iat: now(), exp: now() + 60, jti: api.ulid(), con }, agentKey);
+  const signRaw = async (input: string): Promise<string> =>
+    real ? Buffer.from(await crypto.subtle.sign("Ed25519", agentKey.privateKey, new TextEncoder().encode(input))).toString("base64url") : `sig-${agentKey.kid}`;
   const agentToken = async () => {
-    const assertion = fakeSign("tb-agent-assert+jwt", { iss: `tb:agt:${AGT}`, sub: `tb:agt:${AGT}`, aud: brgRef, iat: now(), exp: now() + 60, jti: api.ulid(), con: CON }, agentKey.kid);
+    const assertion = await agentAssertion(AGT, CON);
     const r = await fetch(`${publicUrl}/oauth/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion }) });
     const j = (await r.json()) as { access_token: string };
     return j.access_token;
@@ -237,7 +252,11 @@ export async function makeWorld(opts: { withHook?: boolean } = {}): Promise<Worl
     publicUrl,
     internalUrl,
     portalKid: portalKey.kid,
+    api,
     agentKey,
+    real,
+    agentAssertion,
+    signRaw,
     acks,
     appLog,
     hookMode,
