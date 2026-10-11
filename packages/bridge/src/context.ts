@@ -13,19 +13,11 @@ import type { Rejection, Table } from "./table.ts";
 import type { Logger } from "./util.ts";
 import { nowS } from "./util.ts";
 
-export const BRIDGE_VERSION = "0.1.4";
+export const BRIDGE_VERSION = "0.1.5";
 export const SDK_MAJORS = [1];
 
-/**
- * SDK major of a reported SDK semver (C35 item 6 / C44): SDK 0.x counts as major 1.
- * TODO(manifest 0.1.2): replace with `sdkMajorOf` from @opt2-tealbrick/manifest once released (C44).
- */
-export function sdkMajorOf(version: unknown): number | undefined {
-  const m = /^(\d+)\.\d+\.\d+(?:-[0-9A-Za-z.-]+)?$/.exec(String(version));
-  if (!m) return undefined;
-  const major = Number(m[1]);
-  return major === 0 ? 1 : major;
-}
+/** The SDK major this bridge is built for; `sdkMajorServed` (manifest, C44) also serves the one before. */
+export const SDK_CURRENT_MAJOR = 1;
 export const MCP_VERSIONS = ["2025-06-18", "2025-03-26"];
 
 export interface BridgeOptions {

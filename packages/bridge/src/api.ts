@@ -58,6 +58,8 @@ export interface ManifestApi {
   // C21 additions
   /** TB_KEK / TB_KEK_PREVIOUS env value → KEK (manifest owns the encoding rules, C35). */
   kekFromEnv(value: string): Kek;
+  /** C44: SDK 0.x counts as major 1; current major and the one before are served. */
+  sdkMajorServed(version: string, currentMajor: number): boolean;
   seal(plaintext: Uint8Array, kek: Kek, aad: string): SealedBlob;
   unseal(blob: SealedBlob, keks: { current: Kek; previous?: Kek }, aad: string): Uint8Array;
   exportPrivateKey(pair: Ed25519KeyPair): Promise<Uint8Array>;

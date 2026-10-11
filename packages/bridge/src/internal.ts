@@ -6,11 +6,11 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AppStatus, AppStatusResponse, CallEnvelope, ClaimRequest, ClaimResponse, KeyFetchResponse } from "@opt2-tealbrick/spec/bridge";
 import { type InstanceAssertionClaims, type InstanceId, LIFETIME_S, TYP } from "@opt2-tealbrick/spec/credentials";
-import type { Manifest } from "@opt2-tealbrick/spec/manifest";
+import type { KeyRequirement, Manifest } from "@opt2-tealbrick/spec/manifest";
 import { isRefusal, type Json, type KeySet } from "./api.ts";
 import type { CallRouter } from "./calls.ts";
-import { type BridgeContext, SDK_MAJORS, sdkMajorOf } from "./context.ts";
-import type { AppRuntime } from "./table.ts";
+import { type BridgeContext, SDK_CURRENT_MAJOR } from "./context.ts";
+import type { AppRuntime, Table } from "./table.ts";
 import { BridgeError, envelope, headerValue, isRecord, nowS, parseJson, readBody, sendError, sendJson, statusFor } from "./util.ts";
 
 interface InstanceCaller {
@@ -113,8 +113,7 @@ export class InternalApi {
       ctx.reject({ kind: "claim", code: "code_invalid" });
       throw new BridgeError("code_invalid", 403);
     }
-    const major = sdkMajorOf(r.sdkVersion);
-    if (major === undefined || !SDK_MAJORS.includes(major)) throw new BridgeError("sdk_major_unsupported", 400);
+    if (typeof r.sdkVersion !== "string" || !ctx.api.sdkMajorServed(r.sdkVersion, SDK_CURRENT_MAJOR)) throw new BridgeError("sdk_major_unsupported", 400);
     const service = entry.kind === "service" ? entry.service : undefined;
     if ((r.service ?? undefined) !== service) throw new BridgeError("code_invalid", 403);
     const app = t.apps.get(entry.ins);
@@ -151,7 +150,7 @@ export class InternalApi {
     if (service) {
       const appKey = t.config.instanceKeys.find((k) => k.ins === entry.ins && !k.svc);
       if (appKey) out.app = { publicKey: appKey.jwk };
-      out.serviceKeys = (manifest?.settings?.keys ?? []).filter((k) => k.usedBy.includes(service)).map((k) => ({ name: k.name, env: k.name }));
+      out.serviceKeys = activeKeys(t, entry.ins, manifest, service).map((k) => ({ name: k.name, env: k.name }));
     }
     sendJson(res, 200, out);
   }
@@ -233,7 +232,7 @@ export class InternalApi {
     if (this.paused(caller.ins)) throw new BridgeError("paused", 403);
     const app = t.apps.get(caller.ins);
     const user = caller.svc ?? "app";
-    const declared = (app?.manifest?.settings?.keys ?? []).find((k) => k.name === name && k.source === "account_default" && k.usedBy.includes(user));
+    const declared = activeKeys(t, caller.ins, app?.manifest, user).find((k) => k.name === name && k.source === "account_default");
     if (!declared) throw new BridgeError("key_not_declared", 403);
     const value = this.ctx.state.keyStore.values[name];
     if (value === undefined) throw new BridgeError("key_not_set", 404);
@@ -291,6 +290,23 @@ export class InternalApi {
     res.writeHead(200, { "content-type": "text/plain; version=0.0.4" });
     res.end(`${lines.join("\n")}\n`);
   }
+}
+
+/**
+ * Active key requirements of one instance for one user (`app` or a service id). The ONE `when`
+ * evaluation is Core's (`activeKeyRequirements` + `resolveSettings` against the instance settings),
+ * delivered as config `keyRequirements[]`; the bridge never sees settings (S6), so it does not
+ * re-evaluate `when`. A requirement counts only if the verified manifest also declares it.
+ */
+export function activeKeys(t: Table, ins: InstanceId, manifest: Manifest | undefined, user: string): KeyRequirement[] {
+  const declared = new Map((manifest?.settings?.keys ?? []).map((k) => [k.name, k]));
+  const out: KeyRequirement[] = [];
+  for (const r of t.config.keyRequirements) {
+    if (r.ins !== ins || !r.usedBy.includes(user)) continue;
+    const k = declared.get(r.name);
+    if (k?.usedBy.includes(user) && k.source === r.source) out.push(k);
+  }
+  return out;
 }
 
 /** Slice `rev` (from the slice payload) is the revision apps compare. */

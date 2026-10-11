@@ -24,6 +24,13 @@ export function manifestApi(): ManifestApi {
     renderSkill: (skill, body, vars) => m.renderSkill(skill, body, vars),
     gate: (input) => m.gate(input),
     kekFromEnv: (v) => m.kekFromEnv(v),
+    sdkMajorServed: (v, current) => {
+      try {
+        return m.sdkMajorServed(v, current);
+      } catch {
+        return false;
+      }
+    },
     seal: (pt, kek, aad) => m.seal(pt, kek, aad),
     unseal: (blob, keks, aad) => m.unseal(blob, keks, aad),
     exportPrivateKey: (pair) => m.exportPrivateKey(pair),

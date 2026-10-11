@@ -54,7 +54,7 @@ export const notesManifest = {
     op("notes_delete", ["delete"], "destructive", { holdFamily: "destructive" }),
     op("notes_admin", ["read"], "read", { audience: "person" }),
   ],
-  settings: { ...example.settings, keys: [{ name: "NOTES_API_KEY", label: "Notes key", provider: "Example", required: true, source: "account_default", usedBy: ["app"] }] },
+  settings: { ...example.settings, keys: [{ name: "NOTES_API_KEY", label: "Notes key", provider: "Example", required: true, source: "account_default", usedBy: ["app"] }, { name: "NOTES_EXTRA_KEY", label: "Extra key", provider: "Example", required: false, source: "account_default", usedBy: ["app"] }] },
   publicRoutes: [{ path: "/oauth/callback", purpose: "oauth_callback" }],
   skills: [],
   ui: { launchPath: "/", configurePath: "/configure" },

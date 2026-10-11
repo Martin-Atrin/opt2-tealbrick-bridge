@@ -148,6 +148,10 @@ describe(`deployed bridge (${real ? "real manifest crypto" : "test double"})`, (
     assert.equal((await k.json()).value, "sk-test-123");
     const undeclared = await fetch(`${w.internalUrl}/tb/v1/keys/OTHER`, { headers: { "TB-Assert": await assertFor("/tb/v1/keys/OTHER") } });
     assert.equal(undeclared.status, 403);
+    // declared in the manifest but not active (absent from Core's resolved config keyRequirements) → refused
+    const inactive = await fetch(`${w.internalUrl}/tb/v1/keys/NOTES_EXTRA_KEY`, { headers: { "TB-Assert": await assertFor("/tb/v1/keys/NOTES_EXTRA_KEY") } });
+    assert.equal(inactive.status, 403);
+    assert.equal((await inactive.json()).error.code, "key_not_declared");
     const noAssert = await fetch(`${w.internalUrl}/tb/v1/keys/NOTES_API_KEY`);
     assert.equal(noAssert.status, 401);
     // status report carries presence only
