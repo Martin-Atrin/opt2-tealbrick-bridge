@@ -3,11 +3,13 @@
   "private": true,
   "type": "module",
   "packageManager": "pnpm@9.15.4",
-  "engines": { "node": ">=24" },
+  "engines": {
+    "node": ">=24"
+  },
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "biome check . && node scripts/check-literals.ts",
-    "test": "node --test \"packages/*/test/**/*.test.ts\"",
+    "test": "pnpm -r run build && node --test --test-timeout=60000 \"packages/*/test/**/*.test.ts\"",
     "conformance": "node --test \"packages/*/test/conformance/**/*.test.ts\"",
     "build": "pnpm -r run build"
   },

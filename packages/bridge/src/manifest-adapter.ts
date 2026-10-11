@@ -23,6 +23,7 @@ export function manifestApi(): ManifestApi {
     verifyConfig: (token, ctx) => m.verifyConfig(token, ctx),
     renderSkill: (skill, body, vars) => m.renderSkill(skill, body, vars),
     gate: (input) => m.gate(input),
+    kekFromEnv: (v) => m.kekFromEnv(v),
     seal: (pt, kek, aad) => m.seal(pt, kek, aad),
     unseal: (blob, keks, aad) => m.unseal(blob, keks, aad),
     exportPrivateKey: (pair) => m.exportPrivateKey(pair),

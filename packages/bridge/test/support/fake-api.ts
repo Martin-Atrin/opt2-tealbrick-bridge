@@ -84,6 +84,11 @@ export function fakeApi(): ManifestApi {
       if (g.claims.mode === "bound" && !g.claims.wf.includes(input.op.id)) return { decision: "refuse", reason: "not_in_workflow" };
       return { decision: "pass", reason: "ok" };
     },
+    kekFromEnv: (v) => {
+      const raw = /^[0-9a-f]{64}$/i.test(v) ? Buffer.from(v, "hex") : Buffer.from(v, "base64url");
+      if (raw.length !== 32) throw new Error("kek_invalid");
+      return { id: sha(raw).slice(7, 23), key: new Uint8Array(raw) };
+    },
     seal: (plaintext, kek, aad) => ({ v: 1, alg: "A256GCM", kek: kek.id, iv: "x", ct: Buffer.from(plaintext).toString("base64url"), tag: sha(`${aad}|${kek.id}`) }),
     unseal: (blob, keks, aad) => {
       const k = [keks.current, keks.previous].find((x) => x && x.id === blob.kek);

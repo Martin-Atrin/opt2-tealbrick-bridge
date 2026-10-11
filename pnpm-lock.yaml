@@ -21,8 +21,8 @@ importers:
   packages/bridge:
     dependencies:
       '@opt2-tealbrick/manifest':
-        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.0/opt2-tealbrick-manifest-0.1.0.tgz
-        version: https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.0/opt2-tealbrick-manifest-0.1.0.tgz
+        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.1/opt2-tealbrick-manifest-0.1.1.tgz
+        version: https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.1/opt2-tealbrick-manifest-0.1.1.tgz
       '@opt2-tealbrick/spec':
         specifier: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.2/opt2-tealbrick-spec-0.1.2.tgz
         version: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.2/opt2-tealbrick-spec-0.1.2.tgz
@@ -118,9 +118,9 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@opt2-tealbrick/manifest@https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.0/opt2-tealbrick-manifest-0.1.0.tgz':
-    resolution: {tarball: https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.0/opt2-tealbrick-manifest-0.1.0.tgz}
-    version: 0.1.0
+  '@opt2-tealbrick/manifest@https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.1/opt2-tealbrick-manifest-0.1.1.tgz':
+    resolution: {tarball: https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.1/opt2-tealbrick-manifest-0.1.1.tgz}
+    version: 0.1.1
 
   '@opt2-tealbrick/spec@https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.2/opt2-tealbrick-spec-0.1.2.tgz':
     resolution: {tarball: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.2/opt2-tealbrick-spec-0.1.2.tgz}
@@ -190,7 +190,7 @@ snapshots:
   '@biomejs/cli-win32-x64@2.5.15':
     optional: true
 
-  '@opt2-tealbrick/manifest@https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.0/opt2-tealbrick-manifest-0.1.0.tgz':
+  '@opt2-tealbrick/manifest@https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.1/opt2-tealbrick-manifest-0.1.1.tgz':
     dependencies:
       '@opt2-tealbrick/spec': https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.2/opt2-tealbrick-spec-0.1.2.tgz
       ajv: 8.17.1

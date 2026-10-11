@@ -181,16 +181,9 @@ export class BridgeState {
   }
 }
 
-/** Reads TB_KEK / TB_KEK_PREVIOUS (32 bytes, base64url or hex). The KEK id is derived from its digest, never the key. */
+/** Reads TB_KEK / TB_KEK_PREVIOUS through the manifest package (one encoding rule, C35). */
 export function keksFromEnv(env: NodeJS.ProcessEnv, api: ManifestApi): { current: Kek; previous?: Kek } {
-  const parse = (v: string | undefined): Kek | undefined => {
-    if (!v) return undefined;
-    const raw = /^[0-9a-f]{64}$/i.test(v) ? Buffer.from(v, "hex") : Buffer.from(v, "base64url");
-    if (raw.length !== 32) throw new BridgeError("kek_invalid", 500, "TB_KEK must be 32 bytes");
-    return { id: api.sha256Bytes(raw).slice(7, 23), key: new Uint8Array(raw) };
-  };
-  const current = parse(env.TB_KEK);
-  if (!current) throw new BridgeError("kek_missing", 500, "TB_KEK is not set");
-  const previous = parse(env.TB_KEK_PREVIOUS);
-  return previous ? { current, previous } : { current };
+  if (!env.TB_KEK) throw new BridgeError("kek_missing", 500, "TB_KEK is not set");
+  const current = api.kekFromEnv(env.TB_KEK);
+  return env.TB_KEK_PREVIOUS ? { current, previous: api.kekFromEnv(env.TB_KEK_PREVIOUS) } : { current };
 }

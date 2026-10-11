@@ -2,11 +2,12 @@
  * Test world: a fake Portal (enrol, config long-poll, ack), a fake app (SDK routes) and a real
  * deployed bridge started on free ports with the manifest test double.
  */
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import type { StatusReport, WorkspaceConfig } from "@opt2-tealbrick/spec/bridge";
 import type { Ed25519KeyPair, ManifestApi } from "../../src/api.ts";
 import { manifestApi } from "../../src/manifest-adapter.ts";
@@ -26,33 +27,47 @@ export const APP_CODE = "tbe_appinstancecode";
 
 const now = () => Math.floor(Date.now() / 1000);
 
+const example = JSON.parse(readFileSync(fileURLToPath(import.meta.resolve("@opt2-tealbrick/spec/examples/notes.manifest.json")), "utf8"));
+const { companions: _c, unlocks: _u, hooks: _h, ...exampleBase } = example;
+const op = (id: string, crud: string[], effect: string, extra: Record<string, unknown> = {}) => ({
+  id,
+  title: id,
+  description: `Test op ${id}`,
+  input: { type: "object" },
+  output: { type: "object" },
+  crud,
+  effect,
+  idempotency: "none",
+  receipt: effect !== "read",
+  audience: "agent",
+  ...extra,
+});
+
+/** Valid manifests (spec example as the base) so the real validator accepts them. */
 export const notesManifest = {
-  schema: "tealbrick.miniapp/2",
+  ...exampleBase,
   id: "notes",
-  name: "Notes",
-  summary: "Notes",
-  version: "1.0.0",
-  sdkMajor: 1,
   operations: [
-    { id: "notes_list", title: "List notes", description: "List notes", input: { type: "object" }, crud: ["read"], effect: "read", idempotency: "none", receipt: false, audience: "agent" },
-    { id: "notes_create", title: "Create note", description: "Create", input: { type: "object" }, crud: ["create"], effect: "write", idempotency: "required", receipt: true, audience: "agent" },
-    { id: "notes_send", title: "Send note", description: "Send outside", input: { type: "object" }, crud: ["create"], effect: "outward", idempotency: "none", receipt: true, audience: "agent" },
-    { id: "notes_delete", title: "Delete", description: "Delete", input: { type: "object" }, crud: ["delete"], effect: "destructive", idempotency: "none", receipt: true, audience: "agent" },
-    { id: "notes_admin", title: "Admin", description: "Person only", input: { type: "object" }, crud: ["read"], effect: "read", idempotency: "none", receipt: false, audience: "person" },
+    op("notes_list", ["read"], "read"),
+    op("notes_create", ["create"], "write", { idempotency: "required" }),
+    op("notes_send", ["create"], "outward", { idempotency: "required" }),
+    op("notes_delete", ["delete"], "destructive", { holdFamily: "destructive" }),
+    op("notes_admin", ["read"], "read", { audience: "person" }),
   ],
-  settings: { steps: [], keys: [{ name: "NOTES_API_KEY", label: "Notes key", provider: "example", required: true, source: "account_default", usedBy: ["app"] }] },
+  settings: { ...example.settings, keys: [{ name: "NOTES_API_KEY", label: "Notes key", provider: "Example", required: true, source: "account_default", usedBy: ["app"] }] },
   publicRoutes: [{ path: "/oauth/callback", purpose: "oauth_callback" }],
-  ui: { launchPath: "/" },
+  skills: [],
+  ui: { launchPath: "/", configurePath: "/configure" },
 };
 
 export const hookManifest = {
-  schema: "tealbrick.miniapp/2",
+  ...exampleBase,
   id: "guard",
   name: "Guard",
-  summary: "Guard",
-  version: "1.0.0",
-  sdkMajor: 1,
-  operations: [],
+  operations: [op("guard_status", ["read"], "read")],
+  scopes: [],
+  skills: [],
+  publicRoutes: [],
   hooks: [{ id: "check", title: "Check", phase: "before", order: 1, match: { products: ["notes"] } }],
 };
 

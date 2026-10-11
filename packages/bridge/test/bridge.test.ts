@@ -69,7 +69,7 @@ describe(`deployed bridge (${real ? "real manifest crypto" : "test double"})`, (
 
   test("held results come back as a handle, not an error", async () => {
     const s = await session(w);
-    const r = await call(w, s, "notes__notes_send", {});
+    const r = await call(w, s, "notes__notes_send", {}, { "tealbrick/idempotencyKey": "send-12345678" });
     assert.equal(r.isError, false);
     assert.equal(r.structuredContent.status, "held");
     assert.equal(r.structuredContent.checkWith, "notes__tb_hold_status");
@@ -100,7 +100,7 @@ describe(`deployed bridge (${real ? "real manifest crypto" : "test double"})`, (
   test("no person or foreign credential is accepted at /mcp (R-P1)", async () => {
     const r = await w.mcp("tbo_ownersessiontokenvalue", { jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
     assert.equal(r.status, 401);
-    const portalSigned = await w.signPortal("tb-agent-session+jwt", { iss: `tb:brg:${BRG}`, sub: `tb:agt:${AGT}`, aud: `tb:brg:${BRG}`, iat: now(), exp: now() + 900, jti: "X", ws: WS, con: CON, gen: 1 });
+    const portalSigned = await w.signPortal("tb-agent-session+jwt", { iss: `tb:brg:${BRG}`, sub: `tb:agt:${AGT}`, aud: `tb:brg:${BRG}`, iat: now(), exp: now() + 900, jti: w.api.ulid(), ws: WS, con: CON, gen: 1 });
     const r2 = await w.mcp(portalSigned, { jsonrpc: "2.0", id: 1, method: "initialize", params: {} });
     assert.equal(r2.status, 401);
     const wa = (await fetch(`${w.publicUrl}/mcp`, { method: "POST", body: "{}" })).headers.get("www-authenticate");
@@ -122,7 +122,7 @@ describe(`deployed bridge (${real ? "real manifest crypto" : "test double"})`, (
     const reuse = await fetch(`${w.internalUrl}/tb/v1/claim`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: APP_CODE, instancePublicKey: appKey.publicJwk, manifestDigest: w.bridge.ctx.table?.config.apps[0]?.manifestDigest, version: "1.0.0", sdkVersion: "1.0.0" }) });
     assert.equal(reuse.status, 403);
     // key page via a keys ticket
-    const ticket = await w.signPortal("tb-ticket+jwt", { iss: "tb:portal", sub: "tb:per:per_01HPPPPPPPPPPPPPPPPPPPPPPP", aud: `tb:brg:${BRG}`, iat: now(), exp: now() + 120, jti: "01HTICKETTICKETTICKETTICKE", ws: WS, pur: "keys" });
+    const ticket = await w.signPortal("tb-ticket+jwt", { iss: "tb:portal", sub: "tb:per:per_01HPPPPPPPPPPPPPPPPPPPPPPP", aud: `tb:brg:${BRG}`, iat: now(), exp: now() + 120, jti: w.api.ulid(), ws: WS, pur: "keys" });
     const open = await fetch(`${w.publicUrl}/keys`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ ticket }), redirect: "manual" });
     assert.equal(open.status, 303);
     const cookie = String(open.headers.get("set-cookie")).split(";")[0] as string;
@@ -149,7 +149,7 @@ describe(`deployed bridge (${real ? "real manifest crypto" : "test double"})`, (
   });
 
   test("launch proxy strips Authorization and TB-* headers; public routes only when declared", async () => {
-    const ticket = await w.signPortal("tb-ticket+jwt", { iss: "tb:portal", sub: "tb:per:per_01HPPPPPPPPPPPPPPPPPPPPPPP", aud: `tb:ins:${INS}`, iat: now(), exp: now() + 60, jti: "01HLAUNCHLAUNCHLAUNCHLAUNC", ws: WS, pur: "launch" });
+    const ticket = await w.signPortal("tb-ticket+jwt", { iss: "tb:portal", sub: "tb:per:per_01HPPPPPPPPPPPPPPPPPPPPPPP", aud: `tb:ins:${INS}`, iat: now(), exp: now() + 60, jti: w.api.ulid(), ws: WS, pur: "launch" });
     const r = await fetch(`${w.publicUrl}/a/notes/tb/launch`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", authorization: "Bearer leak", "tb-call": "leak" }, body: new URLSearchParams({ ticket }) });
     assert.equal(r.status, 200);
     const j = await r.json();
@@ -253,7 +253,7 @@ describe(`hooks and offline rules (${real ? "real" : "double"})`, () => {
 
   test("the second agent has no grant, so no tools", async () => {
     // a key connection for AGT2 is not in config → token refused (connection_unknown)
-    const assertion = await w.agentAssertion(AGT2, "con_01HUNKNOWNUNKNOWNUNKNOWNUN");
+    const assertion = await w.agentAssertion(AGT2, `con_${w.api.ulid()}`);
     const r = await fetch(`${w.publicUrl}/oauth/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion }) });
     assert.equal(r.status, 400);
     assert.equal((await r.json()).error_description, "connection_unknown");

@@ -56,6 +56,8 @@ export interface ManifestApi {
   renderSkill(skill: Skill, body: string, vars: SkillVars): string;
   gate(input: GateInput): GateDecision;
   // C21 additions
+  /** TB_KEK / TB_KEK_PREVIOUS env value → KEK (manifest owns the encoding rules, C35). */
+  kekFromEnv(value: string): Kek;
   seal(plaintext: Uint8Array, kek: Kek, aad: string): SealedBlob;
   unseal(blob: SealedBlob, keks: { current: Kek; previous?: Kek }, aad: string): Uint8Array;
   exportPrivateKey(pair: Ed25519KeyPair): Promise<Uint8Array>;
