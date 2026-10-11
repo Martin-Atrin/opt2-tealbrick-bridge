@@ -13,11 +13,12 @@ import { scanToml, TomlError, upsertMcpTable } from "../src/toml.ts";
 describe("keychain store", () => {
   it("never puts the secret in argv: add goes through `security -i` stdin", async () => {
     const calls: { args: string[]; stdin: string | undefined }[] = [];
+    const secret = '{"token":"tbo_very_secret value with spaces and \\"quotes\\""}';
     const run: SecurityRunner = async (args, stdin) => {
       calls.push({ args, stdin });
-      return { code: 0, stdout: "", stderr: "" };
+      // read-back after the write returns the stored (base64url) value
+      return { code: 0, stdout: args[0] === "find-generic-password" ? `${Buffer.from(secret, "utf8").toString("base64url")}\n` : "", stderr: "" };
     };
-    const secret = '{"token":"tbo_very_secret value with spaces and \\"quotes\\""}';
     await createKeychainStore(run).put("tealbrick.person", secret);
     assert.deepEqual(calls[0]?.args, ["-i"]);
     assert.ok(!JSON.stringify(calls[0]?.args).includes("tbo_"));
@@ -130,5 +131,18 @@ describe("toml + diff", () => {
     assert.match(d, /^--- f\n\+\+\+ f \(proposed\)\n@@ -1,3 \+1,4 @@\n a\n-b\n\+B\n c\n\+d$/);
     assert.equal(unifiedDiff("x\n", "x\n", "f").includes("@@"), false);
     assert.match(unifiedDiff("", '{\n}\n', "f"), /@@ -0,0 \+1,2 @@\n\+\{\n\+\}/);
+  });
+});
+
+describe("owner CLI can never apply a draft (R-owner-draft)", () => {
+  it("the route client refuses browser-only rows such as drafts.apply before any network call", async () => {
+    const { PortalClient } = await import("../src/portal.ts");
+    let called = false;
+    const client = new PortalClient({ origin: "http://127.0.0.1:1", token: "tbo_testtoken0123456789", fetch: (async () => { called = true; return new Response("{}"); }) as typeof fetch });
+    await assert.rejects(client.call("drafts.apply", { drf: "drf_X", draftDigest: "sha256:00" }), (e: { exit?: number }) => e.exit === 5);
+    for (const op of ["tickets.launch", "tickets.keys", "agents.pairing_code", "bridge.enrolment_code", "device.approve"]) {
+      await assert.rejects(client.call(op, { ws: "ws_X", agt: "agt_X", userCode: "X" }));
+    }
+    assert.equal(called, false);
   });
 });

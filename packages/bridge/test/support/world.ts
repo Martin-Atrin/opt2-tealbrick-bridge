@@ -93,6 +93,9 @@ export interface World {
   publish(tweak?: (c: WorkspaceConfig) => void): Promise<number>;
   rev(): number;
   close(): Promise<void>;
+  /** stop answering as Portal (simulates Portal down) */
+  portalDown(): void;
+  rejectedBridgeAssertions(): number;
   agentToken(): Promise<string>;
   mcp(token: string, body: unknown, session?: string): Promise<{ status: number; json: any; session: string | null }>;
   signPortal(typ: string, claims: object): Promise<string>;
@@ -119,6 +122,8 @@ export async function makeWorld(opts: { withHook?: boolean; real?: boolean } = {
   const acks: StatusReport[] = [];
   const appLog: AppLog = { ops: [], hooks: [] };
   const hookMode = { mode: "allow" as "allow" | "deny" | "fail" };
+  let down = false;
+  let assertFailures = 0;
   let bridgeJwk: Ed25519KeyPair["publicJwk"] | undefined;
   let configJws = "";
   let rev = 0;
@@ -207,6 +212,10 @@ export async function makeWorld(opts: { withHook?: boolean; real?: boolean } = {
   await publish();
 
   const portal = await listen(async (req, res) => {
+    if (down) {
+      req.socket.destroy();
+      return;
+    }
     const url = new URL(req.url ?? "/", "http://x");
     const chunks: Buffer[] = [];
     for await (const c of req) chunks.push(c as Buffer);
@@ -220,7 +229,10 @@ export async function makeWorld(opts: { withHook?: boolean; real?: boolean } = {
     }
     const keys = bridgeJwk ? api.keySetFrom({ keys: [bridgeJwk] }, `tb:brg:${BRG}`) : { keys: [] };
     const v = api.verifyAssertion(String(req.headers["tb-assert"] ?? ""), keys, { typ: "tb-bridge-assert+jwt", aud: "tb:portal", iss: [`tb:brg:${BRG}`], now: now(), maxLifetimeS: 60, request: { method: req.method ?? "GET", pathAndQuery: req.url ?? "/", ...(raw.length ? { body: raw } : {}) } });
-    if (!v.ok) return res.writeHead(401).end();
+    if (!v.ok) {
+      assertFailures += 1;
+      return res.writeHead(401).end();
+    }
     if (url.pathname === "/api/v1/bridge/config") {
       const after = Number(url.searchParams.get("after"));
       const deadline = Date.now() + 300;
@@ -280,6 +292,11 @@ export async function makeWorld(opts: { withHook?: boolean; real?: boolean } = {
     agentToken,
     mcp,
     signPortal: sign,
+    portalDown() {
+      down = true;
+      portal.server.closeAllConnections();
+    },
+    rejectedBridgeAssertions: () => assertFailures,
     async close() {
       await bridge.stop();
       for (const s of [app.server, hookApp.server, portal.server]) {

@@ -185,6 +185,64 @@ describe(`deployed bridge (${real ? "real manifest crypto" : "test double"})`, (
     await waitFor(() => (w.bridge.ctx.table?.rev ?? 0) === w.rev(), 3000);
   });
 
+  test("bridge assertions to Portal are valid (no 401 at the fake Portal)", () => {
+    assert.equal(w.rejectedBridgeAssertions(), 0);
+  });
+
+  test("OAuth connector (C4): DCR → authorize → pairing code (path B) → PKCE token → MCP → refresh rotation; reuse revokes", async () => {
+    const reg = await (await fetch(`${w.publicUrl}/oauth/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: ["http://127.0.0.1:33418/callback"], client_name: "Claude" }) })).json();
+    assert.ok(reg.client_id.startsWith("tbc_"));
+    const verifier = "v".repeat(50);
+    const challenge = Buffer.from(w.api.sha256Bytes(Buffer.from(verifier)).slice(7), "hex").toString("base64url");
+    const q = new URLSearchParams({ response_type: "code", client_id: reg.client_id, redirect_uri: "http://127.0.0.1:44444/callback", code_challenge: challenge, code_challenge_method: "S256", state: "st1", resource: "http://127.0.0.1/mcp" });
+    const page = await (await fetch(`${w.publicUrl}/oauth/authorize?${q}`)).text();
+    assert.match(page, /unverified/);
+    assert.match(page, /127\.0\.0\.1:44444/, "redirect host shown (loopback port may differ, RFC 8252)");
+    const rid = /name="rid" value="([^"]+)"/.exec(page)?.[1] as string;
+    const code = await w.signPortal("tb-pair+jwt", { iss: "tb:portal", sub: `tb:agt:${AGT}`, aud: `tb:brg:${BRG}`, iat: now(), exp: now() + 600, jti: w.api.ulid(), ws: WS });
+    const redeem = await fetch(`${w.publicUrl}/oauth/authorize`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ rid, action: "paste", code }), redirect: "manual" });
+    assert.equal(redeem.status, 302);
+    const loc = new URL(String(redeem.headers.get("location")));
+    assert.equal(loc.searchParams.get("state"), "st1");
+    const authCode = loc.searchParams.get("code") as string;
+    const reuseCode = await fetch(`${w.publicUrl}/oauth/authorize`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ rid, action: "paste", code }) });
+    assert.equal(reuseCode.status, 400, "pairing code is one-time");
+    const tok = async (params: Record<string, string>) => fetch(`${w.publicUrl}/oauth/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(params) });
+    const bad = await tok({ grant_type: "authorization_code", code: authCode, code_verifier: "w".repeat(50), client_id: reg.client_id, redirect_uri: "http://127.0.0.1:44444/callback" });
+    assert.equal(bad.status, 400, "wrong PKCE verifier refused (and the code is spent)");
+    // second pass with a fresh code
+    const page2 = await (await fetch(`${w.publicUrl}/oauth/authorize?${q}`)).text();
+    const rid2 = /name="rid" value="([^"]+)"/.exec(page2)?.[1] as string;
+    const code2 = await w.signPortal("tb-pair+jwt", { iss: "tb:portal", sub: `tb:agt:${AGT}`, aud: `tb:brg:${BRG}`, iat: now(), exp: now() + 600, jti: w.api.ulid(), ws: WS });
+    const r2 = await fetch(`${w.publicUrl}/oauth/authorize`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ rid: rid2, action: "paste", code: code2 }), redirect: "manual" });
+    const authCode2 = new URL(String(r2.headers.get("location"))).searchParams.get("code") as string;
+    const t1 = await (await tok({ grant_type: "authorization_code", code: authCode2, code_verifier: verifier, client_id: reg.client_id, redirect_uri: "http://127.0.0.1:44444/callback", resource: "http://127.0.0.1/mcp" })).json();
+    assert.ok(t1.access_token && t1.refresh_token.startsWith("tbr_"));
+    const init = await w.mcp(t1.access_token, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18" } });
+    assert.equal(init.status, 200);
+    const t2 = await (await tok({ grant_type: "refresh_token", refresh_token: t1.refresh_token })).json();
+    assert.ok(t2.refresh_token && t2.refresh_token !== t1.refresh_token);
+    const old = await (await w.mcp(t1.access_token, { jsonrpc: "2.0", id: 2, method: "initialize", params: {} })).status;
+    assert.equal(old, 401, "access tokens of the previous generation stop working");
+    const graceRetry = await tok({ grant_type: "refresh_token", refresh_token: t1.refresh_token });
+    assert.equal(graceRetry.status, 200, "previous token accepted once within 30 s");
+    const reuse = await tok({ grant_type: "refresh_token", refresh_token: t1.refresh_token });
+    assert.equal(reuse.status, 400, "second reuse of a rotated token is refused …");
+    const afterRevoke = await tok({ grant_type: "refresh_token", refresh_token: t2.refresh_token });
+    assert.equal(afterRevoke.status, 400, "… and revokes the whole connection");
+    await waitFor(() => w.acks.some((a) => a.connectionsRevoked.some((c) => c.reason === "refresh_reuse")), 5000);
+    assert.ok(w.acks.some((a) => a.connectionsCreated.length > 0), "new pairing connections are reported to Portal");
+  });
+
+  test("Portal down: calls keep working on the last good config (C9)", async () => {
+    const s = await session(w);
+    w.portalDown();
+    await new Promise((r) => setTimeout(r, 400));
+    const r = await call(w, s, "notes__notes_list", {});
+    assert.equal(r.isError, undefined);
+    assert.equal(r.structuredContent.op, "notes_list");
+  });
+
   test("relay (stdio) forwards JSON-RPC verbatim to the deployed bridge", async () => {
     const stdin = new PassThrough();
     const stdout = new PassThrough();

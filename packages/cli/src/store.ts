@@ -99,6 +99,11 @@ export function createKeychainStore(run: SecurityRunner = runSecurity): Credenti
     async put(name, value) {
       const r = await run(["-i"], buildKeychainAddCommand(name, value));
       if (r.code !== 0) throw new CliError(EXIT.unexpected, "internal", "keychain write failed");
+      // `security -i` can exit 0 when the inner command fails: read the item back before trusting the write
+      const check = await run(["find-generic-password", "-s", name, "-a", KEYCHAIN_ACCOUNT, "-w"]);
+      if (check.code !== 0 || check.stdout.replace(/\r?\n$/, "") !== Buffer.from(value, "utf8").toString("base64url")) {
+        throw new CliError(EXIT.unexpected, "internal", "keychain write could not be verified");
+      }
     },
     async delete(name) {
       checkName(name);
