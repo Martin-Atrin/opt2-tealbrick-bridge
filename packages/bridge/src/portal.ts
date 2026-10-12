@@ -172,7 +172,7 @@ export function logManifestFailure(ctx: BridgeContext, app: AppEntry, e: unknown
   const mismatch = e instanceof ManifestError && e.message === "manifest_mismatch";
   // v0.1.18 (spec 0.1.17, L3, C104): a manifest the bridge REFUSED is reported (Core shows the reason instead of "starting");
   // a transient fetch failure (HTTP status, network) is not a refusal
-  if (e instanceof ManifestError && !e.message.startsWith("fetch_")) ctx.reject({ kind: "manifest", code: e.message, detail: `${app.product} ${app.ins}` });
+  if (e instanceof ManifestError && !e.message.startsWith("fetch_")) ctx.reject({ kind: "manifest", code: e.message, ins: app.ins, detail: app.product });
   ctx.log.warn("bridge.manifest.unavailable", {
     ins: app.ins,
     product: app.product,
@@ -393,8 +393,8 @@ export function buildStatusReport(ctx: BridgeContext): StatusReport {
     connectionsRevoked: [...ctx.state.reports.revoked],
     claims: ctx.state.claims.map(({ reported: _r, ...c }) => c),
     rejected: [...ctx.rejected.entries()].map(([k, count]) => {
-      const [kind, code] = k.split("|") as [StatusReport["rejected"][number]["kind"], string];
-      return { kind, code, count };
+      const [kind, code, ins] = k.split("|") as [StatusReport["rejected"][number]["kind"], string, string];
+      return { kind, code, count, ...(ins ? { ins: ins as never } : {}) };
     }),
     toolsOmitted: [...ctx.toolsOmitted.values()],
   };

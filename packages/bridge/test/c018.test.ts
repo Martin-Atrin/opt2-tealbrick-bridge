@@ -24,6 +24,7 @@ describe("0.1.18: refused manifests are reported (rejected kind manifest)", () =
     w.updateAppTo({ ...notesManifest, version: "2.0.0", requires: { bridge: "9.0.0" } });
     await w.publish();
     await waitFor(() => rejectedManifest(w).some((r) => r.code === "bridge_too_old"), 15000);
+    assert.equal(rejectedManifest(w).find((r) => r.code === "bridge_too_old")?.ins, INS, "spec 0.1.22: rejected[].ins");
     assert.equal(w.bridge.ctx.table?.apps.get(INS as never)?.manifest, undefined, "not routed half-working");
     assert.ok(BRIDGE_VERSION < "9.0.0");
   });

@@ -1,6 +1,6 @@
 {
   "name": "@opt2-tealbrick/harness-eve",
-  "version": "0.1.8",
+  "version": "0.1.9",
   "private": true,
   "type": "module",
   "description": "Eve harness adapter. No policy.",
@@ -21,7 +21,7 @@
     "build": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
-    "@opt2-tealbrick/spec": "https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.21/opt2-tealbrick-spec-0.1.21.tgz",
+    "@opt2-tealbrick/spec": "https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.23/opt2-tealbrick-spec-0.1.23.tgz",
     "@opt2-tealbrick/bridge": "workspace:*"
   }
 }

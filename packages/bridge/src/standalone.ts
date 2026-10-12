@@ -27,6 +27,11 @@ export async function remintStandalone(ctx: BridgeContext): Promise<void> {
     return;
   }
   const frozen = fv.body as WorkspaceConfig;
+  // L3 (C116, QA J2-15): a final document that lists agents and apps but carries NO agent grants leaves every agent
+  // without app tools for good (nothing is pulled after Leave Portal). Still applied (fail closed), never silent.
+  if (frozen.agents.length && frozen.apps.length && !frozen.grants.some((g) => peekClaims<GrantClaims>(g)?.sub?.startsWith("tb:agt:"))) {
+    ctx.reject({ kind: "config", code: "standalone_without_grants", detail: `final config rev ${frozen.rev}: ${frozen.agents.length} agents, ${frozen.apps.length} apps, 0 agent grants` });
+  }
   if (!ctx.state.standalone) ctx.state.standalone = { pausedWorkspace: frozen.pause.workspace, pausedAgents: [...frozen.pause.agents], revokedConnections: [], rev: frozen.rev };
   const overlay = ctx.state.standalone;
   overlay.rev += 1;
@@ -48,7 +53,8 @@ export async function remintStandalone(ctx: BridgeContext): Promise<void> {
     const s = peekClaims<InstanceSlice>(a.slice);
     if (!s) continue;
     const companion: string[] = [];
-    for (const g of s.grants) {
+    // a slice without grants/agents (older or minimal) must not abort the whole re-mint (no silent dead end)
+    for (const g of s.grants ?? []) {
       const c = peekClaims<GrantClaims>(g);
       if (c) companion.push(await ctx.api.signJws(TYP.grant, { ...c, iss: ref, iat: now, exp }, id.key));
     }
@@ -60,9 +66,11 @@ export async function remintStandalone(ctx: BridgeContext): Promise<void> {
       jti: ctx.api.ulid(),
       rev: overlay.rev,
       portalKeys: [],
+      // BRIDGE §11: a re-minted slice always names the standalone issuer (the SDK trusts only it from now on)
+      ...(s.standalone ?? frozen.standalone ? { standalone: s.standalone ?? frozen.standalone } : {}),
       pause,
       grants: overlay.pausedWorkspace ? [] : companion,
-      agents: s.agents.map((ag) => ({ ...ag, status: overlay.pausedAgents.includes(ag.id) ? "paused" : ag.status })),
+      agents: (s.agents ?? []).map((ag) => ({ ...ag, status: overlay.pausedAgents.includes(ag.id) ? "paused" : ag.status })),
     };
     apps.push({ ...a, slice: await ctx.api.signJws(TYP.slice, slice, id.key) });
   }

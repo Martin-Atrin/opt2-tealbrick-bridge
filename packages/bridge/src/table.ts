@@ -38,6 +38,8 @@ export interface GrantRef {
 export interface Rejection {
   kind: "config" | "grant" | "slice" | "assertion" | "ticket" | "pairing" | "claim" | "bridge_op" | "manifest";
   code: string;
+  /** spec 0.1.22: the app instance concerned (kind `manifest`, `bridge_op` when known); in the status report */
+  ins?: string;
   /** log only (never in the status report): e.g. the verifier's reason, never a token */
   detail?: string;
 }

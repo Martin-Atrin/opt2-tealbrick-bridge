@@ -188,7 +188,7 @@ export class CallRouter {
     const proof = await this.ctx.api.signJws(TYP.callProof, claims, id.key);
     // L3 (spec 0.1.14): a failed bridge op is never only a log line; it is counted in the status report
     const failed = (code: string, detail: string): never => {
-      this.ctx.reject({ kind: "bridge_op", code, detail: `${bop} ${app.entry.ins}: ${detail}` });
+      this.ctx.reject({ kind: "bridge_op", code, ins: app.entry.ins, detail: `${bop}: ${detail}` });
       throw new BridgeError("app_error", 502, `bridge op ${bop} answered ${detail}`);
     };
     let res: Response;

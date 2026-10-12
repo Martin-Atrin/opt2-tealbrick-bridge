@@ -1,5 +1,5 @@
 /** Versions reported by `tealbrick --version --json` ({cli, bridge, spec}). */
-export const CLI_VERSION = "0.1.14";
+export const CLI_VERSION = "0.1.15";
 export { BRIDGE_VERSION } from "@opt2-tealbrick/bridge";
 
 /**
