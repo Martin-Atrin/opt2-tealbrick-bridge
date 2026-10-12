@@ -3,14 +3,47 @@
   "internalPort": 8788,
   "healthPath": "/healthz",
   "readyPath": "/readyz",
-  "volumes": [{ "mountPath": "/data", "backup": true }],
+  "volumes": [
+    {
+      "mountPath": "/data",
+      "backup": true
+    }
+  ],
   "env": [
-    { "name": "PORT", "source": "fixed", "value": "8080" },
-    { "name": "TB_INTERNAL_PORT", "source": "fixed", "value": "8788" },
-    { "name": "TB_DATA_DIR", "source": "fixed", "value": "/data" },
-    { "name": "TB_KEK", "source": "provider-secret" },
-    { "name": "TB_PORTAL_URL", "source": "portal" },
-    { "name": "TB_ENROL_CODE", "source": "portal" },
-    { "name": "TB_PUBLIC_URL", "source": "public-url" }
+    {
+      "name": "PORT",
+      "source": "fixed",
+      "value": "8080"
+    },
+    {
+      "name": "TB_INTERNAL_PORT",
+      "source": "fixed",
+      "value": "8788"
+    },
+    {
+      "name": "TB_DATA_DIR",
+      "source": "fixed",
+      "value": "/data"
+    },
+    {
+      "name": "TB_KEK",
+      "source": "provider-secret"
+    },
+    {
+      "name": "TB_PORTAL_URL",
+      "source": "portal"
+    },
+    {
+      "name": "TB_ENROL_CODE",
+      "source": "portal"
+    },
+    {
+      "name": "TB_PUBLIC_URL",
+      "source": "public-url"
+    },
+    {
+      "name": "TB_KEYS_PUBLIC_URL",
+      "source": "public-url-keys"
+    }
   ]
 }

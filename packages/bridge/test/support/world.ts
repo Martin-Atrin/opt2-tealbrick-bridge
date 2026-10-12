@@ -96,6 +96,11 @@ export interface World {
   publish(tweak?: (c: WorkspaceConfig) => void): Promise<number>;
   rev(): number;
   close(): Promise<void>;
+  /** stop the bridge process and start a new one on the same volume and ports */
+  restart(): Promise<void>;
+  dataDir: string;
+  pulls(): number;
+  setAckFails(on: boolean): void;
   /** the app is updated: serves a new manifest (new digest) and fails its next `failures` manifest fetches */
   updateApp(failures: number): string;
   rotateKey(phase: "announce" | "activate" | "retire"): Promise<void>;
@@ -135,6 +140,7 @@ export async function makeWorld(opts: { withHook?: boolean; real?: boolean; mani
   const hookMode = { mode: "allow" as "allow" | "deny" | "fail" };
   let down = false;
   let pulls = 0;
+  let ackFails = false;
   let assertFailures = 0;
   let bridgeJwk: Ed25519KeyPair["publicJwk"] | undefined;
   let configJws = "";
@@ -268,6 +274,7 @@ export async function makeWorld(opts: { withHook?: boolean; real?: boolean; mani
       if (rev > after) return res.writeHead(200, { "content-type": "application/jose" }).end(configJws);
       return res.writeHead(304).end();
     }
+    if (url.pathname === "/api/v1/bridge/ack" && ackFails) return res.writeHead(503).end();
     if (url.pathname === "/api/v1/bridge/ack") {
       acks.push(JSON.parse(raw.toString("utf8")));
       return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ accepted: true, configRevision: rev }));
@@ -276,11 +283,12 @@ export async function makeWorld(opts: { withHook?: boolean; real?: boolean; mani
   });
 
   const dir = mkdtempSync(join(tmpdir(), "tb-bridge-test-"));
-  const bridge = await startBridge({
+  const bridgeEnv = (): NodeJS.ProcessEnv => ({ TB_DATA_DIR: dir, TB_PORTAL_URL: portal.url, TB_PUBLIC_URL: "http://127.0.0.1", TB_KEYS_PUBLIC_URL: "http://localhost", TB_ENROL_CODE: ENROL, TB_KEK: "11".repeat(32), TB_APP_HOSTS: "127.0.0.1" });
+  let bridge = await startBridge({
     api,
     logger: silentLogger,
     ports: { public: 0, internal: 0 },
-    env: { TB_DATA_DIR: dir, TB_PORTAL_URL: portal.url, TB_PUBLIC_URL: "http://127.0.0.1", TB_KEYS_PUBLIC_URL: "http://localhost", TB_ENROL_CODE: ENROL, TB_KEK: "11".repeat(32) },
+    env: { TB_DATA_DIR: dir, TB_PORTAL_URL: portal.url, TB_PUBLIC_URL: "http://127.0.0.1", TB_KEYS_PUBLIC_URL: "http://localhost", TB_ENROL_CODE: ENROL, TB_KEK: "11".repeat(32), TB_APP_HOSTS: "127.0.0.1" },
   });
   const publicUrl = `http://127.0.0.1:${(bridge.publicServer.address() as AddressInfo).port}`;
   const keysUrl = `http://localhost:${(bridge.publicServer.address() as AddressInfo).port}`;
@@ -303,7 +311,7 @@ export async function makeWorld(opts: { withHook?: boolean; real?: boolean; mani
     return { status: r.status, json: text ? JSON.parse(text) : undefined, session: r.headers.get("mcp-session-id") };
   };
 
-  return {
+  const world: World = {
     bridge,
     publicUrl,
     keysUrl,
@@ -347,6 +355,17 @@ export async function makeWorld(opts: { withHook?: boolean; real?: boolean; mani
       base.apps[0] = { ...(base.apps[0] as WorkspaceConfig["apps"][number]), version: "1.0.1", manifestDigest: d };
       return d;
     },
+    async restart() {
+      const ports = { public: (bridge.publicServer.address() as AddressInfo).port, internal: (bridge.internalServer.address() as AddressInfo).port };
+      await bridge.stop();
+      bridge = await startBridge({ api, logger: silentLogger, ports, env: bridgeEnv() });
+      world.bridge = bridge;
+    },
+    dataDir: dir,
+    pulls: () => pulls,
+    setAckFails(on) {
+      ackFails = on;
+    },
     portalDown() {
       down = true;
       portal.server.closeAllConnections();
@@ -361,6 +380,7 @@ export async function makeWorld(opts: { withHook?: boolean; real?: boolean; mani
       rmSync(dir, { recursive: true, force: true });
     },
   };
+  return world;
 }
 
 export async function waitFor(cond: () => boolean, ms = 10000): Promise<void> {

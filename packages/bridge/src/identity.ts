@@ -17,7 +17,8 @@ export interface AgentPrincipal {
 export function connectionState(ctx: BridgeContext, con: ConnectionId): { agt: AgentId; gen: number; active: boolean; method: "key" | "pairing" } | undefined {
   const t = ctx.table;
   const listed = t?.connections.get(con);
-  const overlayRevoked = (ctx.state.standalone?.revokedConnections.includes(con) ?? false) || revokedLocally.has(con);
+  const overlayRevoked =
+    (ctx.state.standalone?.revokedConnections.includes(con) ?? false) || revokedLocally.has(con) || ctx.state.reports.revoked.some((r) => r.con === con);
   if (listed) {
     const local = ctx.state.connections.get(con);
     // pairing connections rotate `gen` locally on refresh; the bridge's own record is authoritative for gen
@@ -112,7 +113,9 @@ export function revokeLocal(ctx: BridgeContext, con: ConnectionId, reason: "refr
     ctx.state.standalone.revokedConnections.push(con);
     ctx.state.saveStandalone();
   }
-  ctx.connectionsRevoked.push({ con, reason });
+  // persisted until a status report reaches Portal (BSD-11), and refused locally from now on
+  if (!ctx.state.reports.revoked.some((r) => r.con === con)) ctx.state.reports.revoked.push({ con, reason });
+  ctx.state.saveReports();
   revokedLocally.add(con);
   ctx.log.warn("bridge.connection.revoked", { con, code: reason });
   ctx.emit("connection-revoked", con);

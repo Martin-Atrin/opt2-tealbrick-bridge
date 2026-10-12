@@ -71,7 +71,8 @@ function judge(target: string, rep: Report): string[] {
 }
 
 const problems: string[] = [];
-problems.push(...judge("bridge", run("bridge", ["--cmd", `"${node}" "${server}"`, "--timeout", "15000"])));
+// BSD-07: the suite's fake apps listen on loopback; deployed bridges otherwise accept only *.railway.internal
+problems.push(...judge("bridge", run("bridge", ["--cmd", `"${node}" "${server}"`, "--timeout", "15000"], { ...process.env, TB_APP_HOSTS: "127.0.0.1,localhost" })));
 
 const home = mkdtempSync(join(tmpdir(), "tb-relay-conf-"));
 try {

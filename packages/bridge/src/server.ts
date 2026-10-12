@@ -101,6 +101,7 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
     keysUrl,
     internalUrl: `http://${privateHost}:${internalPort}`,
     form: o.form ?? "deployed",
+    appHosts: (env.TB_APP_HOSTS ?? "").split(",").map((h) => h.trim()).filter(Boolean),
     ...(o.fetch ? { fetch: o.fetch } : {}),
   });
   await ensureEnrolled(ctx, env.TB_ENROL_CODE);

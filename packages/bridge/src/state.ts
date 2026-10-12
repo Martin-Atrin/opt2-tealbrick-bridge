@@ -1,9 +1,15 @@
 /**
  * Persistent bridge state on ONE volume (BRIDGE §1.2): S1 identity, S2 last good config, S3 sealed key
  * store, S4 pairing connections, S5 pending claims, S6 used one-time jtis, S9 standalone overlay.
- * Writes are atomic (temp file + fsync + rename). S1 and S3 are sealed with TB_KEK (CREDENTIALS §9.1).
+ *
+ * Integrity (C62 BSD-03): every record except S2 is sealed with TB_KEK (AES-256-GCM, AAD = purpose + file),
+ * so a planted or edited file is refused instead of trusted; S2 is a Portal-signed JWS and is verified on
+ * boot. Files written by bridges before 0.1.12 (plaintext) are accepted ONCE and resealed; after that a
+ * `format` marker makes plaintext files invalid (no downgrade).
+ * Writes are crash-safe (BSD-13): unique temp name, file fsync, rename, directory fsync, temp removed on error.
  */
-import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, writeSync } from "node:fs";
+import { randomBytes } from "node:crypto";
+import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import { join } from "node:path";
 import type { ClaimRecord, PairingConnectionRecord } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, BridgeId, ConnectionId, Ed25519PublicJwk, PortalKeyEntry, SealedBlob, Sha256Digest, WorkspaceId } from "@opt2-tealbrick/spec/credentials";
@@ -25,7 +31,9 @@ interface IdentityFile {
   workspaceId: WorkspaceId;
   kid: string;
   publicKey: Ed25519PublicJwk;
-  sealedPrivateKey: SealedBlob;
+  /** pre-0.1.12 files only (the whole record is sealed now) */
+  sealedPrivateKey?: SealedBlob;
+  privateKey?: string;
   portalKeys: PortalKeyEntry[];
   enrolCodeDigest: Sha256Digest;
   configPath: string;
@@ -49,22 +57,51 @@ export interface KeyStore {
   values: Record<string, string>;
 }
 
-function atomicWrite(path: string, data: string | Uint8Array): void {
-  const tmp = `${path}.tmp-${process.pid}`;
-  const fd = openSync(tmp, "w", 0o600);
-  try {
-    writeSync(fd, typeof data === "string" ? Buffer.from(data, "utf8") : data);
-    fsyncSync(fd);
-  } finally {
-    closeSync(fd);
-  }
-  renameSync(tmp, path);
+/** Facts the status report must carry until Portal confirmed them (BSD-11): survive restarts. */
+export interface PendingReports {
+  revoked: { con: ConnectionId; reason: "refresh_reuse" | "client_revoke" }[];
+  /** pairing code jti per locally created connection, until a config lists the connection */
+  pairingJtis: Record<string, string>;
 }
 
-function readJson<T>(path: string): T | undefined {
-  if (!existsSync(path)) return undefined;
-  return JSON.parse(readFileSync(path, "utf8")) as T;
+const FORMAT = 2;
+
+function syncDir(dir: string): void {
+  try {
+    const fd = openSync(dir, "r");
+    try {
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+  } catch {
+    /* some platforms cannot fsync a directory; the file itself is synced */
+  }
 }
+
+export function atomicWrite(path: string, data: string | Uint8Array): void {
+  const tmp = `${path}.tmp-${randomBytes(6).toString("hex")}`;
+  try {
+    const fd = openSync(tmp, "wx", 0o600);
+    try {
+      writeSync(fd, typeof data === "string" ? Buffer.from(data, "utf8") : data);
+      fsyncSync(fd);
+    } finally {
+      closeSync(fd);
+    }
+    renameSync(tmp, path);
+  } catch (e) {
+    try {
+      unlinkSync(tmp);
+    } catch {
+      /* already gone */
+    }
+    throw e;
+  }
+  syncDir(join(path, ".."));
+}
+
+const isSealed = (v: unknown): v is SealedBlob => !!v && typeof v === "object" && (v as SealedBlob).alg === "A256GCM" && typeof (v as SealedBlob).ct === "string";
 
 export class BridgeState {
   private readonly dir: string;
@@ -76,6 +113,9 @@ export class BridgeState {
   usedJtis: Map<string, number> = new Map();
   keyStore: KeyStore = { keysRev: 0, values: {} };
   standalone: StandaloneOverlay | undefined;
+  reports: PendingReports = { revoked: [], pairingJtis: {} };
+  /** true when plaintext files of an older bridge were read (they are resealed on the next save) */
+  private migrating = false;
 
   constructor(dataDir: string, api: ManifestApi, keks: { current: Kek; previous?: Kek }) {
     this.dir = join(dataDir, "bridge");
@@ -88,36 +128,81 @@ export class BridgeState {
     return join(this.dir, name);
   }
 
-  /** Loads S3–S6 and S9; S1 and S2 are read on demand. Reseals with the current KEK when a previous one was used. */
-  load(): void {
-    for (const r of readJson<PairingConnectionRecord[]>(this.path("connections.json")) ?? []) this.connections.set(r.con, r);
-    this.claims = readJson<PendingClaim[]>(this.path("claims.json")) ?? [];
-    const now = nowS();
-    for (const [jti, exp] of Object.entries(readJson<Record<string, number>>(this.path("jtis.json")) ?? {})) if (exp > now) this.usedJtis.set(jti, exp);
-    const sealed = readJson<SealedBlob>(this.path("keys.sealed.json"));
-    if (sealed) {
-      this.keyStore = JSON.parse(Buffer.from(this.api.unseal(sealed, this.keks, "tb:seal:bridge-keys:store")).toString("utf8")) as KeyStore;
-      if (this.keks.previous) this.saveKeyStore();
+  private aad(name: string): string {
+    return `tb:seal:bridge-state:${name}`;
+  }
+
+  private formatMarked(): boolean {
+    const p = this.path("format.sealed.json");
+    if (!existsSync(p)) return false;
+    const v = JSON.parse(Buffer.from(this.api.unseal(JSON.parse(readFileSync(p, "utf8")) as SealedBlob, this.keks, this.aad("format"))).toString("utf8")) as { v?: number };
+    return (v.v ?? 0) >= FORMAT;
+  }
+
+  /** Reads a sealed record; plaintext only before the format marker exists (one-time migration). */
+  private readRecord<T>(name: string, legacyName: string): T | undefined {
+    const sealedPath = this.path(`${name}.sealed.json`);
+    if (existsSync(sealedPath)) {
+      const blob = JSON.parse(readFileSync(sealedPath, "utf8")) as SealedBlob;
+      if (!isSealed(blob)) throw new BridgeError("state_corrupt", 500, `${name} is not a sealed record`);
+      return JSON.parse(Buffer.from(this.api.unseal(blob, this.keks, this.aad(name))).toString("utf8")) as T;
     }
-    this.standalone = readJson<StandaloneOverlay>(this.path("standalone.json"));
+    const legacy = this.path(legacyName);
+    if (!existsSync(legacy)) return undefined;
+    if (this.formatMarked()) throw new BridgeError("state_corrupt", 500, `${legacyName}: plaintext state is not accepted any more`);
+    this.migrating = true;
+    return JSON.parse(readFileSync(legacy, "utf8")) as T;
+  }
+
+  private writeRecord(name: string, value: unknown, legacyName?: string): void {
+    const blob = this.api.seal(Buffer.from(JSON.stringify(value), "utf8"), this.keks.current, this.aad(name));
+    atomicWrite(this.path(`${name}.sealed.json`), JSON.stringify(blob));
+    if (legacyName && existsSync(this.path(legacyName))) {
+      unlinkSync(this.path(legacyName));
+      syncDir(this.dir);
+    }
+  }
+
+  private markFormat(): void {
+    const blob = this.api.seal(Buffer.from(JSON.stringify({ v: FORMAT }), "utf8"), this.keks.current, this.aad("format"));
+    atomicWrite(this.path("format.sealed.json"), JSON.stringify(blob));
+  }
+
+  /** Loads S3–S6, S9 and pending reports; S1 and S2 are read on demand. Reseals with the current KEK / migrates. */
+  load(): void {
+    for (const r of this.readRecord<PairingConnectionRecord[]>("connections", "connections.json") ?? []) this.connections.set(r.con, r);
+    this.claims = this.readRecord<PendingClaim[]>("claims", "claims.json") ?? [];
+    const now = nowS();
+    for (const [jti, exp] of Object.entries(this.readRecord<Record<string, number>>("jtis", "jtis.json") ?? {})) if (exp > now) this.usedJtis.set(jti, exp);
+    const sealed = existsSync(this.path("keys.sealed.json")) ? (JSON.parse(readFileSync(this.path("keys.sealed.json"), "utf8")) as SealedBlob) : undefined;
+    if (sealed) this.keyStore = JSON.parse(Buffer.from(this.api.unseal(sealed, this.keks, "tb:seal:bridge-keys:store")).toString("utf8")) as KeyStore;
+    this.standalone = this.readRecord<StandaloneOverlay>("standalone", "standalone.json");
+    this.reports = this.readRecord<PendingReports>("reports", "reports.json") ?? { revoked: [], pairingJtis: {} };
+    if (this.keks.previous || this.migrating) {
+      this.saveConnections();
+      this.saveClaims();
+      this.saveJtis();
+      this.saveKeyStore();
+      this.saveStandalone();
+      this.saveReports();
+    }
   }
 
   async loadIdentity(): Promise<Identity | undefined> {
-    const f = readJson<IdentityFile>(this.path("identity.json"));
+    const f = this.readRecord<IdentityFile>("identity", "identity.json");
     if (!f) return undefined;
-    const pkcs8 = this.api.unseal(f.sealedPrivateKey, this.keks, `tb:seal:bridge-key:${f.kid}`);
+    let pkcs8: Uint8Array;
+    if (typeof f.privateKey === "string") pkcs8 = new Uint8Array(Buffer.from(f.privateKey, "base64url"));
+    else if (f.sealedPrivateKey) pkcs8 = this.api.unseal(f.sealedPrivateKey, this.keks, `tb:seal:bridge-key:${f.kid}`);
+    else throw new BridgeError("identity_corrupt", 500, "bridge identity has no key");
     const key = await this.api.importKeyPair(pkcs8);
     if (key.kid !== f.kid) throw new BridgeError("identity_corrupt", 500, "bridge key does not match its record");
-    const id: Identity = {
-      bridgeId: f.bridgeId,
-      workspaceId: f.workspaceId,
-      key,
-      portalKeys: f.portalKeys,
-      enrolCodeDigest: f.enrolCodeDigest,
-      configPath: f.configPath,
-      ackPath: f.ackPath,
-    };
-    if (this.keks.previous) await this.saveIdentity(id);
+    const id: Identity = { bridgeId: f.bridgeId, workspaceId: f.workspaceId, key, portalKeys: f.portalKeys, enrolCodeDigest: f.enrolCodeDigest, configPath: f.configPath, ackPath: f.ackPath };
+    if (this.keks.previous || this.migrating) await this.saveIdentity(id);
+    if (this.migrating) {
+      this.markFormat();
+      this.migrating = false;
+    }
     return id;
   }
 
@@ -128,13 +213,15 @@ export class BridgeState {
       workspaceId: id.workspaceId,
       kid: id.key.kid,
       publicKey: id.key.publicJwk,
-      sealedPrivateKey: this.api.seal(pkcs8, this.keks.current, `tb:seal:bridge-key:${id.key.kid}`),
+      privateKey: Buffer.from(pkcs8).toString("base64url"),
       portalKeys: id.portalKeys,
       enrolCodeDigest: id.enrolCodeDigest,
       configPath: id.configPath,
       ackPath: id.ackPath,
     };
-    atomicWrite(this.path("identity.json"), JSON.stringify(f));
+    // the WHOLE record is sealed (portalKeys = trust anchor, workspaceId, enrolCodeDigest included)
+    this.writeRecord("identity", f, "identity.json");
+    if (!this.formatMarked()) this.markFormat();
   }
 
   loadConfigJws(): string | undefined {
@@ -147,11 +234,15 @@ export class BridgeState {
   }
 
   saveConnections(): void {
-    atomicWrite(this.path("connections.json"), JSON.stringify([...this.connections.values()]));
+    this.writeRecord("connections", [...this.connections.values()], "connections.json");
   }
 
   saveClaims(): void {
-    atomicWrite(this.path("claims.json"), JSON.stringify(this.claims));
+    this.writeRecord("claims", this.claims, "claims.json");
+  }
+
+  private saveJtis(): void {
+    this.writeRecord("jtis", Object.fromEntries(this.usedJtis), "jtis.json");
   }
 
   saveKeyStore(): void {
@@ -160,7 +251,11 @@ export class BridgeState {
   }
 
   saveStandalone(): void {
-    if (this.standalone) atomicWrite(this.path("standalone.json"), JSON.stringify(this.standalone));
+    if (this.standalone) this.writeRecord("standalone", this.standalone, "standalone.json");
+  }
+
+  saveReports(): void {
+    this.writeRecord("reports", this.reports, "reports.json");
   }
 
   /** One-time use of a jti (pairing code, keys ticket). Returns false when already used. */
@@ -169,7 +264,7 @@ export class BridgeState {
     for (const [k, e] of this.usedJtis) if (e <= now) this.usedJtis.delete(k);
     if (this.usedJtis.has(jti)) return false;
     this.usedJtis.set(jti, exp + 30);
-    atomicWrite(this.path("jtis.json"), JSON.stringify(Object.fromEntries(this.usedJtis)));
+    this.saveJtis();
     return true;
   }
 

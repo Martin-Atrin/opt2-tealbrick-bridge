@@ -10,7 +10,7 @@ import type { KeyRequirement, Manifest } from "@opt2-tealbrick/spec/manifest";
 import { isRefusal, type Json, type KeySet } from "./api.ts";
 import type { CallRouter } from "./calls.ts";
 import { type BridgeContext, SDK_CURRENT_MAJOR } from "./context.ts";
-import type { AppRuntime, Table } from "./table.ts";
+import { type AppRuntime, internalUrlAllowed, type Table } from "./table.ts";
 import { BridgeError, envelope, headerValue, isRecord, nowS, parseJson, readBody, sendError, sendJson, statusFor } from "./util.ts";
 
 interface InstanceCaller {
@@ -64,8 +64,9 @@ export class InternalApi {
       throw new BridgeError("unauthenticated", 401);
     }
     for (const [k, e] of this.seenJtis) if (e <= now) this.seenJtis.delete(k);
-    if (this.seenJtis.has(v.claims.jti)) throw new BridgeError("unauthenticated", 401);
-    this.seenJtis.set(v.claims.jti, v.claims.exp + 30);
+    const replayKey = `${v.header.kid}|${v.claims.jti}`;
+    if (this.seenJtis.has(replayKey) || this.ctx.proofBeforeBoot(v.claims.iat, now)) throw new BridgeError("unauthenticated", 401);
+    this.seenJtis.set(replayKey, v.claims.exp + 30);
     return { ins, svc };
   }
 
@@ -122,6 +123,7 @@ export class InternalApi {
     let internalUrl: string | undefined;
     if (entry.kind === "neighbour") {
       if (typeof r.internalUrl !== "string") throw new BridgeError("input_invalid", 400, "internalUrl required for neighbours");
+      if (!internalUrlAllowed(r.internalUrl, ctx.form, ctx.appHosts)) throw new BridgeError("internal_url_refused", 403, "this neighbour address is not in TB_APP_HOSTS");
       internalUrl = new URL(r.internalUrl).origin;
       const res2 = await ctx.fetch(new URL("/tb/v1/manifest", internalUrl), { redirect: "error", signal: AbortSignal.timeout(10_000) });
       const v = ctx.api.validateManifest(await res2.json());

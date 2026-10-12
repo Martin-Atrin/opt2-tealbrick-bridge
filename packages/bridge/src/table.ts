@@ -26,6 +26,8 @@ export interface AppRuntime {
   scopeTypes: string[];
   /** manifest could not be fetched or did not match its digest */
   down: boolean;
+  /** internalUrl outside the allow-list (BSD-07): never contacted, never recovered by the manifest retry */
+  refused?: boolean;
 }
 
 export interface GrantRef {
@@ -92,6 +94,48 @@ export function portalKeySet(api: ManifestApi, entries: PortalKeyEntry[]): KeySe
   return { keys: set.keys.map((k) => ({ ...k, status: status.get(api.thumbprint(k.jwk)) ?? k.status })) };
 }
 
+/**
+ * BSD-07: where the bridge may send app traffic (tool inputs, grants, call proofs, hook envelopes, owner UI).
+ * Deployed form: only the provider's private network, `http://<name>.railway.internal:<port>`. Both forms:
+ * hosts listed in TB_APP_HOSTS (comma list of host names or IPv4 CIDRs) — required for own-infrastructure
+ * neighbours. Anything else is refused, so a compromised Portal cannot point an app at an outside host.
+ */
+export function internalUrlAllowed(raw: string, form: "deployed" | "own_infra", appHosts: readonly string[]): boolean {
+  let u: URL;
+  try {
+    u = new URL(raw);
+  } catch {
+    return false;
+  }
+  if (u.username || u.password || (u.pathname !== "/" && u.pathname !== "") || u.search || u.hash) return false;
+  if (u.protocol !== "http:" && !(form === "own_infra" && u.protocol === "https:")) return false;
+  const host = u.hostname.toLowerCase();
+  if (form === "deployed" && u.protocol === "http:" && u.port !== "" && /^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?\.railway\.internal$/.test(host)) return true;
+  return appHosts.some((h) => hostMatches(host, h.trim().toLowerCase()));
+}
+
+function ipv4(s: string): number | undefined {
+  const m = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(s);
+  if (!m) return undefined;
+  const parts = m.slice(1).map(Number);
+  if (parts.some((p) => p > 255)) return undefined;
+  return ((parts[0] as number) << 24) + ((parts[1] as number) << 16) + ((parts[2] as number) << 8) + (parts[3] as number);
+}
+
+function hostMatches(host: string, rule: string): boolean {
+  if (!rule) return false;
+  const cidr = /^([\d.]+)\/(\d{1,2})$/.exec(rule);
+  if (cidr) {
+    const ip = ipv4(host);
+    const net = ipv4(cidr[1] as string);
+    const bits = Number(cidr[2]);
+    if (ip === undefined || net === undefined || bits > 32) return false;
+    const mask = bits === 0 ? 0 : (~0 << (32 - bits)) >>> 0;
+    return ((ip & mask) >>> 0) === ((net & mask) >>> 0);
+  }
+  return host === rule;
+}
+
 export interface BuildInput {
   api: ManifestApi;
   config: WorkspaceConfig;
@@ -102,6 +146,8 @@ export interface BuildInput {
   /** previous table: manifests by digest are reused */
   previous: Table | undefined;
   fetchManifest: (app: AppEntry) => Promise<Manifest>;
+  /** BSD-07 allow-list check for `apps[].internalUrl` (refused apps are marked down and reported) */
+  internalUrlAllowed?: (url: string) => boolean;
   onManifestFailure?: (app: AppEntry, e: unknown) => void;
   now: number;
   reject: (r: Rejection) => void;
@@ -126,6 +172,10 @@ export async function buildTable(input: BuildInput): Promise<Table> {
   for (const a of input.previous?.apps.values() ?? []) if (a.manifest) prevByDigest.set(a.entry.manifestDigest, a.manifest);
 
   const runtimes = await mapLimit(config.apps, 4, async (entry): Promise<AppRuntime> => {
+    if (input.internalUrlAllowed && !input.internalUrlAllowed(entry.internalUrl)) {
+      input.reject({ kind: "config", code: "internal_url_refused", detail: `ins ${entry.ins}` });
+      return { entry, manifest: undefined, ops: new Map(), scopeTypes: [], down: true, refused: true };
+    }
     let manifest = prevByDigest.get(entry.manifestDigest);
     let down = false;
     if (!manifest) {

@@ -9,13 +9,15 @@ import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import { isRefusal } from "./api.ts";
 import { BRIDGE_VERSION, type BridgeContext, MCP_VERSIONS, SDK_MAJORS } from "./context.ts";
 import { remintStandalone } from "./standalone.ts";
-import { buildTable, portalKeySet, type Table } from "./table.ts";
+import { buildTable, internalUrlAllowed, portalKeySet, type Table } from "./table.ts";
 import { BridgeError, isRecord, jitter, nowS, sleep } from "./util.ts";
 
 const API = "/api/v1";
 const MAX_CONFIG_BYTES = 4 * 1024 * 1024;
 /** Pause between pulls after a refused config document (tight-loop guard). */
 export const REFUSED_PULL_DELAY_MS = 5_000;
+/** Minimum spacing of config pulls (BSD-09); a long-poll normally takes up to 60 s anyway. */
+export const MIN_PULL_INTERVAL_MS = 5_000;
 
 /** BRIDGE §4.1: first start, or re-enrolment when TB_ENROL_CODE changed (§4.3). */
 export async function ensureEnrolled(ctx: BridgeContext, enrolCode: string | undefined): Promise<void> {
@@ -98,7 +100,7 @@ export function startManifestRetry(ctx: BridgeContext, signal: AbortSignal): voi
     let fixed = false;
     try {
       for (const app of t.apps.values()) {
-        if (!app.down) continue;
+        if (!app.down || app.refused) continue;
         const key = `${app.entry.ins}|${app.entry.manifestDigest}`;
         const a = attempts.get(key) ?? { at: 0, delay: 2_000 };
         if (Date.now() < a.at) continue;
@@ -171,13 +173,17 @@ export async function applyConfig(ctx: BridgeContext, jws: string, opts: { boot?
     return false;
   }
   const issuers = portalKeySet(ctx.api, id.portalKeys);
-  const v = ctx.api.verifyConfig(jws, { now, self: ctx.bridgeRef, issuers });
+  // BSD-03: the boot copy (S2 on the volume) is verified with the TRUSTED set like any pulled document; the ONLY
+  // waived check is time (an S2 older than 12 h still loads, and then fails closed for calls, §5.4). A document
+  // that fails any other check (signature, unknown kid, audience, workspace) is not loaded at all.
+  const peekedExp = (peekBody(jws) as { exp?: unknown } | undefined)?.exp;
+  const verifyNow = opts.boot && typeof peekedExp === "number" ? Math.min(now, peekedExp - 1) : now;
+  const v = ctx.api.verifyConfig(jws, { now: verifyNow, self: ctx.bridgeRef, issuers });
   if (isRefusal(v)) {
-    if (!opts.boot) ctx.reject({ kind: "config", code: v.code, detail: `${v.reason}; rev ${peekRev(jws)}; trusted ${id.portalKeys.length}` });
-    // At boot an S2 older than 12 h fails verification on time; load it anyway so person paths work (§5.4).
-    if (!opts.boot) return false;
+    ctx.reject({ kind: "config", code: v.code, detail: `${v.reason}; rev ${peekRev(jws)}; trusted ${id.portalKeys.length}${opts.boot ? "; boot copy refused" : ""}` });
+    return false;
   }
-  const body = (isRefusal(v) ? peekBody(jws) : v.body) as WorkspaceConfig | undefined;
+  const body = v.body as WorkspaceConfig | undefined;
   if (!body || !isRecord(body)) return false;
   const current = ctx.table?.rev ?? -1;
   if (body.v !== 1 || body.ws !== id.workspaceId || body.sub !== ctx.bridgeRef || body.aud !== ctx.bridgeRef) {
@@ -202,6 +208,7 @@ export async function applyConfig(ctx: BridgeContext, jws: string, opts: { boot?
     issuers: portalKeySet(ctx.api, nextKeys),
     previous: ctx.table,
     fetchManifest: (app) => fetchManifestFrom(ctx, app),
+    internalUrlAllowed: (u) => internalUrlAllowed(u, ctx.form, ctx.appHosts),
     onManifestFailure: (app, e) => logManifestFailure(ctx, app, e),
     now,
     reject: (r) => ctx.reject(r),
@@ -252,6 +259,10 @@ function reconcileConnections(ctx: BridgeContext, table: Table): void {
     if (listed && !rec.reported) {
       rec.reported = true;
       changed = true;
+      if (ctx.state.reports.pairingJtis[con] !== undefined) {
+        delete ctx.state.reports.pairingJtis[con];
+        ctx.state.saveReports();
+      }
       continue;
     }
     const reportedAt = reportedAtS.get(con);
@@ -311,7 +322,7 @@ export function buildStatusReport(ctx: BridgeContext): StatusReport {
     .filter((r) => !r.reported)
     .map((r) => {
       if (!reportedAtS.has(r.con)) reportedAtS.set(r.con, now);
-      return { con: r.con, agt: r.agt, method: "pairing" as const, clientName: r.clientName, createdAt: new Date(r.createdAt * 1000).toISOString(), pairingJti: pairingJtis.get(r.con) ?? "" };
+      return { con: r.con, agt: r.agt, method: "pairing" as const, clientName: r.clientName, createdAt: new Date(r.createdAt * 1000).toISOString(), pairingJti: ctx.state.reports.pairingJtis[r.con] ?? "" };
     });
   return {
     rev: t?.rev ?? 0,
@@ -322,7 +333,7 @@ export function buildStatusReport(ctx: BridgeContext): StatusReport {
     keys,
     scopeSummaries: [...ctx.scopeSummaries.values()],
     connectionsCreated,
-    connectionsRevoked: ctx.connectionsRevoked,
+    connectionsRevoked: [...ctx.state.reports.revoked],
     claims: ctx.state.claims.map(({ reported: _r, ...c }) => c),
     rejected: [...ctx.rejected.entries()].map(([k, count]) => {
       const [kind, code] = k.split("|") as [StatusReport["rejected"][number]["kind"], string];
@@ -332,21 +343,26 @@ export function buildStatusReport(ctx: BridgeContext): StatusReport {
   };
 }
 
-/** Pairing-code jti per locally created connection (reported once). */
-export const pairingJtis = new Map<string, string>();
 
-export async function sendStatus(ctx: BridgeContext): Promise<void> {
-  if (!ctx.identity || ctx.table?.standalone) return;
+export async function sendStatus(ctx: BridgeContext): Promise<boolean> {
+  if (!ctx.identity || ctx.table?.standalone) return true;
   const report = buildStatusReport(ctx);
   try {
     const res = await portalRequest(ctx, "POST", ctx.identity.ackPath, report);
     if (res.ok) {
-      ctx.connectionsRevoked = [];
+      // Portal recorded the revocations it was told about (BSD-11: kept on the volume until then)
+      if (ctx.state.reports.revoked.length) {
+        const sent = new Set(report.connectionsRevoked.map((r) => r.con));
+        ctx.state.reports.revoked = ctx.state.reports.revoked.filter((r) => !sent.has(r.con));
+        ctx.state.saveReports();
+      }
       ctx.rejected.clear();
-    }
+    } else ctx.log.warn("bridge.status.failed", { code: `http_${res.status}` });
     await res.body?.cancel().catch(() => undefined);
+    return res.ok;
   } catch {
     ctx.log.warn("bridge.status.failed", { code: "portal_unreachable" });
+    return false;
   }
 }
 
@@ -360,13 +376,23 @@ export function startStatusLoop(ctx: BridgeContext, signal: AbortSignal): { poke
     const r = buildStatusReport(ctx);
     const { appliedAt: _a, ...stable } = r;
     const d = ctx.api.digest(stable as never);
-    if (d === lastDigest && !(ctx.connectionsRevoked.length || ctx.rejected.size)) return;
+    if (d === lastDigest && !(ctx.state.reports.revoked.length || ctx.rejected.size)) return;
     lastDigest = d;
-    await sendStatus(ctx);
+    if (await sendStatus(ctx)) {
+      retryMs = 15_000;
+      return;
+    }
+    // a report Portal did not receive is retried (revocations and claims must arrive, BSD-11)
+    lastDigest = "";
+    if (!timer && !signal.aborted) timer = setTimeout(fire, retryMs);
+    retryMs = Math.min(retryMs * 2, 300_000);
   };
+  let retryMs = 15_000;
   const poke = () => {
     if (!timer && !signal.aborted) timer = setTimeout(fire, 2_000);
   };
+  // first report right after start (the boot config was applied before this loop listened)
+  poke();
   const periodic = setInterval(() => {
     lastDigest = "";
     poke();
@@ -387,11 +413,18 @@ export async function runConfigLoop(ctx: BridgeContext, signal: AbortSignal): Pr
     const id = ctx.identity;
     if (!id) return;
     const after = ctx.table?.rev ?? 0;
+    const started = Date.now();
+    // BSD-09: whatever the answer, never pull more than once per ~5 s (a Portal or proxy that ignores `wait`
+    // would otherwise make every bridge loop signed requests at network speed)
+    const pace = async () => {
+      if (Date.now() - started < MIN_PULL_INTERVAL_MS) await sleep(jitter(MIN_PULL_INTERVAL_MS), signal);
+    };
     try {
       const res = await portalRequest(ctx, "GET", `${id.configPath}?after=${after}&wait=60`, undefined, 75_000, signal);
       if (res.status === 304) {
         ctx.lastPull = nowS();
         backoff = 15_000;
+        await pace();
         continue;
       }
       if (res.status === 200) {
@@ -403,7 +436,8 @@ export async function runConfigLoop(ctx: BridgeContext, signal: AbortSignal): Pr
         // A refused document would be served again at once (`after` is unchanged): wait before the next pull
         // instead of re-pulling it in a tight loop. Pause/revoke in the next valid revision is still picked up ≤ ~6 s.
         // A document with the revision we already run is a no-op, not a refusal: only a short pause.
-        if (!applied) await sleep(sameRev ? 1_000 : jitter(REFUSED_PULL_DELAY_MS), signal);
+        if (!applied && !sameRev) await sleep(jitter(REFUSED_PULL_DELAY_MS), signal);
+        else await pace();
         continue;
       }
       await res.body?.cancel().catch(() => undefined);

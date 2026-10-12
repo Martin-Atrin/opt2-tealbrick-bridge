@@ -5,7 +5,7 @@
 
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
-import type { AppStatus, StatusReport } from "@opt2-tealbrick/spec/bridge";
+import type { AppStatus, } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, InstanceId } from "@opt2-tealbrick/spec/credentials";
 import type { KeySet, ManifestApi } from "./api.ts";
 import type { BridgeState, Identity } from "./state.ts";
@@ -31,6 +31,8 @@ export interface BridgeOptions {
   /** internal listener origin as apps reach it (e.g. http://bridge.railway.internal:8788) */
   internalUrl: string;
   form: "deployed" | "own_infra";
+  /** BSD-07: extra allowed app hosts (TB_APP_HOSTS) */
+  appHosts?: string[];
   fetch?: typeof fetch;
 }
 
@@ -48,8 +50,11 @@ export class BridgeContext extends EventEmitter {
   readonly keysUrl: string | undefined;
   readonly internalUrl: string;
   readonly form: "deployed" | "own_infra";
+  readonly appHosts: string[];
   readonly fetch: typeof fetch;
   readonly boot = randomUUID();
+  /** epoch s of this process start: proofs signed before it are refused for one proof lifetime (BSD-12) */
+  readonly bootS = Math.floor(Date.now() / 1000);
   identity: Identity | undefined;
   table: Table | undefined;
   /** last successful config pull (epoch s) */
@@ -58,7 +63,6 @@ export class BridgeContext extends EventEmitter {
   readonly scopeSummaries = new Map<string, { agt: AgentId; ins: InstanceId; label: string }>();
   readonly rejected = new Map<string, number>();
   readonly toolsOmitted = new Map<string, { ins: InstanceId; name: string; code: "tool_name_too_long" | "name_collision" | "ceiling" }>();
-  connectionsRevoked: StatusReport["connectionsRevoked"] = [];
 
   constructor(o: BridgeOptions) {
     super();
@@ -71,6 +75,7 @@ export class BridgeContext extends EventEmitter {
     this.keysUrl = o.keysUrl;
     this.internalUrl = o.internalUrl;
     this.form = o.form;
+    this.appHosts = o.appHosts ?? [];
     this.fetch = o.fetch ?? fetch;
   }
 
@@ -93,6 +98,14 @@ export class BridgeContext extends EventEmitter {
   /** Config older than 12 h → agent and app→app calls fail closed (C9). Standalone documents are re-minted. */
   configExpired(now = nowS()): boolean {
     return !this.table || now > this.table.exp;
+  }
+
+  /**
+   * BSD-12: replay sets live in memory, so right after a restart a proof captured before it could be replayed once.
+   * For one proof lifetime (+ leeway) after boot, proofs issued before the boot are refused; clients re-sign.
+   */
+  proofBeforeBoot(iat: number, now = nowS()): boolean {
+    return now < this.bootS + 90 && iat < this.bootS;
   }
 
   portalReachable(now = nowS()): boolean {

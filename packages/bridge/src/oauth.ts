@@ -21,7 +21,6 @@ import {
 import { isRefusal } from "./api.ts";
 import type { BridgeContext } from "./context.ts";
 import { connectionState, issueAccess, revokeLocal, rotateRefresh } from "./identity.ts";
-import { pairingJtis } from "./portal.ts";
 import { BridgeError, clientIp, isRecord, nowS, RateLimiter, readBody, sendJson } from "./util.ts";
 
 interface ClientReg {
@@ -290,7 +289,8 @@ export class OAuthServer {
     };
     ctx.state.connections.set(con, rec);
     ctx.state.saveConnections();
-    pairingJtis.set(con, c.jti);
+    ctx.state.reports.pairingJtis[con] = c.jti;
+    ctx.state.saveReports();
     ctx.emit("connection-created", con);
     const authCode = ctx.api.opaqueValue("tbac_");
     this.codes.set(ctx.api.opaqueDigest(authCode), { con, agt, gen: 1, clientId: p.clientId, redirectUri: p.redirectUri, challenge: p.challenge, exp: now + LIFETIME_S.oauthAuthorizationCode });
@@ -352,13 +352,13 @@ export class OAuthServer {
     if (!t) throw new BridgeError("temporarily_unavailable");
     const assertion = typeof f.assertion === "string" ? f.assertion : "";
     const peek = peekPayload<AgentAssertionClaims>(assertion);
-    const con = peek?.con;
-    if (!con) throw new BridgeError("invalid_grant");
-    const entry = t.connections.get(con);
-    if (!entry) throw new BridgeError("connection_unknown");
-    if (entry.method !== "key" || !entry.publicKey || entry.status !== "active") throw new BridgeError("invalid_grant");
-    const st = connectionState(this.ctx, con);
-    if (!st?.active) throw new BridgeError("invalid_grant");
+    const con = typeof peek?.con === "string" ? peek.con : undefined;
+    // H-3: until the signature proves the caller holds the connection key, every failure answers the SAME way
+    // (`connection_unknown`, which a waiting client retries): no oracle on whether a connection id exists or is
+    // active. Only a verified key holder learns that its connection is revoked or paused (`invalid_grant`).
+    const notYet = () => new BridgeError("connection_unknown");
+    const entry = con ? t.connections.get(con as never) : undefined;
+    if (!con || !entry || entry.method !== "key" || !entry.publicKey) throw notYet();
     const keys = this.ctx.api.keySetFrom({ keys: [entry.publicKey] }, `tb:agt:${entry.agt}` as never);
     const now = nowS();
     const v = this.ctx.api.verifyJws<AgentAssertionClaims>(assertion, keys, {
@@ -368,12 +368,15 @@ export class OAuthServer {
       now,
       maxLifetimeS: LIFETIME_S.proof,
     });
-    if (isRefusal(v) || v.claims.sub !== `tb:agt:${entry.agt}` || v.claims.con !== con) throw new BridgeError("invalid_grant");
-    if (!t.agents.has(entry.agt)) throw new BridgeError("invalid_grant");
-    if (this.assertionJtis.has(v.claims.jti)) throw new BridgeError("invalid_grant");
+    if (isRefusal(v) || v.claims.sub !== `tb:agt:${entry.agt}` || v.claims.con !== con) throw notYet();
+    const replayKey = `${v.header.kid}|${v.claims.jti}`;
+    if (this.assertionJtis.has(replayKey) || this.ctx.proofBeforeBoot(v.claims.iat, now)) throw notYet();
+    // verified key holder from here on
+    const st = connectionState(this.ctx, con as never);
+    if (entry.status !== "active" || !st?.active || !t.agents.has(entry.agt)) throw new BridgeError("invalid_grant");
     // per-connection bucket counts only VERIFIED assertions (an attacker cannot spend another agent's budget)
     if (!this.tokenLimit.take(con)) throw new BridgeError("rate_limited");
-    this.assertionJtis.set(v.claims.jti, v.claims.exp + 30);
+    this.assertionJtis.set(replayKey, v.claims.exp + 30);
     const out: TokenResponse = { access_token: await issueAccess(this.ctx, entry.agt, con, entry.gen), token_type: "Bearer", expires_in: 900 };
     sendJson(res, 200, out, { pragma: "no-cache" });
   }

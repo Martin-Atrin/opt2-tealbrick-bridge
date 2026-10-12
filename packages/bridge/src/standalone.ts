@@ -9,7 +9,7 @@ import { type AgentId, type ConnectionId, type GrantClaims, LIFETIME_S, type Own
 import { isRefusal } from "./api.ts";
 import type { BridgeContext } from "./context.ts";
 import { revokeLocal } from "./identity.ts";
-import { buildTable, peekClaims } from "./table.ts";
+import { buildTable, internalUrlAllowed, peekClaims, portalKeySet } from "./table.ts";
 import { BridgeError, envelope, headerValue, isRecord, nowS, parseJson, readBody, sendError, sendJson } from "./util.ts";
 
 /** Builds and swaps the self-issued table from the frozen final config + overlay. */
@@ -17,8 +17,16 @@ export async function remintStandalone(ctx: BridgeContext): Promise<void> {
   const id = ctx.identity;
   const frozenJws = ctx.state.loadConfigJws();
   if (!id || !frozenJws) return;
-  const frozen = peekClaims<WorkspaceConfig>(frozenJws);
-  if (!frozen?.standalone) return;
+  const peeked = peekClaims<WorkspaceConfig>(frozenJws);
+  if (!peeked?.standalone) return;
+  // BSD-03: the frozen final config is re-verified with the last trusted Portal key set before anything is
+  // re-minted from it (only its age is waived: the bridge is the issuer now); a planted file is refused.
+  const fv = ctx.api.verifyConfig(frozenJws, { now: Math.min(nowS(), peeked.exp - 1), self: ctx.bridgeRef, issuers: portalKeySet(ctx.api, id.portalKeys) });
+  if (isRefusal(fv)) {
+    ctx.reject({ kind: "config", code: fv.code, detail: `${fv.reason}; frozen standalone config refused` });
+    return;
+  }
+  const frozen = fv.body as WorkspaceConfig;
   if (!ctx.state.standalone) ctx.state.standalone = { pausedWorkspace: frozen.pause.workspace, pausedAgents: [...frozen.pause.agents], revokedConnections: [], rev: frozen.rev };
   const overlay = ctx.state.standalone;
   overlay.rev += 1;
@@ -73,7 +81,7 @@ export async function remintStandalone(ctx: BridgeContext): Promise<void> {
   };
   const jws = await ctx.api.signJws(TYP.config, config, id.key);
   const own = ctx.ownKeySet();
-  const table = await buildTable({ api: ctx.api, config, jws, bridgeId: id.bridgeId, ownKeys: own, issuers: own, previous: ctx.table, fetchManifest: async () => { throw new Error("manifest from previous table only"); }, now, reject: (r) => ctx.reject(r) });
+  const table = await buildTable({ api: ctx.api, config, jws, bridgeId: id.bridgeId, ownKeys: own, issuers: own, previous: ctx.table, fetchManifest: async () => { throw new Error("manifest from previous table only"); }, internalUrlAllowed: (u) => internalUrlAllowed(u, ctx.form, ctx.appHosts), now, reject: (r) => ctx.reject(r) });
   // manifests are reused from the previous table (same digests); refetch any that are missing
   for (const [ins, app] of table.apps) {
     const prev = ctx.table?.apps.get(ins);
@@ -122,8 +130,9 @@ export class StandaloneAdmin {
       });
       if (isRefusal(v)) throw new BridgeError("unauthenticated", 401);
       for (const [k, e] of this.seen) if (e <= now) this.seen.delete(k);
-      if (this.seen.has(v.claims.jti)) throw new BridgeError("unauthenticated", 401);
-      this.seen.set(v.claims.jti, v.claims.exp + 30);
+      const replayKey = `${v.header.kid}|${v.claims.jti}`;
+      if (this.seen.has(replayKey) || this.ctx.proofBeforeBoot(v.claims.iat, now)) throw new BridgeError("unauthenticated", 401);
+      this.seen.set(replayKey, v.claims.exp + 30);
       const body = (parseJson(raw) ?? {}) as Record<string, unknown>;
       if (!isRecord(body)) throw new BridgeError("input_invalid", 400);
       const overlay = this.ctx.state.standalone;
