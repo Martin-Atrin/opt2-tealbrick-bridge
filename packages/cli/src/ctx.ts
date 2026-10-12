@@ -33,6 +33,10 @@ export const OPTIONS = {
   limit: { type: "string" },
   cursor: { type: "string" },
   label: { type: "string" },
+  /** agent login: suggested card name for a new card (C96; Core accepts agents[].name ≤ 60) */
+  name: { type: "string" },
+  /** agent login: suggested card purpose (spec 0.1.14, ≤ 280) */
+  purpose: { type: "string" },
   // connect
   write: { type: "boolean" },
   remote: { type: "boolean" },

@@ -12,8 +12,8 @@ importers:
         specifier: 2.5.15
         version: 2.5.15
       '@opt2-tealbrick/conformance':
-        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/conformance-v0.1.8/opt2-tealbrick-conformance-0.1.8.tgz
-        version: https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/conformance-v0.1.8/opt2-tealbrick-conformance-0.1.8.tgz
+        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/conformance-v0.1.9/opt2-tealbrick-conformance-0.1.9.tgz
+        version: https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/conformance-v0.1.9/opt2-tealbrick-conformance-0.1.9.tgz
       '@opt2-tealbrick/miniapp-sdk':
         specifier: https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/miniapp-sdk-v0.1.12/opt2-tealbrick-miniapp-sdk-0.1.12.tgz
         version: https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/miniapp-sdk-v0.1.12/opt2-tealbrick-miniapp-sdk-0.1.12.tgz
@@ -30,11 +30,11 @@ importers:
   packages/bridge:
     dependencies:
       '@opt2-tealbrick/manifest':
-        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.7/opt2-tealbrick-manifest-0.1.7.tgz
-        version: https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.7/opt2-tealbrick-manifest-0.1.7.tgz
+        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.9/opt2-tealbrick-manifest-0.1.9.tgz
+        version: https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.9/opt2-tealbrick-manifest-0.1.9.tgz
       '@opt2-tealbrick/spec':
-        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.12/opt2-tealbrick-spec-0.1.12.tgz
-        version: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.12/opt2-tealbrick-spec-0.1.12.tgz
+        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.14/opt2-tealbrick-spec-0.1.14.tgz
+        version: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.14/opt2-tealbrick-spec-0.1.14.tgz
 
   packages/bridge-server:
     dependencies:
@@ -42,8 +42,8 @@ importers:
         specifier: workspace:*
         version: link:../bridge
       '@opt2-tealbrick/spec':
-        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.12/opt2-tealbrick-spec-0.1.12.tgz
-        version: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.12/opt2-tealbrick-spec-0.1.12.tgz
+        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.14/opt2-tealbrick-spec-0.1.14.tgz
+        version: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.14/opt2-tealbrick-spec-0.1.14.tgz
 
   packages/cli:
     dependencies:
@@ -54,8 +54,8 @@ importers:
         specifier: workspace:*
         version: link:../harness-claude
       '@opt2-tealbrick/spec':
-        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.12/opt2-tealbrick-spec-0.1.12.tgz
-        version: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.12/opt2-tealbrick-spec-0.1.12.tgz
+        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.14/opt2-tealbrick-spec-0.1.14.tgz
+        version: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.14/opt2-tealbrick-spec-0.1.14.tgz
 
   packages/harness-claude:
     dependencies:
@@ -63,8 +63,8 @@ importers:
         specifier: workspace:*
         version: link:../bridge
       '@opt2-tealbrick/spec':
-        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.12/opt2-tealbrick-spec-0.1.12.tgz
-        version: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.12/opt2-tealbrick-spec-0.1.12.tgz
+        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.14/opt2-tealbrick-spec-0.1.14.tgz
+        version: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.14/opt2-tealbrick-spec-0.1.14.tgz
 
   packages/harness-eve:
     dependencies:
@@ -72,8 +72,8 @@ importers:
         specifier: workspace:*
         version: link:../bridge
       '@opt2-tealbrick/spec':
-        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.12/opt2-tealbrick-spec-0.1.12.tgz
-        version: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.12/opt2-tealbrick-spec-0.1.12.tgz
+        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.14/opt2-tealbrick-spec-0.1.14.tgz
+        version: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.14/opt2-tealbrick-spec-0.1.14.tgz
 
 packages:
 
@@ -130,14 +130,22 @@ packages:
     cpu: [x64]
     os: [win32]
 
-  '@opt2-tealbrick/conformance@https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/conformance-v0.1.8/opt2-tealbrick-conformance-0.1.8.tgz':
-    resolution: {integrity: sha512-CZsYyw3aJw4VW85LcZ5a6zxlpMx6RyaRwrO9orMVDKqhGDqutKvhriVs7dQLEaIxvw5NCUOzArdJnnJbg9xzCA==, tarball: https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/conformance-v0.1.8/opt2-tealbrick-conformance-0.1.8.tgz}
-    version: 0.1.8
+  '@opt2-tealbrick/conformance@https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/conformance-v0.1.9/opt2-tealbrick-conformance-0.1.9.tgz':
+    resolution: {integrity: sha512-c+LS3/pr0pcR3S7XM27+J6YlvmZnFlAJrDnFrbW2Ps6BXmXYdfOaA95m9n+5qyoTJHNk/SYQQvtMhgX1C92RCA==, tarball: https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/conformance-v0.1.9/opt2-tealbrick-conformance-0.1.9.tgz}
+    version: 0.1.9
     hasBin: true
 
   '@opt2-tealbrick/manifest@https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.7/opt2-tealbrick-manifest-0.1.7.tgz':
     resolution: {integrity: sha512-ugrNkgItlcucXwNBRjriMEi6OsE4CCggpm389hVI5HTi8ouQpFudawXIrYzR0GFmMHqkStLnrLeG6Lp8TS9/QQ==, tarball: https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.7/opt2-tealbrick-manifest-0.1.7.tgz}
     version: 0.1.7
+
+  '@opt2-tealbrick/manifest@https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.8/opt2-tealbrick-manifest-0.1.8.tgz':
+    resolution: {integrity: sha512-jAAPOlxIQZbE8u9cSYdMJnVH8rAPUp9kCZoJbSSq4bZHd/TR0ZgnNid71gLKR9Y95BPT5BBpn3riA4jECLToJg==, tarball: https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.8/opt2-tealbrick-manifest-0.1.8.tgz}
+    version: 0.1.8
+
+  '@opt2-tealbrick/manifest@https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.9/opt2-tealbrick-manifest-0.1.9.tgz':
+    resolution: {integrity: sha512-n9iIVbH3amRSW5b8UfPofqHyhZPP5W9artw40kpr2ymTqtL3TkkAzQL0jEuiZzPcA8S6meZilDBHCPAksK+oXQ==, tarball: https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.9/opt2-tealbrick-manifest-0.1.9.tgz}
+    version: 0.1.9
 
   '@opt2-tealbrick/miniapp-sdk@https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/miniapp-sdk-v0.1.12/opt2-tealbrick-miniapp-sdk-0.1.12.tgz':
     resolution: {integrity: sha512-f36Arwfg8Z92z+9As2z2cCwpVFxr0c7xVjr91jWg/E8VP2vhCBDzsdCHAYBIaQRGllf5l8rncqKeFSyifvsYWw==, tarball: https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/miniapp-sdk-v0.1.12/opt2-tealbrick-miniapp-sdk-0.1.12.tgz}
@@ -149,9 +157,27 @@ packages:
       react:
         optional: true
 
+  '@opt2-tealbrick/miniapp-sdk@https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/miniapp-sdk-v0.1.13/opt2-tealbrick-miniapp-sdk-0.1.13.tgz':
+    resolution: {integrity: sha512-p+Knchd1Zkp9fnRXRgETdsqs8+9v7xnyvmVoUWDGDUhyCJu4P0bfdMvyBSZh8HUSQO4VMqE8tObbFWRTq9VsXw==, tarball: https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/miniapp-sdk-v0.1.13/opt2-tealbrick-miniapp-sdk-0.1.13.tgz}
+    version: 0.1.13
+    hasBin: true
+    peerDependencies:
+      react: '>=19'
+    peerDependenciesMeta:
+      react:
+        optional: true
+
   '@opt2-tealbrick/spec@https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.12/opt2-tealbrick-spec-0.1.12.tgz':
     resolution: {integrity: sha512-202Dx3X0tfUn7BBxHwlS3yUijPv3qTTfwkRednhdQqHzKlIIFlmlSMobSTRioksKMHzHYmrjuQBDiPVICwzkfw==, tarball: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.12/opt2-tealbrick-spec-0.1.12.tgz}
     version: 0.1.12
+
+  '@opt2-tealbrick/spec@https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.13/opt2-tealbrick-spec-0.1.13.tgz':
+    resolution: {integrity: sha512-geh0FdzJG9ZXdjUE+Xih1LCMHDHL7QsSEjDsafXG2pjkMaO4bkF48k7pU/iSYFwyq/4BGt7wJwYs8pQkL0Z35w==, tarball: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.13/opt2-tealbrick-spec-0.1.13.tgz}
+    version: 0.1.13
+
+  '@opt2-tealbrick/spec@https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.14/opt2-tealbrick-spec-0.1.14.tgz':
+    resolution: {integrity: sha512-rS8l2s2OD5yUTDwuOCPt4anVvJOL2c5cmzrdGjQwqMCZOHCgNCAI0RoVeCUXQSElYGYJKfTnDCliH5lXNHbeTw==, tarball: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.14/opt2-tealbrick-spec-0.1.14.tgz}
+    version: 0.1.14
 
   '@types/node@24.19.2':
     resolution: {integrity: sha512-93d49wCWJkCyN87MxLpNN6KXPCwFw7bVUg79mGUV1OS40JGWwVCr8n61DXCSqz7CV6/VfPkb7xec7uP2M+QHWQ==}
@@ -224,14 +250,27 @@ snapshots:
   '@biomejs/cli-win32-x64@2.5.15':
     optional: true
 
-  '@opt2-tealbrick/conformance@https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/conformance-v0.1.8/opt2-tealbrick-conformance-0.1.8.tgz':
+  '@opt2-tealbrick/conformance@https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/conformance-v0.1.9/opt2-tealbrick-conformance-0.1.9.tgz':
     dependencies:
-      '@opt2-tealbrick/manifest': https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.7/opt2-tealbrick-manifest-0.1.7.tgz
-      '@opt2-tealbrick/spec': https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.12/opt2-tealbrick-spec-0.1.12.tgz
+      '@opt2-tealbrick/manifest': https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.8/opt2-tealbrick-manifest-0.1.8.tgz
+      '@opt2-tealbrick/miniapp-sdk': https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/miniapp-sdk-v0.1.13/opt2-tealbrick-miniapp-sdk-0.1.13.tgz
+      '@opt2-tealbrick/spec': https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.13/opt2-tealbrick-spec-0.1.13.tgz
+    transitivePeerDependencies:
+      - react
 
   '@opt2-tealbrick/manifest@https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.7/opt2-tealbrick-manifest-0.1.7.tgz':
     dependencies:
       '@opt2-tealbrick/spec': https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.12/opt2-tealbrick-spec-0.1.12.tgz
+      ajv: 8.17.1
+
+  '@opt2-tealbrick/manifest@https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.8/opt2-tealbrick-manifest-0.1.8.tgz':
+    dependencies:
+      '@opt2-tealbrick/spec': https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.13/opt2-tealbrick-spec-0.1.13.tgz
+      ajv: 8.17.1
+
+  '@opt2-tealbrick/manifest@https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.9/opt2-tealbrick-manifest-0.1.9.tgz':
+    dependencies:
+      '@opt2-tealbrick/spec': https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.13/opt2-tealbrick-spec-0.1.13.tgz
       ajv: 8.17.1
 
   '@opt2-tealbrick/miniapp-sdk@https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/miniapp-sdk-v0.1.12/opt2-tealbrick-miniapp-sdk-0.1.12.tgz':
@@ -239,7 +278,16 @@ snapshots:
       '@opt2-tealbrick/manifest': https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.7/opt2-tealbrick-manifest-0.1.7.tgz
       '@opt2-tealbrick/spec': https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.12/opt2-tealbrick-spec-0.1.12.tgz
 
+  '@opt2-tealbrick/miniapp-sdk@https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/miniapp-sdk-v0.1.13/opt2-tealbrick-miniapp-sdk-0.1.13.tgz':
+    dependencies:
+      '@opt2-tealbrick/manifest': https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.8/opt2-tealbrick-manifest-0.1.8.tgz
+      '@opt2-tealbrick/spec': https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.13/opt2-tealbrick-spec-0.1.13.tgz
+
   '@opt2-tealbrick/spec@https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.12/opt2-tealbrick-spec-0.1.12.tgz': {}
+
+  '@opt2-tealbrick/spec@https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.13/opt2-tealbrick-spec-0.1.13.tgz': {}
+
+  '@opt2-tealbrick/spec@https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.14/opt2-tealbrick-spec-0.1.14.tgz': {}
 
   '@types/node@24.19.2':
     dependencies:

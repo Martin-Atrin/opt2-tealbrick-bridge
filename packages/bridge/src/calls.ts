@@ -127,10 +127,6 @@ interface Active {
   depth: number;
 }
 
-/** C91 / SDK-API §3.2: which bridge-op proofs carry `op` and `in` (the SDK binds exactly these). */
-export const BRIDGE_OP_BINDS_OP: Readonly<Record<BridgeOp, boolean>> = { catalog: true, resolve: true, mark: false, scope_summary: false };
-export const BRIDGE_OP_BINDS_IN: Readonly<Record<BridgeOp, boolean>> = { catalog: false, resolve: true, mark: true, scope_summary: false };
-
 export class CallRouter {
   private readonly ctx: BridgeContext;
   private readonly active = new Map<CallId, Active>();
@@ -165,10 +161,8 @@ export class CallRouter {
       exp: now + LIFETIME_S.proof,
       jti: this.ctx.api.ulid(),
       call,
-      bop,
-      ...(BRIDGE_OP_BINDS_OP[bop] && typeof body.op === "string" ? { op: body.op } : {}),
-      // C91: `in` only for the bridge ops whose body is input (resolve, mark); catalog and scope_summary carry none
-      ...(BRIDGE_OP_BINDS_IN[bop] ? { in: this.ctx.api.digest(body as Json) } : {}),
+      // C91: exactly the claims the SDK binds, from the shared rule (manifest bridgeOpProofClaims, L1)
+      ...this.ctx.api.bridgeOpProofClaims(bop, body as Json),
     };
     const proof = await this.ctx.api.signJws(TYP.callProof, claims, id.key);
     const res = await this.ctx.fetch(new URL(`/tb/v1/bridge/${BRIDGE_OP_PATH[bop]}`, app.entry.internalUrl), {

@@ -32,6 +32,13 @@ export interface InboxSpec {
   cursor?: { param: string; from: string };
   /** skip items whose fields equal these values (default { fromSelf: true }: never answer yourself) */
   skipIf?: Record<string, unknown>;
+  /**
+   * F15/C96: which channel items start a turn. "mentions" (default): only items with `mentionsMe: true` (Connect
+   * 0.4.0+); "all": every item. Direct messages always wake (`conversationType: "direct"`). Items that do not wake are
+   * marked seen and never start a turn later. If items carry no `mentionsMe` (older Connect), the inbox falls back to
+   * "all" with a one-time warning.
+   */
+  wake?: "mentions" | "all";
 }
 
 /** C83 G10: one scheduled-work source (e.g. Evolution `routines_due` / `routine_claim` / `routine_report`). */
@@ -122,6 +129,7 @@ export function validateServeConfig(raw: unknown): ServeConfig {
   for (const i of c.inboxes) {
     if (!isToolName(i.tool)) throw new Error(`inbox tool must be a <product>__<op> name: ${String(i.tool)}`);
     if (i.cursor && (typeof i.cursor.param !== "string" || typeof i.cursor.from !== "string")) throw new Error(`inbox ${i.tool}: cursor {param, from}`);
+    if (i.wake !== undefined && i.wake !== "mentions" && i.wake !== "all") throw new Error(`inbox ${i.tool}: wake must be "mentions" or "all"`);
   }
   for (const r of c.routines ?? []) {
     for (const f of ["due", "claim", "report"] as const) if (!isToolName(r?.[f])) throw new Error(`routine ${f} must be a <product>__<op> name: ${String(r?.[f])}`);
@@ -212,6 +220,20 @@ export async function serveLoop(cfg: ServeConfig, deps: ServeDeps, signal: Abort
       },
     });
     return { ...r, held };
+  };
+  const warnedNoMentions = new Set<string>();
+  /** F15: does this item start a turn? (DMs always; channels per `wake`, default mentions) */
+  const wakes = (inbox: InboxSpec, it: Record<string, unknown>, key: string): boolean => {
+    if (it.conversationType === "direct") return true;
+    if ((inbox.wake ?? "mentions") === "all") return true;
+    if (typeof it.mentionsMe !== "boolean") {
+      if (!warnedNoMentions.has(key)) {
+        warnedNoMentions.add(key);
+        deps.log("serve.inbox.no_mentions_field", { tool: inbox.tool, fallback: "all" });
+      }
+      return true;
+    }
+    return it.mentionsMe;
   };
   const turn = async (prompt: string) => {
     const r = await runOne(prompt);
@@ -344,11 +366,12 @@ export async function serveLoop(cfg: ServeConfig, deps: ServeDeps, signal: Abort
         const idField = inbox.id ?? "id";
         const seen = new Set(state.seen[key] ?? []);
         const skip = inbox.skipIf ?? { fromSelf: true };
-        const fresh = list.filter((it) => {
+        const unseen = list.filter((it) => {
           const id = String(it[idField] ?? "");
           if (!id || seen.has(id)) return false;
           return !Object.entries(skip).some(([f, v]) => it[f] === v);
         });
+        const fresh = unseen.filter((it) => wakes(inbox, it, key));
         // next cursor
         if (inbox.cursor) {
           const from = inbox.cursor.from;

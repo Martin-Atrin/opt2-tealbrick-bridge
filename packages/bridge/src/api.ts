@@ -87,6 +87,11 @@ export interface ManifestApi {
   trustedPortalKeys(body: { portalKeySet?: unknown }, pinned: PinnedKeySet | null, roots: readonly Ed25519PublicJwk[], opts?: { required?: boolean }): KeySetDecision;
   /** BRIDGE §5.7 app address rule */
   isPrivateInternalUrl(url: string, opts?: { ownInfra?: boolean; allowList?: readonly string[] }): boolean;
+  // spec 0.1.14 / manifest 0.1.9 shared rules (LEARNINGS L1: one implementation, never a bridge copy)
+  /** C91: the claims of a bridge-op proof for `body` (exactly what the SDK binds) */
+  bridgeOpProofClaims(bop: "catalog" | "resolve" | "mark" | "scope_summary", body: Json): { bop: "catalog" | "resolve" | "mark" | "scope_summary"; op?: string; in?: Sha256Digest };
+  /** C98: the idempotency key derived for a tools/call without a client key */
+  deriveIdempotencyKey(i: { connection: string; session: string; op: string; input: unknown; now: number }): string;
 }
 
 export const isRefusal = (v: unknown): v is Refusal => !!v && typeof v === "object" && (v as { ok?: unknown }).ok === false;

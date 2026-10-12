@@ -25,7 +25,7 @@ Owner mode (person session; reads and drafts only):
 Harness:
   connect <claude-desktop|codex|claude-code|generic> [--agent <agt>] [--remote|--local] [--write [--yes]] [--bridge <url>]
 Agent mode (agent items only):
-  agent login (--agent <agt>... | --file <agents.json> | --create) [--harness <id>] [--label <machine>] | status | logout | list
+  agent login (--agent <agt>... | --file <agents.json> | --create) [--name <card name>] [--purpose <text>] [--harness <id>] [--label <machine>] | status | logout | list
   agent serve --file <agent-serve.json> [--agent <agt>]   answer inbox items with the agent's own harness
   (owner) agents export [--file <agents.json>]   writes card ids so agent login --file connects existing cards
 Local bridge: bridge serve --stdio [--agent <agt>] [--store file --config-dir <d>]   Own infrastructure: bridge enrol --code - [--data-dir <d>] | bridge run [--data-dir <d>]

@@ -1,6 +1,6 @@
 {
   "name": "@opt2-tealbrick/bridge",
-  "version": "0.1.15",
+  "version": "0.1.16",
   "private": true,
   "type": "module",
   "description": "Bridge core (deployed + relay forms). Never runs agents or calls models.",
@@ -25,7 +25,7 @@
     "build": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
-    "@opt2-tealbrick/spec": "https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.12/opt2-tealbrick-spec-0.1.12.tgz",
-    "@opt2-tealbrick/manifest": "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.7/opt2-tealbrick-manifest-0.1.7.tgz"
+    "@opt2-tealbrick/spec": "https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.14/opt2-tealbrick-spec-0.1.14.tgz",
+    "@opt2-tealbrick/manifest": "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.9/opt2-tealbrick-manifest-0.1.9.tgz"
   }
 }

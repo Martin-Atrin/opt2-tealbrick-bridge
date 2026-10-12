@@ -77,13 +77,14 @@ describe(`deployed bridge (${real ? "real manifest crypto" : "test double"})`, (
     assert.equal(st.structuredContent.status, "pending");
   });
 
-  test("ops outside the grant are not tools; idempotency is enforced and forwarded", async () => {
+  test("ops outside the grant are not tools; a client key is forwarded as is, none → the bridge derives one (C98)", async () => {
     const s = await session(w);
     const del = await call(w, s, "notes__notes_delete", {});
     assert.equal(del.isError, true);
     assert.equal(del.structuredContent.error.code, "unknown_tool");
     const noKey = await call(w, s, "notes__notes_create", { title: "a" });
-    assert.equal(noKey.structuredContent.error.code, "input_invalid");
+    assert.equal(noKey.isError, undefined, "C98: a model-style call without _meta is not refused");
+    assert.match(String(w.appLog.ops.at(-1)?.body.idempotencyKey), /^drv_[0-9a-f]{64}$/, "derived key forwarded (manifest deriveIdempotencyKey)");
     const ok = await call(w, s, "notes__notes_create", { title: "a" }, { "tealbrick/idempotencyKey": "idem-call-one" });
     assert.equal(ok.isError, undefined);
     assert.equal(w.appLog.ops.at(-1)?.body.idempotencyKey, "idem-call-one");

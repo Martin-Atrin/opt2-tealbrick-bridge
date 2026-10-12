@@ -3,38 +3,10 @@
   "waivers": [
     {
       "target": "bridge",
-      "id": "B7.dynamic_list",
+      "id": "B8.idempotency_required",
       "status": "fail",
-      "reason": "conformance 0.1.8 fake app binds pre-C91; live real-app test passes (packages/bridge/test/c91-live.test.ts, run in CI). Decision C91a.",
-      "removeWhen": "@opt2-tealbrick/conformance 0.1.9 lands"
-    },
-    {
-      "target": "bridge",
-      "id": "B16.catalog_omitted_reported",
-      "status": "fail",
-      "reason": "conformance 0.1.8 fake app binds pre-C91; live real-app test passes (packages/bridge/test/c91-live.test.ts, run in CI). Decision C91a.",
-      "removeWhen": "@opt2-tealbrick/conformance 0.1.9 lands"
-    },
-    {
-      "target": "bridge",
-      "id": "B16.search_uses_catalog",
-      "status": "fail",
-      "reason": "conformance 0.1.8 fake app binds pre-C91; live real-app test passes (packages/bridge/test/c91-live.test.ts, run in CI). Decision C91a.",
-      "removeWhen": "@opt2-tealbrick/conformance 0.1.9 lands"
-    },
-    {
-      "target": "bridge",
-      "id": "B16.dynamic_entry_call",
-      "status": "fail",
-      "reason": "conformance 0.1.8 fake app binds pre-C91; live real-app test passes (packages/bridge/test/c91-live.test.ts, run in CI). Decision C91a.",
-      "removeWhen": "@opt2-tealbrick/conformance 0.1.9 lands"
-    },
-    {
-      "target": "bridge",
-      "id": "B13.scope_summary",
-      "status": "fail",
-      "reason": "conformance 0.1.8 fake app binds pre-C91; live real-app test passes (packages/bridge/test/c91-live.test.ts, run in CI). Decision C91a.",
-      "removeWhen": "@opt2-tealbrick/conformance 0.1.9 lands"
+      "reason": "C98: the bridge derives the key; conformance predates C98 (decision C98a). Replacement evidence: packages/bridge/test/c98.test.ts (real bridge -> real SDK app, model-style calls).",
+      "removeWhen": "@opt2-tealbrick/conformance flips B8 to C98"
     }
   ]
 }

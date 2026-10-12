@@ -104,6 +104,20 @@ describe("agent mode (key connections)", () => {
     assert.equal(h.portal.requests.length, before, "no device request was started");
   });
 
+  test("C96: --name goes into the device request as the card suggestion; the harness id defaults to tealbrick-cli", async () => {
+    h.clock = Date.now();
+    const r = await h.run(["agent", "login", "--create", "--name", "Research agent", "--purpose", "Reads the inbox and drafts answers", "--json"]);
+    assert.equal(r.code, 0, r.err);
+    const start = lastStart as { harness: string; agents: { name?: string; purpose?: string; agt?: string }[] };
+    assert.equal(start.harness, "tealbrick-cli");
+    assert.equal(start.agents[0]?.name, "Research agent");
+    assert.equal(start.agents[0]?.purpose, "Reads the inbox and drafts answers");
+    const tooLong = await h.run(["agent", "login", "--create", "--name", "x".repeat(61), "--json"]);
+    assert.equal(tooLong.code, 2, "names are 1-60 characters");
+    const two = await h.run(["agent", "login", "--agent", AGT, "--agent", "agt_01HAAAAAAAAAAAAAAAAAAAAAAA", "--name", "x", "--json"]);
+    assert.equal(two.code, 2, "--name names one agent");
+  });
+
   test("agent login without --agent, --file or --create is refused", async () => {
     const r = await h.run(["agent", "login", "--json"]);
     assert.equal(r.code, 2);

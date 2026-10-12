@@ -58,6 +58,8 @@ export function manifestApi(): ManifestApi {
     portalRootKeys: (channel) => m.portalRootKeys(channel),
     trustedPortalKeys: (body, pinned, roots, opts) => m.trustedPortalKeys(body, pinned, roots, opts),
     isPrivateInternalUrl: (url, opts) => m.isPrivateInternalUrl(url, opts),
+    bridgeOpProofClaims: (bop, body) => m.bridgeOpProofClaims(bop, body),
+    deriveIdempotencyKey: (i) => m.deriveIdempotencyKey(i),
   };
 }
 

@@ -67,19 +67,24 @@ async function accessToken(ctx: Ctx, item: AgentItem): Promise<string> {
   throw new CliError(EXIT.refused, "invalid_grant", "the bridge refused this agent connection (revoked or paused)");
 }
 
+/** spec 0.1.14 allows 1..80; live Core (3230e69) accepts ≤ 60, so the CLI stays at 60 until they agree */
+const CARD_NAME_MAX = 60;
+const CARD_PURPOSE_MAX = 280;
+
 // ── agent login (CLI.md §4; one device request for 1..64 agents, C16 S4) ──
 async function agentLogin(ctx: Ctx): Promise<void> {
   if (ctx.v.code !== undefined) throw usageError("agent login takes no code (the owner approves in the browser)");
   const origin = ctx.portalOrigin();
-  const harness = ctx.v.harness ?? "tealbrick_cli";
+  // C96: Core 3230e69 lists the CLI harness option as `tealbrick-cli` (old spellings stay accepted as aliases)
+  const harness = ctx.v.harness ?? "tealbrick-cli";
   const label = (ctx.v.label ?? ctx.io.hostname ?? osHostname()).slice(0, 64) || "machine";
   // Every slot names an existing card (`id`) or asks for a new one (`create: true`): an approval must never
   // create cards by accident (QA S2: entries without ids produced duplicate cards). Ids come from the owner's
   // `tealbrick agents export --file <agents.json>`; agent mode cannot read the card list itself.
-  let slots: { agt?: AgentId; name?: string }[] = ctx.g.agents.map((a) => ({ agt: a as AgentId }));
+  let slots: { agt?: AgentId; name?: string; purpose?: string }[] = ctx.g.agents.map((a) => ({ agt: a as AgentId }));
   if (ctx.v.file) {
     const { readFile } = await import("node:fs/promises");
-    const doc = JSON.parse(await readFile(ctx.v.file, "utf8")) as { format?: string; agents?: { name?: unknown; id?: unknown; create?: unknown }[] };
+    const doc = JSON.parse(await readFile(ctx.v.file, "utf8")) as { format?: string; agents?: { name?: unknown; id?: unknown; create?: unknown; purpose?: unknown }[] };
     if (doc.format !== "tealbrick.agents/1" || !Array.isArray(doc.agents)) throw new CliError(EXIT.validation, "input_invalid", "file is not tealbrick.agents/1");
     const problems: string[] = [];
     slots = doc.agents.map((a, i) => {
@@ -87,13 +92,24 @@ async function agentLogin(ctx: Ctx): Promise<void> {
       if (typeof a.id === "string" && a.create === true) problems.push(`${name}: has both id and create`);
       else if (typeof a.id === "string") return { agt: a.id as AgentId, name };
       else if (a.create !== true) problems.push(`${name}: no id (run \`tealbrick agents export --file ${ctx.v.file}\` as the owner) and no "create": true`);
-      return { name };
+      return { name, ...(typeof a.purpose === "string" && a.purpose ? { purpose: a.purpose } : {}) };
     });
     if (problems.length) throw new CliError(EXIT.validation, "input_invalid", `refusing to start: every entry needs an agent id or "create": true — ${problems.join("; ")}`);
   }
   if (slots.length === 0) {
     if (ctx.v.create !== true) throw usageError("pass --agent <agt_…> (an existing card) or --create (choose or create the card at approval)");
     slots = [{}];
+  }
+  if (ctx.v.name !== undefined || ctx.v.purpose !== undefined) {
+    if (slots.length !== 1) throw usageError("--name/--purpose describe one agent; use the name/purpose fields of --file for several");
+    if (ctx.v.name !== undefined) (slots[0] as { name?: string }).name = String(ctx.v.name);
+    if (ctx.v.purpose !== undefined) (slots[0] as { purpose?: string }).purpose = String(ctx.v.purpose);
+  }
+  for (const s of slots as { purpose?: string }[]) {
+    if (s.purpose !== undefined && (s.purpose.trim().length === 0 || s.purpose.length > CARD_PURPOSE_MAX)) throw usageError(`agent purpose must be 1–${CARD_PURPOSE_MAX} characters`);
+  }
+  for (const s of slots) {
+    if (s.name !== undefined && (s.name.trim().length === 0 || s.name.length > CARD_NAME_MAX)) throw usageError(`agent name must be 1–${CARD_NAME_MAX} characters: ${s.name.slice(0, 80)}`);
   }
   const ids = slots.map((x) => x.agt).filter((x): x is AgentId => !!x);
   if (new Set(ids).size !== ids.length) throw new CliError(EXIT.validation, "input_invalid", "the same agent id appears twice");
@@ -106,7 +122,14 @@ async function agentLogin(ctx: Ctx): Promise<void> {
     client_id: CLIENT_ID,
     machine_label: label,
     harness,
-    agents: slots.map((s, i) => ({ ...(s.agt ? { agt: s.agt } : {}), public_key: (keys[i] as { publicJwk: Ed25519PublicJwk }).publicJwk as never })),
+    // C96: the slot's suggested card name, so the owner approves a NAMED card in one click (GUI prefills it).
+    // Placeholder names of unnamed file entries (`#3`) are never sent.
+    agents: slots.map((s, i) => ({
+      ...(s.agt ? { agt: s.agt } : {}),
+      ...(s.name && !/^#\d+$/.test(s.name) ? { name: s.name.trim() } : {}),
+      ...((s as { purpose?: string }).purpose ? { purpose: ((s as { purpose?: string }).purpose as string).trim() } : {}),
+      public_key: (keys[i] as { publicJwk: Ed25519PublicJwk }).publicJwk as never,
+    })),
   };
   const start = await client.call<DeviceStart>("device.start", startInput as unknown as Record<string, unknown>);
   ctx.say(`Open this URL to connect ${slots.length} agent(s) on "${label}":\n  ${start.verification_uri_complete}\nCheck that the code shown there is: ${start.user_code}`);

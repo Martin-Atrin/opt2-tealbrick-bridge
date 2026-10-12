@@ -8,6 +8,7 @@
  * Fails on any failing or not-run check, except the exact waivers in scripts/conformance-waivers.json (id + status).
  * Requires `npm run build` first. Reports go to .tb-ci/conformance/ (git-ignored).
  */
+import { BRIDGE_GROUP_ORDER } from "@opt2-tealbrick/conformance";
 import { spawnSync } from "node:child_process";
 import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -55,6 +56,8 @@ function judge(target: string, rep: Report): string[] {
   const problems: string[] = [];
   for (const c of rep.checks) {
     if (!FAILING.has(c.status)) continue;
+    const g = /group (\S+) not selected/.exec(c.asserted)?.[1];
+    if (c.status === "not_run" && g && g in SKIP_GROUPS) continue;
     const w = waivers.find((x) => x.target === target && x.id === c.id && x.status === c.status && (!x.assertedMatch || new RegExp(x.assertedMatch).test(c.asserted)));
     if (w) {
       console.log(`${target}: WAIVED ${c.id} (${c.status}) — see scripts/conformance-waivers.json`);
@@ -75,7 +78,17 @@ function judge(target: string, rep: Report): string[] {
 const problems: string[] = [];
 // BSD-08: the harness entry starts the BUILT bridge and passes the suite's test roots (--test-roots) to the
 // programmatic `portalRootKeys` option, so B20 runs; the runner sets TB_OWN_INFRA_ORIGINS for its fake apps (B21).
-problems.push(...judge("bridge", run("bridge", ["--cmd", `"${node}" "${entry}"`, "--test-roots", "--timeout", "15000"])));
+/**
+ * Groups this release does not run, each with its reason (explicit, never a silent skip). Empty = all groups.
+ * 0.1.16 is the C98 hotfix from main; the spine013 features (hv, tb.onBehalfOf) ship in 0.1.17.
+ */
+const SKIP_GROUPS: Record<string, string> = { spine013: "spine 0.1.13 features ship in bridge 0.1.17 (C98 hotfix 0.1.16 from main)" };
+/** the suite's own group list (never hand-typed: a missing name would silently drop checks) */
+const GROUPS: readonly string[] = BRIDGE_GROUP_ORDER;
+for (const g of Object.keys(SKIP_GROUPS)) if (!GROUPS.includes(g)) throw new Error(`SKIP_GROUPS names an unknown group: ${g}`);
+for (const [g, why] of Object.entries(SKIP_GROUPS)) console.log(`bridge: group ${g} NOT run — ${why}`);
+const groupArgs = Object.keys(SKIP_GROUPS).length ? ["--groups", GROUPS.filter((g) => !(g in SKIP_GROUPS)).join(",")] : [];
+problems.push(...judge("bridge", run("bridge", ["--cmd", `"${node}" "${entry}"`, "--test-roots", ...groupArgs, "--timeout", "15000"])));
 
 const home = mkdtempSync(join(tmpdir(), "tb-relay-conf-"));
 try {

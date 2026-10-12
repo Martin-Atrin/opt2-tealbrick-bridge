@@ -9,13 +9,13 @@
   "scripts": {
     "typecheck": "tsc --noEmit -p tsconfig.json",
     "lint": "biome check . && node scripts/check-literals.ts",
-    "test": "tsc -p packages/bridge/tsconfig.build.json && node --test --test-timeout=60000 \"packages/*/test/**/*.test.ts\"",
+    "test": "tsc -p packages/bridge/tsconfig.build.json && tsc -p packages/harness-claude/tsconfig.build.json && node --test --test-timeout=60000 \"packages/*/test/**/*.test.ts\"",
     "conformance": "npm run build && node --test --test-timeout=60000 packages/bridge/test/bridge.test.ts && node scripts/conformance.ts",
     "build": "tsc -p packages/bridge/tsconfig.build.json && tsc -p packages/bridge-server/tsconfig.build.json && tsc -p packages/harness-claude/tsconfig.build.json && tsc -p packages/harness-eve/tsconfig.build.json && tsc -p packages/cli/tsconfig.build.json"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",
-    "@opt2-tealbrick/conformance": "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/conformance-v0.1.8/opt2-tealbrick-conformance-0.1.8.tgz",
+    "@opt2-tealbrick/conformance": "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/conformance-v0.1.9/opt2-tealbrick-conformance-0.1.9.tgz",
     "@opt2-tealbrick/miniapp-sdk": "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/miniapp-sdk-v0.1.12/opt2-tealbrick-miniapp-sdk-0.1.12.tgz",
     "@types/node": "24.19.2",
     "fast-check": "4",

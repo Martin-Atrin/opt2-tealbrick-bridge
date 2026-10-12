@@ -335,13 +335,13 @@ export class McpServer {
       case "prompts/list":
         return { prompts: [] };
       case "tools/call":
-        return this.callTool(t, p, rpc.params ?? {}, requestId, signal);
+        return this.callTool(t, p, rpc.params ?? {}, requestId, signal, s.id);
       default:
         throw new RpcError(-32601, "method not found");
     }
   }
 
-  private async callTool(t: Table, p: Principal, params: Record<string, unknown>, requestId: string, signal: AbortSignal): Promise<unknown> {
+  private async callTool(t: Table, p: Principal, params: Record<string, unknown>, requestId: string, signal: AbortSignal, sessionId = ""): Promise<unknown> {
     const name = typeof params.name === "string" ? params.name : "";
     const args = (isRecord(params.arguments) ? params.arguments : {}) as Json;
     const meta = isRecord(params._meta) ? params._meta : {};
@@ -367,7 +367,7 @@ export class McpServer {
         }
         throw new BridgeError("unknown_tool", 404);
       }
-      return await this.runRoute(t, p, route, args, idem as string | undefined, requestId, signal);
+      return await this.runRoute(t, p, route, args, idem as string | undefined, requestId, signal, sessionId);
     } catch (e) {
       const code = e instanceof BridgeError ? e.code : "app_error";
       const message = e instanceof BridgeError ? e.message : "internal error";
@@ -380,7 +380,7 @@ export class McpServer {
     }
   }
 
-  private async runRoute(t: Table, p: Principal, route: ToolRoute, args: Json, idem: string | undefined, _requestId: string, signal: AbortSignal): Promise<unknown> {
+  private async runRoute(t: Table, p: Principal, route: ToolRoute, args: Json, idem: string | undefined, _requestId: string, signal: AbortSignal, sessionId = ""): Promise<unknown> {
     const caller = { type: "agent" as const, agt: p.agt, con: p.con };
     if (route.kind === "skills") {
       const skillId = isRecord(args) && typeof args.skillId === "string" ? args.skillId : undefined;
@@ -411,11 +411,16 @@ export class McpServer {
       tool = isRecord(args) && typeof args.tool === "string" ? args.tool : undefined;
       if (!tool) throw new BridgeError("input_invalid", 400, "tool required");
     }
+    // C98: model-driven MCP clients cannot set `_meta`. Without a client key the bridge derives one, so an identical
+    // retry inside the window is deduplicated by the app instead of failing (`required`) or running twice. A client
+    // that sends `_meta["tealbrick/idempotencyKey"]` keeps its exact semantics.
+    // derived per the shared rule (manifest deriveIdempotencyKey, L1); `input` already names a dynamic tool
+    const key = idem ?? (route.op.standard || route.op.idempotency === "none" ? undefined : this.ctx.api.deriveIdempotencyKey({ connection: p.con, session: sessionId, op: route.op.id, input, now: Date.now() }));
     const { result } = await this.router.route({
       caller,
       target: { app: route.app, op: route.op, ...(tool ? { tool } : {}) },
       input,
-      ...(idem ? { idempotencyKey: idem } : {}),
+      ...(key ? { idempotencyKey: key } : {}),
       signal,
     });
     if (result.status === "held") {

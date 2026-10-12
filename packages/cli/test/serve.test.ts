@@ -128,3 +128,68 @@ describe("agent serve", () => {
     assert.ok(promptFor("connect__channel_inbox", [{ t: "x".repeat(100_000) }]).length <= 64_100);
   });
 });
+
+describe("agent serve: wake filter (F15)", () => {
+  const runWith = async (inbox: Record<string, unknown>, items: Record<string, unknown>[]) => {
+    const abort = new AbortController();
+    let state: ServeState = { cursors: {}, seen: {}, primed: {} };
+    const prompts: string[] = [];
+    const logs: string[] = [];
+    let polls = 0;
+    await serveLoop(
+      validateServeConfig({ format: "tealbrick.agent-serve/1", harness: { kind: "command", command: ["true"] }, inboxes: [{ tool: "connect__channel_inbox", cursor: { param: "sinceSeq", from: "nextSeq" }, id: "seq", ...inbox }], backlog: true }),
+      {
+        mcp: {
+          async callTool() {
+            polls += 1;
+            if (polls > 2) abort.abort();
+            return { structuredContent: { messages: polls === 1 ? items : [], nextSeq: items.length } };
+          },
+        },
+        async runTurn(prompt) {
+          prompts.push(prompt);
+          return { ok: true };
+        },
+        loadState: async () => structuredClone(state),
+        saveState: async (s) => {
+          state = structuredClone(s);
+        },
+        log: (e) => logs.push(e),
+        sleep: async () => {
+          await new Promise((r) => setTimeout(r, 1));
+        },
+        now: () => 1,
+      },
+      abort.signal,
+    );
+    return { prompts, logs, seen: state.seen };
+  };
+
+  it("default: channel messages wake only on a mention; DMs always wake; the rest is marked seen", async () => {
+    const r = await runWith({}, [
+      { seq: 1, conversationType: "channel", mentionsMe: false, text: "chatter" },
+      { seq: 2, conversationType: "channel", mentionsMe: true, text: "@agent please" },
+      { seq: 3, conversationType: "direct", mentionsMe: false, text: "dm hello" },
+    ]);
+    assert.equal(r.prompts.length, 1);
+    assert.match(r.prompts[0] as string, /@agent please/);
+    assert.match(r.prompts[0] as string, /dm hello/);
+    assert.doesNotMatch(r.prompts[0] as string, /chatter/);
+    assert.deepEqual(Object.values(r.seen)[0], ["1", "2", "3"], "non-waking items never wake later");
+  });
+
+  it('wake: "all" wakes on every channel message', async () => {
+    const r = await runWith({ wake: "all" }, [{ seq: 1, conversationType: "channel", mentionsMe: false, text: "chatter" }]);
+    assert.equal(r.prompts.length, 1);
+  });
+
+  it("older Connect without mentionsMe: falls back to all, with ONE warning", async () => {
+    const r = await runWith({}, [
+      { seq: 1, conversationType: "channel", text: "a" },
+      { seq: 2, conversationType: "channel", text: "b" },
+    ]);
+    assert.equal(r.prompts.length, 1);
+    assert.equal(r.logs.filter((l) => l === "serve.inbox.no_mentions_field").length, 1);
+    assert.throws(() => validateServeConfig({ format: "tealbrick.agent-serve/1", harness: { kind: "claude" }, inboxes: [{ tool: "connect__channel_inbox", wake: "some" }] }));
+  });
+});

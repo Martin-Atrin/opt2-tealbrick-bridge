@@ -4,6 +4,7 @@
  * own logic (claim checks, routing, state) — never ship or import this outside test/.
  */
 import { createHash, randomBytes } from "node:crypto";
+import * as realManifest from "@opt2-tealbrick/manifest";
 import { isPrivateInternalUrl as realIsPrivateInternalUrl } from "@opt2-tealbrick/manifest";
 import type { ManifestApi } from "../../src/api.ts";
 
@@ -132,6 +133,9 @@ export function fakeApi(): ManifestApi {
     trustedPortalKeys: (body, pinned) =>
       body.portalKeySet === undefined && !pinned ? { ok: true, legacy: true, reason: "test double: no statement" } : { ok: false, code: "keyset_invalid", reason: "test double cannot verify statements" },
     isPrivateInternalUrl: (url, opts) => realIsPrivateInternalUrl(url, opts),
+    // shared rules are pure: the double uses the real implementations (L1)
+    bridgeOpProofClaims: (bop, body) => realManifest.bridgeOpProofClaims(bop, body),
+    deriveIdempotencyKey: (i) => realManifest.deriveIdempotencyKey(i),
   };
   return api;
 }
