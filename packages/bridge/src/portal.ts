@@ -139,6 +139,7 @@ export function startManifestRetry(ctx: BridgeContext, signal: AbortSignal): voi
           app.manifest = m;
           app.ops = new Map(ctx.api.withStandardOps(m).map((op) => [op.id, op]));
           app.scopeTypes = (m.scopes ?? []).map((sc) => sc.type);
+          app.declaredHooks = m.hooks ?? [];
           app.down = false;
           attempts.delete(key);
           fixed = true;

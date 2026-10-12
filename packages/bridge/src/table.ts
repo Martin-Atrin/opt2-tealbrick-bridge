@@ -28,6 +28,11 @@ export interface AppRuntime {
   down: boolean;
   /** internalUrl outside the allow-list (BSD-07): never contacted, never recovered by the manifest retry */
   refused?: boolean;
+  /**
+   * C117: hooks this instance DECLARES — its manifest's, or, while its (new) manifest is not fetched yet, the last
+   * known manifest's of the same instance. A matching declared hook is never skipped silently.
+   */
+  declaredHooks: NonNullable<Manifest["hooks"]>;
 }
 
 export interface GrantRef {
@@ -143,7 +148,7 @@ export async function buildTable(input: BuildInput): Promise<Table> {
   const runtimes = await mapLimit(config.apps, 4, async (entry): Promise<AppRuntime> => {
     if (input.internalUrlAllowed && !input.internalUrlAllowed(entry)) {
       input.reject({ kind: "config", code: "internal_url_refused", detail: `ins ${entry.ins}` });
-      return { entry, manifest: undefined, ops: new Map(), scopeTypes: [], down: true, refused: true };
+      return { entry, manifest: undefined, ops: new Map(), scopeTypes: [], down: true, refused: true, declaredHooks: input.previous?.apps.get(entry.ins)?.declaredHooks ?? [] };
     }
     let manifest = prevByDigest.get(entry.manifestDigest);
     let down = false;
@@ -160,7 +165,8 @@ export async function buildTable(input: BuildInput): Promise<Table> {
     }
     const ops = new Map<string, OperationView>();
     if (manifest) for (const op of api.withStandardOps(manifest)) ops.set(op.id, op);
-    return { entry, manifest, ops, scopeTypes: (manifest?.scopes ?? []).map((s) => s.type), down };
+    const declaredHooks = manifest ? (manifest.hooks ?? []) : (input.previous?.apps.get(entry.ins)?.declaredHooks ?? []);
+    return { entry, manifest, ops, scopeTypes: (manifest?.scopes ?? []).map((s) => s.type), down, declaredHooks };
   });
 
   const apps = new Map<InstanceId, AppRuntime>();

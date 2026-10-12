@@ -44,6 +44,8 @@ describe("G4b reserved tb.* context namespace", () => {
   before(async () => {
     w = await makeWorld({ real: true, withHook: true });
     await w.publish((c) => {
+      // the owner switches the declared context hook on (C117: it is listed with enabled:false by default)
+      c.hooks = c.hooks.filter((h) => h.hookId !== "enrich");
       c.hooks.push({ id: "guard.enrich", ins: c.hooks[0]?.ins as never, product: "guard", hookId: "enrich", phase: "context", order: 2, timeoutMs: 1000, match: { products: ["notes"] } } as never);
     });
   });
@@ -55,7 +57,7 @@ describe("G4b reserved tb.* context namespace", () => {
     const { CallRouter } = await import("../src/calls.ts");
     const { BridgeError } = await import("../src/util.ts");
     const { waitFor } = await import("./support/world.ts");
-    await waitFor(() => !!w.bridge.ctx.table?.hooks.some((h) => h.phase === "context"), 15000);
+    await waitFor(() => !!w.bridge.ctx.table?.hooks.some((h) => h.phase === "context" && h.enabled !== false), 15000);
     const app = w.bridge.ctx.table?.apps.get(INS as never);
     const op = app?.ops.get("notes_list");
     assert.ok(app && op);

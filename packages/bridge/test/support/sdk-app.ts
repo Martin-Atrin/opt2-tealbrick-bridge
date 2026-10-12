@@ -45,6 +45,8 @@ export async function waitFor(cond: () => boolean, ms: number, what = "condition
 export interface RealSdkApp {
   ins: string;
   product: string;
+  /** the manifest digest the app serves */
+  digest: string;
   stop(): Promise<void>;
 }
 
@@ -58,6 +60,11 @@ export interface RealSdkAppOptions {
   dynamic?: Record<string, unknown>;
   /** CRUD of the world agent's grant for this app (no grant when absent) */
   agentGrantCrud?: string[];
+  /** C117: manifest hooks of this app and their handlers (the test lists or omits them in config.hooks itself) */
+  hooks?: Record<string, unknown>[];
+  hookHandlers?: Record<string, unknown>;
+  /** manifest version (a new version = a new digest, like an app update) */
+  version?: string;
 }
 
 /** Starts a real SDK app on `o.port` (the world must list `http://127.0.0.1:<port>` in extraOwnInfraOrigins). */
@@ -72,6 +79,8 @@ export async function startRealSdkApp(w: World, o: RealSdkAppOptions): Promise<R
     settings: { ...notesManifest.settings, keys: [] },
     publicRoutes: [],
     runtime: { ...(notesManifest as { runtime: Record<string, unknown> }).runtime, port: o.port },
+    ...(o.hooks ? { hooks: o.hooks } : {}),
+    ...(o.version ? { version: o.version } : {}),
   };
   const v = validateManifest(manifest);
   if (!v.ok) throw new Error(`test manifest invalid: ${JSON.stringify(v)}`);
@@ -79,6 +88,7 @@ export async function startRealSdkApp(w: World, o: RealSdkAppOptions): Promise<R
     manifest: manifest as never,
     handlers: (o.handlers ?? {}) as never,
     ...(o.dynamic ? { dynamic: o.dynamic as never } : {}),
+    ...(o.hookHandlers ? { hooks: o.hookHandlers as never } : {}),
     migrations: fileURLToPath(new URL("../fixtures/sdk-app/migrations", import.meta.url)),
   });
   const entry = (slice: string) => ({ ins: o.ins as never, product: o.product, version: String(manifest.version), sdkMajor: 1, manifestDigest: app.digest, internalUrl: `http://127.0.0.1:${o.port}`, ownInfra: true, entitled: true, slice }) as never;
@@ -140,6 +150,7 @@ export async function startRealSdkApp(w: World, o: RealSdkAppOptions): Promise<R
   return {
     ins: o.ins,
     product: o.product,
+    digest: app.digest as string,
     async stop() {
       await running.stop();
       rmSync(data, { recursive: true, force: true });

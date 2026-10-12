@@ -137,6 +137,10 @@ export const CALL_ID_RE = /^call_[0-9A-HJKMNP-TV-Z]{26}$/;
 /** an open parent call is accepted as parentCall for at most this long (the op/hook answer windows are shorter) */
 export const PARENT_CALL_TTL_MS = 120_000;
 
+function hookMatches(m: { products: readonly string[]; operations?: readonly string[]; effects?: readonly string[] }, target: Target, op: OperationView): boolean {
+  return (m.products.includes("*") || m.products.includes(target.app.entry.product)) && (!m.operations || m.operations.includes(op.id)) && (!m.effects || m.effects.includes(op.effect));
+}
+
 export class CallRouter {
   private readonly ctx: BridgeContext;
   private readonly active = new Map<CallId, Active>();
@@ -291,12 +295,27 @@ export class CallRouter {
     }
   }
 
+  /**
+   * C117 / BRIDGE v0.1.24: every hook DECLARED by a deployed app's manifest that matches the call (any phase) must be
+   * listed in config.hooks; declared but ABSENT → refused `hook_failed` BEFORE anything runs or is forwarded (an
+   * after-hook gap must not surface only after the op ran). Listed with `enabled: false` = the owner's switch, skipped.
+   */
+  private requireListedHooks(t: Table, target: Target, op: OperationView): void {
+    const listed = new Set(t.hooks.map((h) => `${h.ins}|${h.hookId}`));
+    for (const app of t.apps.values()) {
+      for (const d of app.declaredHooks) {
+        if (!hookMatches(d.match ?? { products: ["*"] }, target, op)) continue;
+        if (listed.has(`${app.entry.ins}|${d.id}`)) continue;
+        this.ctx.reject({ kind: "config", code: "hook_not_listed", ins: app.entry.ins, detail: `${app.entry.product}.${d.id}` });
+        throw new BridgeError("hook_failed", 503, `hook ${app.entry.product}.${d.id} is declared but not in the config`);
+      }
+    }
+  }
+
+  /** Listed, enabled hooks of one phase that match the call (a listed hook whose app is down fails closed in callHook). */
   private matchingHooks(t: Table, phase: HookEntry["phase"], target: Target, op: OperationView): HookEntry[] {
     return t.hooks
-      .filter((h) => h.phase === phase)
-      .filter((h) => h.match.products.includes("*") || h.match.products.includes(target.app.entry.product))
-      .filter((h) => !h.match.operations || h.match.operations.includes(op.id))
-      .filter((h) => !h.match.effects || h.match.effects.includes(op.effect))
+      .filter((h) => h.phase === phase && h.enabled !== false && hookMatches(h.match, target, op))
       .sort((a, b) => a.order - b.order || a.product.localeCompare(b.product));
   }
 
@@ -399,6 +418,8 @@ export class CallRouter {
       // rule (manifest hookResponseProblem + reduceBeforeChain): the first refuse stops the chain at once; else the
       // FIRST hold is kept and the remaining hooks still run (a later refuse wins). Runs for every call, a retry
       // after an approval included (C82): a hook that now refuses refuses the retry.
+      // C117: a declared hook missing from the config refuses the call before any hook runs or anything is forwarded
+      this.requireListedHooks(t0, target, op);
       active.inHook = true;
       const answers: { by: string; answer: { allow: boolean; reason?: string; hold?: { family: string; reason: string } } }[] = [];
       for (const h of this.matchingHooks(t0, "before", target, op)) {

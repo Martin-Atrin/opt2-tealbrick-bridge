@@ -300,7 +300,14 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
       { agt: AGT, name: "Agent One", mode: "free" },
       { agt: AGT2, name: "Agent Two", mode: "free" },
     ],
-    hooks: opts.withHook ? [{ id: "guard.check", ins: HOOKINS, product: "guard", hookId: "check", phase: "before", order: 1, timeoutMs: 1000, match: { products: ["notes"] } }] : [],
+    // C117: every hook the guard manifest DECLARES is listed (a declared hook absent from config fails closed)
+    hooks: opts.withHook
+      ? [
+          { id: "guard.check", ins: HOOKINS, product: "guard", hookId: "check", phase: "before", order: 1, timeoutMs: 1000, match: { products: ["notes"] } },
+          // declared by the manifest, switched off by the owner (the guard app's test server answers before hooks only)
+          { id: "guard.enrich", ins: HOOKINS, product: "guard", hookId: "enrich", phase: "context", order: 2, timeoutMs: 1000, match: { products: ["notes"] }, enabled: false },
+        ]
+      : [],
     skills: { digest: "sha256:00", files: [{ product: "notes", id: "use-notes", title: "Using notes", content: "Hello {{agent.name}}" }] },
     keyRequirements: [{ name: "NOTES_API_KEY", label: "Notes key", ins: INS, product: "notes", required: true, source: "account_default", usedBy: ["app"] }],
     enrolCodes: [

@@ -27,7 +27,7 @@
   "dependencies": {
     "@opt2-tealbrick/bridge": "workspace:*",
     "@opt2-tealbrick/harness-claude": "workspace:*",
-    "@opt2-tealbrick/manifest": "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.14/opt2-tealbrick-manifest-0.1.14.tgz",
-    "@opt2-tealbrick/spec": "https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.23/opt2-tealbrick-spec-0.1.23.tgz"
+    "@opt2-tealbrick/manifest": "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.16/opt2-tealbrick-manifest-0.1.16.tgz",
+    "@opt2-tealbrick/spec": "https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.24/opt2-tealbrick-spec-0.1.24.tgz"
   }
 }
