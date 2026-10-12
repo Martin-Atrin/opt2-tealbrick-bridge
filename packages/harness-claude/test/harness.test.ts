@@ -20,6 +20,8 @@ test("options are isolated and reach apps only through the relay", () => {
 test("F48: persistSession false reaches the SDK options; the default leaves the SDK default", () => {
   assert.equal(buildOptions({ bridge: { agentId: "a" }, cwd: "/w", env: {}, persistSession: false }).persistSession, false);
   assert.equal("persistSession" in buildOptions({ bridge: { agentId: "a" }, cwd: "/w", env: {} }), false);
+  assert.deepEqual(buildOptions({ bridge: { agentId: "a" }, cwd: "/w", env: {}, autoMemory: false }).settings, { autoMemoryEnabled: false });
+  assert.deepEqual(buildOptions({ bridge: { agentId: "a" }, cwd: "/w", env: {}, autoMemory: { directory: "/a/memory" } }).settings, { autoMemoryEnabled: true, autoMemoryDirectory: "/a/memory" });
 });
 
 test("a held result adds guidance and raises a held event; nothing is retried", async () => {

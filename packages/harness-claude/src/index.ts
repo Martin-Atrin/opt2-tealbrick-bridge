@@ -82,6 +82,11 @@ export interface SessionOptions {
    * model login (~/.claude credentials or the API key) is not touched. Default: the SDK default (persisted).
    */
   persistSession?: boolean;
+  /**
+   * F54: Claude Code auto-memory. `false` = off (no read/write of the memory folder); a string = memory folder (the
+   * SDK default is ~/.claude/projects/<cwd-slug>/memory/). Passed as flag settings (settingSources stays []).
+   */
+  autoMemory?: false | { directory: string };
 }
 
 /** Text shown to the model next to a held result. */
@@ -119,6 +124,7 @@ export function buildOptions(o: SessionOptions): Record<string, unknown> {
     ...(o.effort ? { effort: o.effort } : {}),
     ...(o.maxBudgetUsd && o.maxBudgetUsd > 0 ? { maxBudgetUsd: o.maxBudgetUsd } : {}),
     ...(o.persistSession === false ? { persistSession: false } : {}),
+    ...(o.autoMemory !== undefined ? { settings: o.autoMemory === false ? { autoMemoryEnabled: false } : { autoMemoryEnabled: true, autoMemoryDirectory: o.autoMemory.directory } } : {}),
     hooks: {
       PostToolUse: [
         {

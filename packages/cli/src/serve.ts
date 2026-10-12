@@ -99,6 +99,11 @@ export type HarnessSpec =
       persistSession?: boolean;
       /** F48: a folder (relative to the config file) that gets one JSONL line per turn event; 0700 folder, 0600 files */
       transcripts?: string;
+      /**
+       * F54: Claude Code auto-memory for serve turns: off by default; a folder (relative to the config file) turns it
+       * on with the memory kept there, never under ~/.claude/projects/.
+       */
+      memory?: string;
       passthroughEnv?: string[];
       maxTurns?: number;
       /** C96/F8: Claude built-in tools the agent may use (default none, e.g. ["Read","Grep","WebSearch"]) */
@@ -655,6 +660,7 @@ export async function claudeRunner(h: Extract<HarnessSpec, { kind: "claude" }>, 
         ...(h.maxBudgetUsd ? { maxBudgetUsd: h.maxBudgetUsd } : {}),
         ...(h.turnTimeoutSeconds ? { turnTimeoutMs: h.turnTimeoutSeconds * 1000 } : {}),
         persistSession: h.persistSession === true,
+        autoMemory: h.memory ? { directory: resolvePath(configDir, h.memory) } : false,
       },
       (e) => {
         if (transcript) transcript.push({ at: new Date().toISOString(), ...e });

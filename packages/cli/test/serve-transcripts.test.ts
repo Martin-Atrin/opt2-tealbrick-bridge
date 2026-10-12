@@ -31,6 +31,7 @@ describe("F48: serve transcripts stay inside the agent folder", () => {
     assert.equal(r.ok, true);
     const opts = JSON.parse(readFileSync(join(home, "options.json"), "utf8")) as Record<string, unknown>;
     assert.equal(opts.persistSession, false);
+    assert.deepEqual(opts.settings, { autoMemoryEnabled: false }, "F54: auto-memory off by default");
     assert.equal(opts.cwd, join(adopt, "work"), "F45: the harness works in <adopt>/work");
     assert.equal(existsSync(join(home, ".claude")), false, "no ~/.claude/projects transcript");
     const added = listAll(home).filter((f) => !before.has(f) && f !== join(home, "options.json"));
@@ -43,6 +44,17 @@ describe("F48: serve transcripts stay inside the agent folder", () => {
     const lines = readFileSync(file, "utf8").trim().split("\n").map((l) => JSON.parse(l));
     assert.equal(lines[0].type, "prompt");
     assert.ok(lines.some((l) => l.type === "result" && l.ok === true));
+  });
+
+  it("F54: harness.memory keeps auto-memory inside the agent folder", async () => {
+    const home = join(root, "home3");
+    const adopt = join(home, "adopt");
+    mkdirSync(adopt, { recursive: true });
+    process.env.FAKE_SDK_HOME = home;
+    const run = await claudeRunner({ kind: "claude", cwd: ".", memory: "memory", sdkModule: FAKE }, "agt_x", { command: "tealbrick", args: [] }, adopt);
+    await run("x", { onHeld: () => undefined });
+    assert.equal(existsSync(join(home, ".claude")), false);
+    assert.equal(existsSync(join(adopt, "memory")), true);
   });
 
   it("persistSession true is an explicit opt-in (the SDK then writes its own transcript)", async () => {

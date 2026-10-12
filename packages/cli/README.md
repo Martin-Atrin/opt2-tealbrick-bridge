@@ -39,7 +39,8 @@ The command watches the agent's inboxes and scheduled routines through the bridg
 - **`routines[]`**: scheduled work (for example Evolution routines). Each claimed job gets exactly one turn. A job is never claimed or run twice, also after a restart.
 - **Concurrency**: one turn at a time for each agent.
 - **Claude harness fields**: `appendSystemPromptFile` (persona file, relative to the config), `builtinTools` (default none), `model`, `effort`, `maxTurns`, `maxBudgetUsd`, `turnTimeoutSeconds`.
-- **`--supervise`**: restarts the loop after a crash or a stall, with backoff. One loop per connection (pidfile). `tealbrick agent status` shows whether serve runs and its last poll.
+- **Where a serve turn writes** (claude harness): `cwd` (relative to the config; adopt uses `"work"`). `transcripts` (relative folder, e.g. `"transcripts"`): one JSONL line per turn event in `<folder>/<date>.jsonl` (folder 0700, files 0600). Without it no transcript is kept anywhere. `persistSession` (default false): the Claude SDK writes no session under `~/.claude/projects/`. `memory` (relative folder): turns Claude auto-memory on and keeps it there; default off. Example: `"harness": {"kind": "claude", "cwd": "work", "transcripts": "transcripts", "appendSystemPromptFile": "persona/persona.md"}`.
+- **`--supervise`**: restarts the loop after a crash or a stall, with backoff. One loop per connection (pidfile). `tealbrick agent status` shows whether serve runs and its last poll. Stop: SIGTERM (or `adopt --undo`) ends the supervisor and its loop within 5 s, also during a turn (the loop gets SIGTERM, then SIGKILL after 3.5 s); stop scripts can escalate after 10 s.
 
 ## Write operations and idempotency
 

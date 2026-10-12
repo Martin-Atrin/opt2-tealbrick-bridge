@@ -368,7 +368,15 @@ async function agentServe(ctx: Ctx): Promise<void> {
       : await serve.commandRunner(cfg.harness, [relayCmd.command, ...relayCmd.args].map((a) => (/\s/.test(a) ? JSON.stringify(a) : a)).join(" "));
   const { join } = await import("node:path");
   const abort = new AbortController();
-  for (const sig of ["SIGINT", "SIGTERM"] as const) process.once(sig, () => abort.abort());
+  for (const sig of ["SIGINT", "SIGTERM"] as const)
+    process.once(sig, () => {
+      abort.abort();
+      // F56: never linger after a stop (open relay sockets, a running turn): release the pidfile and exit within
+      // the supervisor's grace, whatever is still in flight
+      setTimeout(() => {
+        void releasePid().finally(() => process.exit(0));
+      }, sup.STOP_GRACE_MS - 1_000).unref();
+    });
   // heartbeat for `agent status` + watchdog: a loop that stopped moving exits so its supervisor restarts it
   const live = sup.liveness({
     path: sup.heartbeatPath(ctx.configDir(), item.con),
@@ -410,6 +418,8 @@ async function agentServe(ctx: Ctx): Promise<void> {
   await releasePid();
   mcp.close();
   relay.stop();
+  // F56: keep-alive sockets of the relay must not hold the process for a minute after a clean stop
+  setTimeout(() => process.exit(0), 200).unref();
 }
 
 export const agent: Handler = async (ctx) => {

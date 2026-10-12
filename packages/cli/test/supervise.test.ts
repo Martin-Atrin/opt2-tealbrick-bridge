@@ -98,4 +98,26 @@ describe("agent serve liveness (C96 §8)", () => {
     stubborn.kill("SIGKILL"); // the test's own child
     await new Promise((r2) => stubborn.once("exit", r2));
   });
+
+  it("F56: SIGTERM to an idle supervisor ends it and its (SIGTERM-ignoring) child within STOP_BOUND_MS", async () => {
+    const { STOP_BOUND_MS } = await import("../src/supervise.ts");
+    const pf = join(dir, "f56.pid");
+    const script = `import { supervise } from ${JSON.stringify(new URL("../src/supervise.ts", import.meta.url).href)};
+await supervise({ command: process.execPath, args: ["-e", "process.on('SIGTERM', () => {}); setInterval(() => {}, 1000)"], pidfile: ${JSON.stringify(pf)}, log: (e, f) => console.log(JSON.stringify({ e, ...f })) });`;
+    const sup = spawn(process.execPath, ["--input-type=module", "-e", script], { stdio: ["ignore", "pipe", "inherit"] });
+    let out = "";
+    sup.stdout.on("data", (d: Buffer) => {
+      out += d.toString();
+    });
+    for (let i = 0; i < 100 && !/serve.supervisor.started/.test(out); i++) await new Promise((r) => setTimeout(r, 50));
+    const childPid = JSON.parse(out.trim().split("\n")[0] as string).child as number;
+    await new Promise((r) => setTimeout(r, 200));
+    const t0 = Date.now();
+    sup.kill("SIGTERM");
+    await new Promise((r) => sup.once("exit", r));
+    const took = Date.now() - t0;
+    assert.ok(took < STOP_BOUND_MS, `supervisor exited in ${took} ms`);
+    assert.equal(isAlive(childPid), false, "its child is gone");
+    assert.equal(existsSync(pf), false, "pidfile released");
+  });
 });

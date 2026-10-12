@@ -11,6 +11,9 @@ export function query(params: { prompt: string; options: Record<string, unknown>
   const home = process.env.FAKE_SDK_HOME as string;
   const { abortController: _a, hooks: _h, env: _e, mcpServers: _m, ...plain } = params.options;
   writeFileSync(join(home, "options.json"), JSON.stringify(plain));
+  // F54: Claude Code creates the auto-memory folder unless auto-memory is off (flag settings)
+  const settings = (params.options.settings ?? {}) as { autoMemoryEnabled?: boolean; autoMemoryDirectory?: string };
+  if (settings.autoMemoryEnabled !== false) mkdirSync(settings.autoMemoryDirectory ?? join(home, ".claude", "projects", String(params.options.cwd).replace(/[^A-Za-z0-9]/g, "-"), "memory"), { recursive: true });
   if (params.options.persistSession !== false) {
     const dir = join(home, ".claude", "projects", String(params.options.cwd).replace(/[^A-Za-z0-9]/g, "-"));
     mkdirSync(dir, { recursive: true });

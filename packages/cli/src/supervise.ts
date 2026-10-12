@@ -104,6 +104,10 @@ export function liveness(o: { path: string; pollMs: number; turnLimitMs: number;
  * for any reason other than a clean stop, with backoff 1 s → 60 s (reset after 10 min of uptime). SIGINT/SIGTERM stop
  * the child (SIGTERM to OUR child only) and the supervisor.
  */
+/** F56: SIGTERM → child SIGTERM; SIGKILL after this grace; the supervisor is gone within STOP_BOUND_MS */
+export const STOP_GRACE_MS = 3_500;
+export const STOP_BOUND_MS = 5_000;
+
 export async function supervise(o: {
   command: string;
   args: string[];
@@ -112,17 +116,36 @@ export async function supervise(o: {
   /** test hooks */
   sleep?: (ms: number) => Promise<void>;
   maxRestarts?: number;
+  /** F56: a child that has not exited this long after SIGTERM gets SIGKILL (own child only) */
+  stopGraceMs?: number;
 }): Promise<void> {
   const release = await acquirePidfile(o.pidfile, "supervisor");
   let stopping = false;
   let child: ReturnType<typeof spawn> | undefined;
+  let wake: (() => void) | undefined;
   const stop = () => {
     stopping = true;
-    child?.kill("SIGTERM");
+    wake?.(); // F56: a backoff wait ends at once
+    const c = child;
+    if (!c || c.exitCode !== null || c.signalCode !== null) return;
+    c.kill("SIGTERM");
+    // F56: the whole stop is bounded (STOP_BOUND_MS): an idle or stuck child is killed after the grace
+    setTimeout(() => {
+      if (c.exitCode === null && c.signalCode === null) c.kill("SIGKILL");
+    }, o.stopGraceMs ?? STOP_GRACE_MS).unref();
   };
   process.once("SIGINT", stop);
   process.once("SIGTERM", stop);
-  const sleep = o.sleep ?? ((ms: number) => new Promise<void>((r) => setTimeout(r, ms)));
+  const sleep =
+    o.sleep ??
+    ((ms: number) =>
+      new Promise<void>((r) => {
+        const t = setTimeout(r, ms);
+        wake = () => {
+          clearTimeout(t);
+          r();
+        };
+      }));
   let backoff = 1_000;
   let restarts = 0;
   try {

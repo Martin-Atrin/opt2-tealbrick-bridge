@@ -1,6 +1,6 @@
 {
   "name": "@opt2-tealbrick/harness-eve",
-  "version": "0.1.6",
+  "version": "0.1.7",
   "private": true,
   "type": "module",
   "description": "Eve harness adapter. No policy.",
