@@ -3,8 +3,21 @@
  * old product/org names, legacy headers and audiences, and product names inside the generic bridge.
  * The bridge routes any manifest app; it never names one.
  */
-import { readdirSync, readFileSync, statSync } from 'node:fs';
+import { existsSync, readdirSync, readFileSync, statSync } from 'node:fs';
+import { homedir } from 'node:os';
 import { join } from 'node:path';
+
+/**
+ * Internal host names never sit in git. Extra forbidden names come from TB_EXTRA_DENY (comma list) and from
+ * the git-ignored `.env.denylist` (or ~/.config/opt2-tealbrick/denylist.env, or $TB_DENYLIST_FILE): line `TB_EXTRA_DENY=a,b`.
+ */
+const extraDeny = (): RegExp[] => {
+  const files = process.env.TB_DENYLIST_FILE ? [process.env.TB_DENYLIST_FILE] : ['.env.denylist', join(homedir(), '.config', 'opt2-tealbrick', 'denylist.env')];
+  const lists = [process.env.TB_EXTRA_DENY ?? ''];
+  for (const f of files) if (existsSync(f)) lists.push(/^TB_EXTRA_DENY=(.*)$/m.exec(readFileSync(f, 'utf8'))?.[1] ?? '');
+  return lists.flatMap((l) => l.split(',')).map((w) => w.trim()).filter(Boolean)
+    .map((w) => new RegExp(`\\b${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i'));
+};
 
 const banned: Array<[RegExp, string]> = [
   [/doppel/i, 'old product name'],
@@ -13,7 +26,9 @@ const banned: Array<[RegExp, string]> = [
   [/x-eve-|\/eve\/v1|eve:<|['"`]eve:/i, 'Eve-era wire name'],
   [/marketplace_execute|tbkg_|tbag_/, 'v1 compat credential or operation'],
   [/portal\.tealbrick\.com/, 'hard-coded v1 production host'],
-  [/taild2144d|\bfoxy\b|\bneuu\b|fed-main/i, 'home infrastructure name'],
+  [/taild[0-9a-f]{4,}|\.ts\.net\b/i, 'tailnet id or host name'],
+  [/\b100\.(6[4-9]|[7-9]\d|1[01]\d|12[0-7])\.\d+\.\d+\b/, 'tailnet IP'],
+  ...extraDeny().map((re): [RegExp, string] => [re, 'internal name (local denylist)']),
 ];
 // Product names may appear in harness docs, never in bridge code paths.
 // (quoted product ids, upstream engine names; "connect" as an English verb is fine)
