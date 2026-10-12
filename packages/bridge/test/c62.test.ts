@@ -117,24 +117,29 @@ describe("C62: proofs, oracle, revocation reporting", () => {
 });
 
 describe("C62 BSD-07: internalUrl allow-list", () => {
-  test("deployed: only http://<name>.railway.internal:<port> (plus TB_APP_HOSTS)", () => {
-    assert.equal(internalUrlAllowed("http://knowledge.railway.internal:8080", "deployed", []), true);
-    assert.equal(internalUrlAllowed("http://knowledge.railway.internal", "deployed", []), false, "explicit port");
-    assert.equal(internalUrlAllowed("https://evil.example", "deployed", []), false);
-    assert.equal(internalUrlAllowed("http://evil.example:80", "deployed", []), false);
-    assert.equal(internalUrlAllowed("http://a@knowledge.railway.internal:8080", "deployed", []), false);
-    assert.equal(internalUrlAllowed("http://knowledge.railway.internal:8080/x", "deployed", []), false);
-    assert.equal(internalUrlAllowed("http://127.0.0.1:9000", "deployed", ["127.0.0.1"]), true);
-    assert.equal(internalUrlAllowed("http://10.1.2.3:9000", "own_infra", ["10.0.0.0/8"]), true);
-    assert.equal(internalUrlAllowed("http://11.1.2.3:9000", "own_infra", ["10.0.0.0/8"]), false);
-    assert.equal(internalUrlAllowed("https://nas.local:8443", "own_infra", ["nas.local"]), true);
+  test("BRIDGE §5.7: railway.internal, or ownInfra + TB_OWN_INFRA_ORIGINS (isPrivateInternalUrl)", async () => {
+    const { manifestApi } = await import("../src/manifest-adapter.ts");
+    const api = manifestApi();
+    const ok = (u: string, own = false, list: string[] = []) => internalUrlAllowed(api, u, own, list);
+    assert.equal(ok("http://knowledge.railway.internal:8080"), true);
+    assert.equal(ok("http://knowledge.railway.internal"), false, "explicit port");
+    assert.equal(ok("https://evil.example"), false);
+    assert.equal(ok("http://evil.example:80"), false);
+    assert.equal(ok("http://a@knowledge.railway.internal:8080"), false);
+    assert.equal(ok("http://knowledge.railway.internal:8080/x"), false);
+    assert.equal(ok("http://127.0.0.1:9000", false, ["http://127.0.0.1:9000"]), false, "listed origin without ownInfra");
+    assert.equal(ok("http://127.0.0.1:9000", true, ["http://127.0.0.1:9000"]), true);
+    assert.equal(ok("http://127.0.0.1:9001", true, ["http://127.0.0.1:9000"]), false, "exact origin");
+    assert.equal(ok("https://nas.local:8443", true, ["https://nas.local:8443"]), true);
+    assert.equal(ok("https://attacker.example", true, []), false, "ownInfra alone is not enough");
   });
 
   test("a config pointing an app outside the allow-list marks it refused; no request is sent there", async () => {
     const w = await makeWorld();
     try {
       await w.publish((c) => {
-        (c.apps[0] as { internalUrl: string }).internalUrl = "https://attacker.example";
+        (c.apps[0] as { internalUrl: string; ownInfra?: boolean }).internalUrl = "https://attacker.example";
+        (c.apps[0] as { ownInfra?: boolean }).ownInfra = true;
       });
       await waitFor(() => w.bridge.ctx.table?.rev === w.rev(), 10000);
       const app = w.bridge.ctx.table?.apps.get(INS as never);

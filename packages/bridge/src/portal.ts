@@ -4,7 +4,7 @@
  * Portal never connects in.
  */
 import type { AppEntry, EnrolRequest, EnrolResponse, StatusReport, WorkspaceConfig } from "@opt2-tealbrick/spec/bridge";
-import { LIFETIME_S, TYP } from "@opt2-tealbrick/spec/credentials";
+import { LIFETIME_S, type PortalKeyEntry, TYP } from "@opt2-tealbrick/spec/credentials";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import { isRefusal, type Json } from "./api.ts";
 import { BRIDGE_VERSION, type BridgeContext, MCP_VERSIONS, SDK_MAJORS } from "./context.ts";
@@ -28,6 +28,13 @@ export async function ensureEnrolled(ctx: BridgeContext, enrolCode: string | und
     return;
   }
   if (!enrolCode || !codeDigest) throw new BridgeError("not_enrolled", 500, "TB_ENROL_CODE is required for the first start");
+  // C63a: a code whose re-enrolment the key-set rule refused is not tried again on every restart (Core used it)
+  const refused = existing ? ctx.state.loadRefusedEnrolCode() : undefined;
+  if (existing && refused && ctx.api.digestEqual(refused, codeDigest)) {
+    ctx.identity = existing;
+    ctx.reject({ kind: "config", code: "keyset_refused_enrolment", detail: "TB_ENROL_CODE was refused before; running under the pinned identity" });
+    return;
+  }
   const key = await ctx.api.generateKeyPair();
   const body: EnrolRequest = {
     code: enrolCode,
@@ -50,17 +57,36 @@ export async function ensureEnrolled(ctx: BridgeContext, enrolCode: string | und
     throw new BridgeError("enrol_failed", 502, "malformed enrolment response");
   }
   if (existing && existing.bridgeId !== r.bridgeId) throw new BridgeError("enrol_failed", 502, "Portal returned another bridge id");
+  // BSD-08 (BRIDGE §4.1/§4.3, CREDENTIALS §9.5): the response's key-set statement is checked against the build's
+  // roots and the pinned statement BEFORE anything is written. A refused re-enrolment keeps S1 (key, identity, pin).
+  const trust = ctx.api.trustedPortalKeys(r, existing?.pinnedKeySet ?? null, ctx.portalRoots, { required: ctx.keysetRequired });
+  if (isRefusal(trust)) {
+    ctx.reject({ kind: "config", code: trust.code, detail: `${existing ? "re-enrolment" : "enrolment"} refused: ${trust.reason}` });
+    ctx.log.error("bridge.enrol.keyset_refused", { code: trust.code, reenrol: !!existing });
+    if (!existing) throw new BridgeError("enrol_failed", 502, `enrolment refused: ${trust.code}`);
+    ctx.state.saveRefusedEnrolCode(codeDigest);
+    ctx.identity = existing;
+    return;
+  }
+  if (trust.legacy) ctx.log.warn("bridge.keyset.legacy", { reason: trust.reason, at: "enrolment" });
   ctx.identity = {
     bridgeId: r.bridgeId,
     workspaceId: r.workspaceId,
     key,
-    portalKeys: r.portalKeys,
+    portalKeys: trust.legacy ? r.portalKeys : statementKeys(trust.kss),
+    ...(trust.legacy ? {} : { pinnedKeySet: { seq: trust.seq, kss: trust.kss } }),
     enrolCodeDigest: codeDigest,
     configPath: r.configPath,
     ackPath: r.ackPath,
   };
   await ctx.state.saveIdentity(ctx.identity);
-  ctx.log.info("bridge.enrolled", { bridge: r.bridgeId, ws: r.workspaceId, reenrol: !!existing });
+  ctx.log.info("bridge.enrolled", { bridge: r.bridgeId, ws: r.workspaceId, reenrol: !!existing, keySetSeq: trust.legacy ? null : trust.seq });
+}
+
+/** `keys` of a statement that `trustedPortalKeys` already verified (CREDENTIALS §9.5): the trusted set as S1 entries. */
+export function statementKeys(kss: string): PortalKeyEntry[] {
+  const claims = JSON.parse(Buffer.from(kss.split(".")[1] ?? "", "base64url").toString("utf8")) as { keys: PortalKeyEntry[] };
+  return claims.keys.map((k) => ({ jwk: k.jwk, status: k.status }));
 }
 
 async function portalRequest(ctx: BridgeContext, method: "GET" | "POST", pathAndQuery: string, body?: unknown, timeoutMs = 30_000, abort?: AbortSignal): Promise<Response> {
@@ -172,7 +198,17 @@ export async function applyConfig(ctx: BridgeContext, jws: string, opts: { boot?
     ctx.reject({ kind: "config", code: "payload_too_large" });
     return false;
   }
-  const issuers = portalKeySet(ctx.api, id.portalKeys);
+  // BSD-08 first (BRIDGE §5.2): the key-set rule on the body's `portalKeySet` against the pin. The statement is
+  // self-authenticating, so it is read before the document signature and the document is verified with its set.
+  const peeked = peekBody(jws);
+  const trust = ctx.api.trustedPortalKeys(isRecord(peeked) ? peeked : {}, id.pinnedKeySet ?? null, ctx.portalRoots, { required: ctx.keysetRequired });
+  if (isRefusal(trust)) {
+    ctx.reject({ kind: "config", code: trust.code, detail: `${trust.reason}; rev ${peekRev(jws)}${opts.boot ? "; boot copy refused" : ""}` });
+    return false;
+  }
+  if (trust.legacy && !opts.boot) ctx.log.warn("bridge.keyset.legacy", { reason: trust.reason, at: "config" });
+  // only `active` / `pending` keys of the statement may sign a config; grants, tickets and codes use every key
+  const issuers = trust.legacy ? portalKeySet(ctx.api, id.portalKeys) : trust.signers;
   // BSD-03: the boot copy (S2 on the volume) is verified with the TRUSTED set like any pulled document; the ONLY
   // waived check is time (an S2 older than 12 h still loads, and then fails closed for calls, §5.4). A document
   // that fails any other check (signature, unknown kid, audience, workspace) is not loaded at all.
@@ -180,7 +216,7 @@ export async function applyConfig(ctx: BridgeContext, jws: string, opts: { boot?
   const verifyNow = opts.boot && typeof peekedExp === "number" ? Math.min(now, peekedExp - 1) : now;
   const v = ctx.api.verifyConfig(jws, { now: verifyNow, self: ctx.bridgeRef, issuers });
   if (isRefusal(v)) {
-    ctx.reject({ kind: "config", code: v.code, detail: `${v.reason}; rev ${peekRev(jws)}; trusted ${id.portalKeys.length}${opts.boot ? "; boot copy refused" : ""}` });
+    ctx.reject({ kind: "config", code: v.code, detail: `${v.reason}; rev ${peekRev(jws)}; trusted ${issuers.keys.length}${opts.boot ? "; boot copy refused" : ""}` });
     return false;
   }
   const body = v.body as WorkspaceConfig | undefined;
@@ -198,23 +234,30 @@ export async function applyConfig(ctx: BridgeContext, jws: string, opts: { boot?
     ctx.reject({ kind: "config", code: "config_expired" });
     return false;
   }
-  const nextKeys = body.portalKeys.length ? body.portalKeys : id.portalKeys;
+  // transition path only: `portalKeys` replaces the trusted set; once a statement is pinned it never does (§5.3)
+  const nextKeys = trust.legacy ? (body.portalKeys.length ? body.portalKeys : id.portalKeys) : statementKeys(trust.kss);
   const table: Table = await buildTable({
     api: ctx.api,
     config: body,
     jws,
     bridgeId: id.bridgeId,
     ownKeys: ctx.ownKeySet(),
-    issuers: portalKeySet(ctx.api, nextKeys),
+    issuers: trust.legacy ? portalKeySet(ctx.api, nextKeys) : trust.keys,
     previous: ctx.table,
     fetchManifest: (app) => fetchManifestFrom(ctx, app),
-    internalUrlAllowed: (u) => internalUrlAllowed(u, ctx.form, ctx.appHosts),
+    internalUrlAllowed: (e) => internalUrlAllowed(ctx.api, e.internalUrl, e.ownInfra === true, ctx.ownInfraOrigins),
     onManifestFailure: (app, e) => logManifestFailure(ctx, app, e),
     now,
     reject: (r) => ctx.reject(r),
   });
   if (!opts.boot) ctx.state.saveConfigJws(jws);
-  if (body.portalKeys.length && JSON.stringify(nextKeys) !== JSON.stringify(id.portalKeys)) {
+  if (!trust.legacy && trust.changed) {
+    // the newer statement is pinned with the document it came with (S2 above, S1 here, sealed)
+    id.pinnedKeySet = { seq: trust.seq, kss: trust.kss };
+    id.portalKeys = nextKeys;
+    await ctx.state.saveIdentity(id);
+    ctx.log.info("bridge.keyset.pinned", { seq: trust.seq, keys: nextKeys.length });
+  } else if (trust.legacy && body.portalKeys.length && JSON.stringify(nextKeys) !== JSON.stringify(id.portalKeys)) {
     id.portalKeys = nextKeys;
     await ctx.state.saveIdentity(id);
   }
@@ -420,7 +463,10 @@ export function startStatusLoop(ctx: BridgeContext, signal: AbortSignal): { poke
 
 /** BRIDGE §5.1: long-poll loop. Errors never extend or replace S2. */
 export async function runConfigLoop(ctx: BridgeContext, signal: AbortSignal): Promise<void> {
-  let backoff = 15_000;
+  // error backoff: first retry after ~5 s (never below MIN_PULL_INTERVAL_MS, BSD-09), then doubling to 4 min. A
+  // transient 401/network error right after a restart (e.g. a refused re-enrolment, C63a) recovers quickly.
+  const FIRST_BACKOFF_MS = MIN_PULL_INTERVAL_MS;
+  let backoff = FIRST_BACKOFF_MS;
   while (!signal.aborted) {
     if (ctx.table?.standalone) return;
     const id = ctx.identity;
@@ -436,14 +482,14 @@ export async function runConfigLoop(ctx: BridgeContext, signal: AbortSignal): Pr
       const res = await portalRequest(ctx, "GET", `${id.configPath}?after=${after}&wait=60`, undefined, 75_000, signal);
       if (res.status === 304) {
         ctx.lastPull = nowS();
-        backoff = 15_000;
+        backoff = FIRST_BACKOFF_MS;
         await pace();
         continue;
       }
       if (res.status === 200) {
         const jws = (await res.text()).trim();
         ctx.lastPull = nowS();
-        backoff = 15_000;
+        backoff = FIRST_BACKOFF_MS;
         const sameRev = peekRev(jws) === ctx.table?.rev;
         const applied = await applyConfig(ctx, jws);
         // A refused document would be served again at once (`after` is unchanged): wait before the next pull
@@ -464,7 +510,7 @@ export async function runConfigLoop(ctx: BridgeContext, signal: AbortSignal): Pr
     } catch {
       ctx.log.warn("bridge.config.pull_failed", { code: "network" });
     }
-    await sleep(jitter(backoff), signal);
+    await sleep(Math.max(MIN_PULL_INTERVAL_MS, jitter(backoff)), signal);
     backoff = Math.min(backoff * 2, 240_000);
   }
 }

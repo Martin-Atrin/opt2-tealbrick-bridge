@@ -13,7 +13,11 @@ import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, re
 import { join } from "node:path";
 import type { ClaimRecord, PairingConnectionRecord } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, BridgeId, ConnectionId, Ed25519PublicJwk, PortalKeyEntry, SealedBlob, Sha256Digest, WorkspaceId } from "@opt2-tealbrick/spec/credentials";
-import type { Ed25519KeyPair, Kek, ManifestApi } from "./api.ts";
+import type { Ed25519KeyPair, Kek, ManifestApi, PinnedKeySet } from "./api.ts";
+
+const isPinned = (v: unknown): v is PinnedKeySet =>
+  !!v && typeof v === "object" && Number.isInteger((v as PinnedKeySet).seq) && typeof (v as PinnedKeySet).kss === "string";
+
 import { BridgeError, nowS } from "./util.ts";
 
 export interface Identity {
@@ -21,6 +25,8 @@ export interface Identity {
   workspaceId: WorkspaceId;
   key: Ed25519KeyPair;
   portalKeys: PortalKeyEntry[];
+  /** v0.1.11 (BSD-08): the pinned key-set statement; once set, the ONLY source of `portalKeys` */
+  pinnedKeySet?: PinnedKeySet;
   enrolCodeDigest: Sha256Digest;
   configPath: string;
   ackPath: string;
@@ -35,6 +41,7 @@ interface IdentityFile {
   sealedPrivateKey?: SealedBlob;
   privateKey?: string;
   portalKeys: PortalKeyEntry[];
+  pinnedKeySet?: PinnedKeySet;
   enrolCodeDigest: Sha256Digest;
   configPath: string;
   ackPath: string;
@@ -197,7 +204,7 @@ export class BridgeState {
     else throw new BridgeError("identity_corrupt", 500, "bridge identity has no key");
     const key = await this.api.importKeyPair(pkcs8);
     if (key.kid !== f.kid) throw new BridgeError("identity_corrupt", 500, "bridge key does not match its record");
-    const id: Identity = { bridgeId: f.bridgeId, workspaceId: f.workspaceId, key, portalKeys: f.portalKeys, enrolCodeDigest: f.enrolCodeDigest, configPath: f.configPath, ackPath: f.ackPath };
+    const id: Identity = { bridgeId: f.bridgeId, workspaceId: f.workspaceId, key, portalKeys: f.portalKeys, ...(isPinned(f.pinnedKeySet) ? { pinnedKeySet: f.pinnedKeySet } : {}), enrolCodeDigest: f.enrolCodeDigest, configPath: f.configPath, ackPath: f.ackPath };
     if (this.keks.previous || this.migrating) await this.saveIdentity(id);
     if (this.migrating) {
       this.markFormat();
@@ -215,6 +222,7 @@ export class BridgeState {
       publicKey: id.key.publicJwk,
       privateKey: Buffer.from(pkcs8).toString("base64url"),
       portalKeys: id.portalKeys,
+      ...(id.pinnedKeySet ? { pinnedKeySet: id.pinnedKeySet } : {}),
       enrolCodeDigest: id.enrolCodeDigest,
       configPath: id.configPath,
       ackPath: id.ackPath,
@@ -222,6 +230,18 @@ export class BridgeState {
     // the WHOLE record is sealed (portalKeys = trust anchor, workspaceId, enrolCodeDigest included)
     this.writeRecord("identity", f, "identity.json");
     if (!this.formatMarked()) this.markFormat();
+  }
+
+  /**
+   * C63a: digest of an enrolment code whose re-enrolment was refused by the key-set rule. S1 stays unchanged, so
+   * without this record every restart would try the same (now used) code again.
+   */
+  loadRefusedEnrolCode(): Sha256Digest | undefined {
+    return this.readRecord<{ digest: Sha256Digest }>("enrol-refused", "enrol-refused.json")?.digest;
+  }
+
+  saveRefusedEnrolCode(digest: Sha256Digest): void {
+    this.writeRecord("enrol-refused", { digest });
   }
 
   loadConfigJws(): string | undefined {

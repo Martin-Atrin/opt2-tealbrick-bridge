@@ -8,6 +8,7 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { Socket } from "node:net";
 import { hostname } from "node:os";
 import { join } from "node:path";
+import type { Ed25519PublicJwk } from "@opt2-tealbrick/spec/credentials";
 import type { ManifestApi } from "./api.ts";
 import { CallRouter } from "./calls.ts";
 import { BridgeContext } from "./context.ts";
@@ -31,6 +32,13 @@ export interface BridgeServerOptions {
   ports?: { public: number; internal: number };
   /** test hook: listener limits (defaults: {@link DEFAULT_LIMITS}) */
   limits?: Partial<ListenerLimits> & { mcp?: Partial<McpLimits> };
+  /**
+   * BSD-08 test harness only (CONFORMANCE §7): replaces this build's pinned Portal Root Keys. Never read from env;
+   * the production entry (bridge-server) never passes it.
+   */
+  portalRootKeys?: Ed25519PublicJwk[];
+  /** test harness only: run the spec 0.1.12 strict key-set rule (default: the build constant KEYSET_REQUIRED) */
+  keysetRequired?: boolean;
 }
 
 /** Listener limits against slow-body and connection exhaustion (BSD-01). */
@@ -75,7 +83,7 @@ export function ownInfraEnv(env: NodeJS.ProcessEnv, api: ManifestApi): NodeJS.Pr
 }
 
 /** Enrols (or re-enrols on a new code) and stops: `tealbrick bridge enrol` (CLI.md §5). */
-export async function enrolBridge(o: { api: ManifestApi; env: NodeJS.ProcessEnv; logger?: Logger; fetch?: typeof fetch; form?: "deployed" | "own_infra" }): Promise<{ bridgeId: string; workspaceId: string }> {
+export async function enrolBridge(o: { api: ManifestApi; env: NodeJS.ProcessEnv; logger?: Logger; fetch?: typeof fetch; form?: "deployed" | "own_infra"; portalRootKeys?: Ed25519PublicJwk[] }): Promise<{ bridgeId: string; workspaceId: string }> {
   const env = o.env;
   if (!env.TB_DATA_DIR) throw new Error("TB_DATA_DIR is required");
   const state = new BridgeState(env.TB_DATA_DIR, o.api, keksFromEnv(env, o.api));
@@ -88,6 +96,7 @@ export async function enrolBridge(o: { api: ManifestApi; env: NodeJS.ProcessEnv;
     publicUrl: assertOrigin(env.TB_PUBLIC_URL ?? "", "TB_PUBLIC_URL"),
     internalUrl: `http://${hostname()}:${Number(env.TB_INTERNAL_PORT ?? 8788)}`,
     form: o.form ?? "own_infra",
+    ...(o.portalRootKeys ? { portalRoots: o.portalRootKeys } : {}),
     ...(o.fetch ? { fetch: o.fetch } : {}),
   });
   await ensureEnrolled(ctx, env.TB_ENROL_CODE);
@@ -119,7 +128,9 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
     keysUrl,
     internalUrl: `http://${privateHost}:${internalPort}`,
     form: o.form ?? "deployed",
-    appHosts: (env.TB_APP_HOSTS ?? "").split(",").map((h) => h.trim()).filter(Boolean),
+    ownInfraOrigins: (env.TB_OWN_INFRA_ORIGINS ?? "").split(",").map((h) => h.trim()).filter(Boolean),
+    ...(o.portalRootKeys ? { portalRoots: o.portalRootKeys } : {}),
+    ...(o.keysetRequired !== undefined ? { keysetRequired: o.keysetRequired } : {}),
     ...(o.fetch ? { fetch: o.fetch } : {}),
   });
   await ensureEnrolled(ctx, env.TB_ENROL_CODE);

@@ -55,6 +55,9 @@ export function manifestApi(): ManifestApi {
       return r.ok ? r : { ok: false, errors: r.errors.map((x) => `${x.path || "/"} ${x.message}`) };
     },
     signJwsWithSigner: (typ, claims, signer) => m.signJwsWithSigner(typ, claims, signer),
+    portalRootKeys: (channel) => m.portalRootKeys(channel),
+    trustedPortalKeys: (body, pinned, roots, opts) => m.trustedPortalKeys(body, pinned, roots, opts),
+    isPrivateInternalUrl: (url, opts) => m.isPrivateInternalUrl(url, opts),
   };
 }
 

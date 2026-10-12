@@ -123,7 +123,8 @@ export class InternalApi {
     let internalUrl: string | undefined;
     if (entry.kind === "neighbour") {
       if (typeof r.internalUrl !== "string") throw new BridgeError("input_invalid", 400, "internalUrl required for neighbours");
-      if (!internalUrlAllowed(r.internalUrl, ctx.form, ctx.appHosts)) throw new BridgeError("internal_url_refused", 403, "this neighbour address is not in TB_APP_HOSTS");
+      // §10.2: a neighbour's address is evaluated as own infrastructure (TB_OWN_INFRA_ORIGINS or railway.internal)
+      if (!internalUrlAllowed(ctx.api, r.internalUrl, true, ctx.ownInfraOrigins)) throw new BridgeError("internal_url_refused", 403, "this neighbour address is not in TB_OWN_INFRA_ORIGINS");
       internalUrl = new URL(r.internalUrl).origin;
       const res2 = await ctx.fetch(new URL("/tb/v1/manifest", internalUrl), { redirect: "error", signal: AbortSignal.timeout(10_000) });
       const v = ctx.api.validateManifest(await res2.json());

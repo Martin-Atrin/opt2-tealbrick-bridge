@@ -81,7 +81,7 @@ export async function remintStandalone(ctx: BridgeContext): Promise<void> {
   };
   const jws = await ctx.api.signJws(TYP.config, config, id.key);
   const own = ctx.ownKeySet();
-  const table = await buildTable({ api: ctx.api, config, jws, bridgeId: id.bridgeId, ownKeys: own, issuers: own, previous: ctx.table, fetchManifest: async () => { throw new Error("manifest from previous table only"); }, internalUrlAllowed: (u) => internalUrlAllowed(u, ctx.form, ctx.appHosts), now, reject: (r) => ctx.reject(r) });
+  const table = await buildTable({ api: ctx.api, config, jws, bridgeId: id.bridgeId, ownKeys: own, issuers: own, previous: ctx.table, fetchManifest: async () => { throw new Error("manifest from previous table only"); }, internalUrlAllowed: (e) => internalUrlAllowed(ctx.api, e.internalUrl, e.ownInfra === true, ctx.ownInfraOrigins), now, reject: (r) => ctx.reject(r) });
   // manifests are reused from the previous table (same digests); refetch any that are missing
   for (const [ins, app] of table.apps) {
     const prev = ctx.table?.apps.get(ins);

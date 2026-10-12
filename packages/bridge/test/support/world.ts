@@ -8,6 +8,7 @@ import type { AddressInfo, Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { signKeySetStatement } from "@opt2-tealbrick/manifest";
 import type { StatusReport, WorkspaceConfig } from "@opt2-tealbrick/spec/bridge";
 import type { Ed25519KeyPair, ManifestApi } from "../../src/api.ts";
 import { manifestApi } from "../../src/manifest-adapter.ts";
@@ -105,6 +106,19 @@ export interface World {
   /** the app is updated: serves a new manifest (new digest) and fails its next `failures` manifest fetches */
   updateApp(failures: number): string;
   rotateKey(phase: "announce" | "activate" | "retire"): Promise<void>;
+  /** BSD-08 worlds (`keySet: true`): the test root, the current statement and its controls */
+  keySet: {
+    root: Ed25519KeyPair | undefined;
+    current(): string | undefined;
+    /** sign a statement over `keys` (default: the world's key entries) with seq + 1 (or `seq`) and make it current */
+    bump(o?: { keys?: { key: Ed25519KeyPair; status: "pending" | "active" | "retired" }[]; seq?: number; root?: Ed25519KeyPair }): Promise<string>;
+    /** what the enrolment response carries: the current statement, none, or a given JWS */
+    enrol(mode: "current" | "none" | { jws: string }): void;
+  };
+  /** sign the next published configs with this key (default: the world's active Portal key) */
+  setSigningKey(key: Ed25519KeyPair): void;
+  /** bridge env overrides applied on the next restart */
+  setEnv(k: string, v: string): void;
   /** serve a document signed by an untrusted key as the next revision */
   serveForged(): Promise<void>;
   configPulls(): number;
@@ -129,6 +143,12 @@ export interface WorldOptions {
   limits?: Partial<ListenerLimits> & { mcp?: Partial<McpLimits> };
   /** extra key connections of the first agent */
   extraConnections?: string[];
+  /** BSD-08: a test root signs key-set statements; the bridge pins it (start option) and Portal sends them */
+  keySet?: boolean;
+  /** the first enrolment response carries no statement */
+  enrolWithoutKeySet?: boolean;
+  /** spec 0.1.12 strict key-set rule (harness start option) */
+  keysetRequired?: boolean;
 }
 
 async function listen(handler: (req: IncomingMessage, res: ServerResponse) => void): Promise<{ server: Server; url: string }> {
@@ -159,12 +179,31 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
   let pulls = 0;
   let ackFails = false;
   let assertFailures = 0;
-  let bridgeJwk: Ed25519KeyPair["publicJwk"] | undefined;
+  // every key that enrolled stays accepted: like conformance B20, a re-enrolment the bridge refuses (C63a) must not
+  // cut the old identity off in this fake Portal
+  const bridgeJwks: Ed25519KeyPair["publicJwk"][] = [];
   let configJws = "";
   let rev = 0;
   let signingKey = portalKey;
   let keyEntries: { key: Ed25519KeyPair; status: "pending" | "active" | "retired" }[] = [{ key: portalKey, status: "active" }];
   const sign = (typ: string, claims: object) => api.signJws(typ as never, claims, signingKey);
+  if (opts.keySet && !real) throw new Error("keySet worlds need real crypto");
+  const root = opts.keySet ? await api.generateKeyPair() : undefined;
+  let kssSeq = 0;
+  let kss: string | undefined;
+  let enrolKss: "current" | "none" | { jws: string } = opts.enrolWithoutKeySet ? "none" : "current";
+  const envOverrides: Record<string, string> = {};
+  const signKss = async (o: { keys?: typeof keyEntries; seq?: number; root?: Ed25519KeyPair } = {}): Promise<string> => {
+    const r = o.root ?? root;
+    if (!r) throw new Error("not a keySet world");
+    const seq = o.seq ?? kssSeq + 1;
+    const jws = await signKeySetStatement({ iss: "tb:portal-root", aud: "tb:portal-keys", seq, iat: now(), keys: (o.keys ?? keyEntries).map((k) => ({ jwk: k.key.publicJwk, status: k.status })) } as never, r);
+    return jws;
+  };
+  if (root) {
+    kss = await signKss();
+    kssSeq = 1;
+  }
 
   // ── fake app (notes) and hook app (guard) ──
   const app = await listen(async (req, res) => {
@@ -237,8 +276,8 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
     instanceKeys: [],
     grants: [await grant(`tb:agt:${AGT}`, ["read", "create"])],
     apps: [
-      { ins: INS as never, product: "notes", version: "1.0.0", sdkMajor: 1, manifestDigest: api.manifestDigest(notesManifest as never), internalUrl: app.url, entitled: true, slice },
-      ...(opts.withHook ? [{ ins: HOOKINS as never, product: "guard", version: "1.0.0", sdkMajor: 1, manifestDigest: api.manifestDigest(hookManifest as never), internalUrl: hookApp.url, entitled: true, slice }] : []),
+      { ins: INS as never, product: "notes", version: "1.0.0", sdkMajor: 1, manifestDigest: api.manifestDigest(notesManifest as never), internalUrl: app.url, ownInfra: true, entitled: true, slice },
+      ...(opts.withHook ? [{ ins: HOOKINS as never, product: "guard", version: "1.0.0", sdkMajor: 1, manifestDigest: api.manifestDigest(hookManifest as never), internalUrl: hookApp.url, ownInfra: true, entitled: true, slice }] : []),
     ],
     agents: [
       { agt: AGT, name: "Agent One", mode: "free" },
@@ -259,6 +298,7 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
     c.iat = now();
     c.exp = now() + 43200;
     c.jti = api.ulid();
+    if (kss) (c as { portalKeySet?: string }).portalKeySet = kss;
     tweak?.(c);
     c.portalKeys = keyEntries.map((k) => ({ jwk: k.key.publicJwk, status: k.status }));
     c.grants = await Promise.all(c.grants.map(async (g) => sign("tb-grant+jwt", JSON.parse(Buffer.from(g.split(".")[1] as string, "base64url").toString("utf8")))));
@@ -280,12 +320,22 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
     const raw = Buffer.concat(chunks);
     if (url.pathname === "/api/v1/bridge/enrol") {
       const b = JSON.parse(raw.toString("utf8"));
-      bridgeJwk = b.publicKey;
+      bridgeJwks.push(b.publicKey);
       return res
         .writeHead(200, { "content-type": "application/json" })
-        .end(JSON.stringify({ bridgeId: BRG, workspaceId: WS, portalKeys: [{ jwk: portalKey.publicJwk, status: "active" }], configPath: "/api/v1/bridge/config", ackPath: "/api/v1/bridge/ack", waitMaxS: 60 }));
+        .end(
+          JSON.stringify({
+            bridgeId: BRG,
+            workspaceId: WS,
+            portalKeys: keyEntries.map((k) => ({ jwk: k.key.publicJwk, status: k.status })),
+            ...(kss && enrolKss === "current" ? { portalKeySet: kss } : typeof enrolKss === "object" ? { portalKeySet: enrolKss.jws } : {}),
+            configPath: "/api/v1/bridge/config",
+            ackPath: "/api/v1/bridge/ack",
+            waitMaxS: 60,
+          }),
+        );
     }
-    const keys = bridgeJwk ? api.keySetFrom({ keys: [bridgeJwk] }, `tb:brg:${BRG}`) : { keys: [] };
+    const keys = bridgeJwks.length ? api.keySetFrom({ keys: bridgeJwks }, `tb:brg:${BRG}`) : { keys: [] };
     const v = api.verifyAssertion(String(req.headers["tb-assert"] ?? ""), keys, { typ: "tb-bridge-assert+jwt", aud: "tb:portal", iss: [`tb:brg:${BRG}`], now: now(), maxLifetimeS: 60, request: { method: req.method ?? "GET", pathAndQuery: req.url ?? "/", ...(raw.length ? { body: raw } : {}) } });
     if (!v.ok) {
       assertFailures += 1;
@@ -308,14 +358,27 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
   });
 
   const dir = mkdtempSync(join(tmpdir(), "tb-bridge-test-"));
-  const bridgeEnv = (): NodeJS.ProcessEnv => ({ TB_DATA_DIR: dir, TB_PORTAL_URL: portal.url, TB_PUBLIC_URL: "http://127.0.0.1", TB_KEYS_PUBLIC_URL: "http://localhost", TB_ENROL_CODE: ENROL, TB_KEK: "11".repeat(32), TB_APP_HOSTS: "127.0.0.1", ...opts.env });
-  let bridge = await startBridge({
-    api,
-    logger: silentLogger,
-    ports: { public: 0, internal: 0 },
-    env: bridgeEnv(),
-    ...(opts.limits ? { limits: opts.limits } : {}),
-  });
+  const bridgeEnv = (): NodeJS.ProcessEnv => ({ TB_DATA_DIR: dir, TB_PORTAL_URL: portal.url, TB_PUBLIC_URL: "http://127.0.0.1", TB_KEYS_PUBLIC_URL: "http://localhost", TB_ENROL_CODE: ENROL, TB_KEK: "11".repeat(32), TB_OWN_INFRA_ORIGINS: [app.url, hookApp.url].join(","), ...opts.env, ...envOverrides });
+  const rootOpt = { ...(root ? { portalRootKeys: [root.publicJwk] } : {}), ...(opts.keysetRequired ? { keysetRequired: true } : {}) };
+  let bridge: RunningBridge;
+  try {
+    bridge = await startBridge({
+      api,
+      logger: silentLogger,
+      ports: { public: 0, internal: 0 },
+      env: bridgeEnv(),
+      ...(opts.limits ? { limits: opts.limits } : {}),
+      ...rootOpt,
+    });
+  } catch (e) {
+    // a bridge that refuses to start (e.g. a refused enrolment) must not leave the fake servers running
+    for (const s of [app.server, hookApp.server, portal.server]) {
+      s.closeAllConnections();
+      await new Promise((r) => s.close(r));
+    }
+    rmSync(dir, { recursive: true, force: true });
+    throw e;
+  }
   const publicUrl = `http://127.0.0.1:${(bridge.publicServer.address() as AddressInfo).port}`;
   const keysUrl = `http://localhost:${(bridge.publicServer.address() as AddressInfo).port}`;
   const internalUrl = `http://127.0.0.1:${(bridge.internalServer.address() as AddressInfo).port}`;
@@ -376,6 +439,29 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
         signingKey = next.key;
       }
       if (phase === "retire") keyEntries = keyEntries.filter((k) => k.status !== "retired");
+      if (root) {
+        kss = await signKss();
+        kssSeq += 1;
+      }
+    },
+    keySet: {
+      root,
+      current: () => kss,
+      async bump(o = {}) {
+        const jws = await signKss(o);
+        kss = jws;
+        kssSeq = o.seq ?? kssSeq + 1;
+        return jws;
+      },
+      enrol(mode) {
+        enrolKss = mode;
+      },
+    },
+    setSigningKey(key) {
+      signingKey = key;
+    },
+    setEnv(k, v) {
+      envOverrides[k] = v;
     },
     updateApp(failures) {
       servedManifest = { ...notesManifest, version: "1.0.1" };
@@ -387,7 +473,7 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
     async restart() {
       const ports = { public: (bridge.publicServer.address() as AddressInfo).port, internal: (bridge.internalServer.address() as AddressInfo).port };
       await bridge.stop();
-      bridge = await startBridge({ api, logger: silentLogger, ports, env: bridgeEnv(), ...(opts.limits ? { limits: opts.limits } : {}) });
+      bridge = await startBridge({ api, logger: silentLogger, ports, env: bridgeEnv(), ...(opts.limits ? { limits: opts.limits } : {}), ...rootOpt });
       world.bridge = bridge;
     },
     dataDir: dir,

@@ -16,13 +16,18 @@ import type {
   JwsExpect,
   KeySet,
   OperationView,
+  PinnedKeySet,
   Refusal,
   SkillVars,
   TrustContext,
   VerifiedGrant,
+  VerifiedKeySet,
 } from "@opt2-tealbrick/spec/sdk";
 
-export type { Ed25519KeyPair, GateInput, Json, KeySet, OperationView, Refusal, TrustContext, VerifiedGrant };
+export type { Ed25519KeyPair, GateInput, Json, KeySet, OperationView, PinnedKeySet, Refusal, TrustContext, VerifiedGrant, VerifiedKeySet };
+
+/** BSD-08 trust decision for one body (CREDENTIALS §9.5): a verified statement, the 0.1.11 legacy path, or a refusal. */
+export type KeySetDecision = (VerifiedKeySet & { legacy: false; changed: boolean }) | { ok: true; legacy: true; reason: string } | Refusal;
 
 export interface Kek {
   id: string;
@@ -75,6 +80,13 @@ export interface ManifestApi {
   validateInput(op: OperationView, input: Json): { ok: true } | { ok: false; errors: string[] };
   /** JWS with an external signer (key held by the OS keychain / Secure Enclave; C24 relay). */
   signJwsWithSigner(typ: Typ, claims: object, signer: { kid: string; sign(input: string): Promise<string> | string }): Promise<string>;
+  // v0.1.11 (BSD-08, BSD-07)
+  /** build-pinned Portal Root Keys of a channel (a build constant, never env) */
+  portalRootKeys(channel: "dev" | "prod"): Ed25519PublicJwk[];
+  /** the ONE key-set trust rule for an enrolment response / config body */
+  trustedPortalKeys(body: { portalKeySet?: unknown }, pinned: PinnedKeySet | null, roots: readonly Ed25519PublicJwk[], opts?: { required?: boolean }): KeySetDecision;
+  /** BRIDGE §5.7 app address rule */
+  isPrivateInternalUrl(url: string, opts?: { ownInfra?: boolean; allowList?: readonly string[] }): boolean;
 }
 
 export const isRefusal = (v: unknown): v is Refusal => !!v && typeof v === "object" && (v as { ok?: unknown }).ok === false;
