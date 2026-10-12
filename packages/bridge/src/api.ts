@@ -7,7 +7,7 @@
  * ulid, raw-bytes digest, generic assertion verify, input validation).
  */
 import type { BridgeRef, Ed25519PublicJwk, InstanceRef, PortalRef, SealedBlob, Sha256Digest, Typ, Ulid } from "@opt2-tealbrick/spec/credentials";
-import type { Manifest, ManifestValidation, Skill } from "@opt2-tealbrick/spec/manifest";
+import type { CrudAction, Manifest, ManifestValidation, Skill } from "@opt2-tealbrick/spec/manifest";
 import type {
   Ed25519KeyPair,
   GateDecision,
@@ -60,6 +60,10 @@ export interface ManifestApi {
   verifyConfig(token: string, ctx: { now: number; self: BridgeRef; issuers: KeySet }): { ok: true; claims: unknown; body: unknown } | Refusal;
   renderSkill(skill: Skill, body: string, vars: SkillVars): string;
   gate(input: GateInput): GateDecision;
+  /** manifest 0.1.14 (L1): THE tools/list rule = the static part of gate() steps (3)–(4) */
+  opVisibleToGrant(op: GateInput["op"], claims: { mode: string; wf: readonly string[]; crud: readonly CrudAction[] }, declaredScopeTypes: readonly string[]): boolean;
+  /** manifest 0.1.14 (C111a, L1): THE workflow rule (gate() step 4) */
+  opInGrantWorkflow(claims: { mode: string; wf: readonly string[] }, opId: string): boolean;
   // C21 additions
   /** TB_KEK / TB_KEK_PREVIOUS env value → KEK (manifest owns the encoding rules, C35). */
   kekFromEnv(value: string): Kek;

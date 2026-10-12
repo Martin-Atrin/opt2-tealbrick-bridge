@@ -56,20 +56,18 @@ function annotations(effect: string): ToolDef["annotations"] {
   };
 }
 
+/** dynamic catalog entries: crud within the grant and the op's ceiling (the dynamic-entry rule, not gate step 4) */
 const subset = (a: readonly string[], b: readonly string[]) => a.every((x) => b.includes(x));
 
-/** Visible ops of one app for one grant (CORE §7 rules, without the signature check gate() does per call). */
-export function visibleOps(app: AppRuntime, grant: GrantClaims): OperationView[] {
+/**
+ * Visible ops of one app for one grant: manifest 0.1.14 `opVisibleToGrant` (the static part of gate() steps 3–4,
+ * L1 — no local copy). Standard ops are added per product separately.
+ */
+export function visibleOps(ctx: Pick<BridgeContext, "api">, app: AppRuntime, grant: GrantClaims): OperationView[] {
   const out: OperationView[] = [];
   for (const op of app.ops.values()) {
-    if (op.audience !== "agent") continue;
-    if (op.standard) continue; // tb.hold_status is added per product separately
-    if (!subset(op.crud, grant.crud)) continue;
-    if (op.scopeType && !app.scopeTypes.includes(op.scopeType)) continue;
-    // listing mirror of gate() step (4) (manifest 0.1.12, C111a): `wf` limits ops when the grant is Bound OR its `wf`
-    // is non-empty (any mode). gate() enforces it per call; REQUESTS.md asks for a shared helper so this is not local.
-    if ((grant.mode === "bound" || grant.wf.length > 0) && !grant.wf.includes(op.id)) continue;
-    out.push(op);
+    if (op.standard) continue; // tb.hold_status / tb.holds_pending are added per product separately
+    if (ctx.api.opVisibleToGrant(op, grant, app.scopeTypes)) out.push(op);
   }
   return out;
 }
@@ -101,7 +99,7 @@ export async function buildToolIndex(ctx: BridgeContext, router: CallRouter, t: 
     const app = [...t.apps.values()].find((a) => a.entry.ins === ins);
     if (!app || app.down || t.pausedInstances.has(app.entry.ins)) continue;
     const product = app.entry.product;
-    const ops = visibleOps(app, g.claims);
+    const ops = visibleOps(ctx, app, g.claims);
     let any = false;
     for (const op of ops) {
       if (op.standard) continue;

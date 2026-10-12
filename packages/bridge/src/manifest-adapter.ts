@@ -23,6 +23,8 @@ export function manifestApi(): ManifestApi {
     verifyConfig: (token, ctx) => m.verifyConfig(token, ctx),
     renderSkill: (skill, body, vars) => m.renderSkill(skill, body, vars),
     gate: (input) => m.gate(input),
+    opVisibleToGrant: (op, claims, declared) => m.opVisibleToGrant(op, claims, declared),
+    opInGrantWorkflow: (claims, opId) => m.opInGrantWorkflow(claims, opId),
     kekFromEnv: (v) => m.kekFromEnv(v),
     sdkMajorServed: (v, current) => {
       try {
