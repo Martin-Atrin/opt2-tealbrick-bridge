@@ -13,7 +13,7 @@ import type { Rejection, Table } from "./table.ts";
 import type { Logger } from "./util.ts";
 import { nowS } from "./util.ts";
 
-export const BRIDGE_VERSION = "0.1.16";
+export const BRIDGE_VERSION = "0.1.17";
 export const SDK_MAJORS = [1];
 
 /**
@@ -77,7 +77,15 @@ export class BridgeContext extends EventEmitter {
   readonly health = new Map<InstanceId, AppHealth>();
   readonly scopeSummaries = new Map<string, { agt: AgentId; ins: InstanceId; label: string }>();
   readonly rejected = new Map<string, number>();
-  readonly toolsOmitted = new Map<string, { ins: InstanceId; name: string; code: "tool_name_too_long" | "name_collision" | "ceiling" }>();
+  /** v0.1.14: connection → last authentication (ms) since the previous accepted status report (insertion = recency) */
+  readonly connectionsSeen = new Map<string, number>();
+  /** record an authenticated connection (most recent last; capped) */
+  sawConnection(con: string, nowMs = Date.now()): void {
+    this.connectionsSeen.delete(con);
+    this.connectionsSeen.set(con, nowMs);
+    if (this.connectionsSeen.size > 500) this.connectionsSeen.delete(this.connectionsSeen.keys().next().value as string);
+  }
+  readonly toolsOmitted = new Map<string, { ins: InstanceId; name: string; code: "tool_name_too_long" | "name_collision" | "ceiling" | "catalog_failed" }>();
 
   constructor(o: BridgeOptions) {
     super();

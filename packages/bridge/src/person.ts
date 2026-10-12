@@ -77,7 +77,7 @@ export class PersonSurfaces {
       }
       // The SDK redeems the ticket once (jti in the app DB); the bridge only checks and forwards it.
     }
-    return this.proxy(req, res, app, url.pathname + url.search, body, MAX_UI_BODY, true, rest === "/tb/launch" ? (loc) => launchRedirect(app.entry.product, loc) : undefined);
+    return this.proxy(req, res, app, url.pathname + url.search, body, MAX_UI_BODY, true, rest === "/tb/launch" ? (loc) => launchRedirect(app.entry.product, loc, (p) => this.ctx.api.isValidLaunchPath(p)) : undefined);
   }
 
   private allowedUiPath(app: AppRuntime, rest: string): boolean {
@@ -299,24 +299,15 @@ export { BridgeError };
 
 /**
  * C86 (BRIDGE §3 launch path): after the ticket POST the app SDK redirects to the ticket's `path`. The bridge keeps
- * that redirect only when it stays under the ticket's own `/a/<product>/` and passes the path rule (relative,
- * `/`-prefixed, no `//`, `\\`, `..`, scheme or host, no control characters); on any doubt → `/a/<product>/`.
+ * that redirect only when it stays under the ticket's own `/a/<product>/` and the app-relative rest passes the
+ * shared launch path rule (manifest isValidLaunchPath, L1); on any doubt → `/a/<product>/`.
  */
-export function launchRedirect(product: string, location: string | undefined): string {
+export function launchRedirect(product: string, location: string | undefined, isValidLaunchPath: (path: string) => boolean): string {
   const home = `/a/${product}/`;
   if (!location) return home;
   const prefix = `/a/${product}`;
   if (location !== prefix && !location.startsWith(home)) return home;
-  const path = location.slice(prefix.length) || "/";
-  const pathOnly = path.split(/[?#]/)[0] ?? "";
-  let decoded: string;
-  try {
-    decoded = decodeURIComponent(pathOnly);
-  } catch {
-    return home;
-  }
-  for (const p of [path, decoded]) {
-    if (!p.startsWith("/") || p.includes("//") || p.includes("\\") || p.includes("..") || [...p].some((ch) => ch.charCodeAt(0) < 0x20 || ch.charCodeAt(0) === 0x7f) || /^[a-z][a-z0-9+.-]*:/i.test(p.slice(1))) return home;
-  }
-  return `${prefix}${path}`;
+  const rest = location.slice(prefix.length) || "/";
+  const path = rest.split(/[?#]/)[0] ?? "";
+  return isValidLaunchPath(path) && isValidLaunchPath(rest) ? `${prefix}${rest}` : home;
 }

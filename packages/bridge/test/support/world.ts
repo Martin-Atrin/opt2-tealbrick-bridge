@@ -97,8 +97,10 @@ export interface World {
   acks: StatusReport[];
   appLog: AppLog;
   hookMode: { mode: "allow" | "deny" | "fail"; answer?: (hook: string, body: Record<string, unknown>) => unknown };
-  /** publish a new config revision (tweak: mutate the base config) */
+  /** publish a new config revision (tweak: mutate THIS revision only) */
   publish(tweak?: (c: WorkspaceConfig) => void): Promise<number>;
+  /** change the base config for every later revision (what Core keeps listing), then publish */
+  amend(change: (c: WorkspaceConfig) => void): Promise<number>;
   rev(): number;
   close(): Promise<void>;
   /** stop the bridge process and start a new one on the same volume and ports */
@@ -435,6 +437,10 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
     appOps,
     mcp,
     signPortal: sign,
+    async amend(change) {
+      change(base);
+      return publish();
+    },
     async serveForged() {
       const stranger = await api.generateKeyPair();
       const c = JSON.parse(Buffer.from(configJws.split(".")[1] as string, "base64url").toString("utf8"));

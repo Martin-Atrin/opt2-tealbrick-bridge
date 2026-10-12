@@ -5,7 +5,7 @@
  */
 import { randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
-import type { HeldToolResult } from "@opt2-tealbrick/spec/bridge";
+import type { HeldToolResult, JsonObject, JsonValue } from "@opt2-tealbrick/spec/bridge";
 import { TOOL_NAME_RULE } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, ConnectionId } from "@opt2-tealbrick/spec/credentials";
 import type { Skill } from "@opt2-tealbrick/spec/manifest";
@@ -53,6 +53,9 @@ export const MCP_LIMITS = Object.freeze({
 export type McpLimits = { -readonly [K in keyof typeof MCP_LIMITS]: number };
 
 type Principal = { agt: AgentId; con: ConnectionId };
+
+/** BRIDGE §8.5 (G4b): MCP `_meta` key of the onBehalfOf claim */
+export const ON_BEHALF_OF_META_KEY = "tealbrick/onBehalfOf"; // gitleaks:allow (MCP _meta key name, not a secret)
 
 export class McpServer {
   private readonly ctx: BridgeContext;
@@ -346,6 +349,11 @@ export class McpServer {
     const args = (isRecord(params.arguments) ? params.arguments : {}) as Json;
     const meta = isRecord(params._meta) ? params._meta : {};
     const idem = meta[TOOL_NAME_RULE.idempotencyMetaKey];
+    // §8.5 (G4b): an onBehalfOf claim becomes `tb.onBehalfOf` (unverified) before the before hooks; a bad or oversized
+    // claim is dropped (the call proceeds) and counted (shared rule: manifest onBehalfOfFromMeta)
+    const rawObo = meta[ON_BEHALF_OF_META_KEY];
+    const obo = rawObo === undefined ? null : this.ctx.api.onBehalfOfFromMeta(rawObo);
+    if (rawObo !== undefined && obo === null) this.ctx.reject({ kind: "claim", code: "on_behalf_of_invalid" });
     if (idem !== undefined && (typeof idem !== "string" || idem.length < 8 || idem.length > 128)) {
       return toolError("input_invalid", "idempotency key must be 8–128 chars", requestId);
     }
@@ -367,7 +375,7 @@ export class McpServer {
         }
         throw new BridgeError("unknown_tool", 404);
       }
-      return await this.runRoute(t, p, route, args, idem as string | undefined, requestId, signal, sessionId);
+      return await this.runRoute(t, p, route, args, idem as string | undefined, requestId, signal, sessionId, obo ? { "tb.onBehalfOf": obo as JsonValue } : undefined);
     } catch (e) {
       const code = e instanceof BridgeError ? e.code : "app_error";
       const message = e instanceof BridgeError ? e.message : "internal error";
@@ -380,7 +388,7 @@ export class McpServer {
     }
   }
 
-  private async runRoute(t: Table, p: Principal, route: ToolRoute, args: Json, idem: string | undefined, _requestId: string, signal: AbortSignal, sessionId = ""): Promise<unknown> {
+  private async runRoute(t: Table, p: Principal, route: ToolRoute, args: Json, idem: string | undefined, _requestId: string, signal: AbortSignal, sessionId = "", reservedContext?: JsonObject): Promise<unknown> {
     const caller = { type: "agent" as const, agt: p.agt, con: p.con };
     if (route.kind === "skills") {
       const skillId = isRecord(args) && typeof args.skillId === "string" ? args.skillId : undefined;
@@ -421,6 +429,7 @@ export class McpServer {
       target: { app: route.app, op: route.op, ...(tool ? { tool } : {}) },
       input,
       ...(key ? { idempotencyKey: key } : {}),
+      ...(reservedContext ? { reservedContext } : {}),
       signal,
     });
     if (result.status === "held") {

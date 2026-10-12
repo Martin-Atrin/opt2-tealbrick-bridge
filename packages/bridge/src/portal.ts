@@ -4,7 +4,7 @@
  * Portal never connects in.
  */
 import type { AppEntry, EnrolRequest, EnrolResponse, StatusReport, WorkspaceConfig } from "@opt2-tealbrick/spec/bridge";
-import { LIFETIME_S, type PortalKeyEntry, TYP } from "@opt2-tealbrick/spec/credentials";
+import { type ConnectionId, LIFETIME_S, type PortalKeyEntry, TYP } from "@opt2-tealbrick/spec/credentials";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import { isRefusal, type Json } from "./api.ts";
 import { BRIDGE_VERSION, type BridgeContext, MCP_VERSIONS, SDK_MAJORS } from "./context.ts";
@@ -18,6 +18,8 @@ const MAX_CONFIG_BYTES = 4 * 1024 * 1024;
 export const REFUSED_PULL_DELAY_MS = 5_000;
 /** Minimum spacing of config pulls (BSD-09); a long-poll normally takes up to 60 s anyway. */
 export const MIN_PULL_INTERVAL_MS = 5_000;
+/** StatusReport.connectionsSeen cap (spec 0.1.14) */
+export const MAX_CONNECTIONS_SEEN = 500;
 
 /** BRIDGE §4.1: first start, or re-enrolment when TB_ENROL_CODE changed (§4.3). */
 export async function ensureEnrolled(ctx: BridgeContext, enrolCode: string | undefined): Promise<void> {
@@ -328,22 +330,12 @@ function reconcileConnections(ctx: BridgeContext, table: Table): void {
 const reportedAtS = new Map<string, number>();
 
 /** BRIDGE §5.6. */
-/**
- * C62 BSD-08/BSD-15 (Core REQUESTS): two additive fields Core reads when present. Not yet in spec 0.1.2's
- * StatusReport type (requested from Specs); remove this extension when the spec carries them.
- */
-export type StatusReportV12 = Omit<StatusReport, "apps"> & {
-  /** JCS digest of the portalKeys array the bridge trusts after applying `rev` */
-  portalKeysDigest: string;
-  apps: (StatusReport["apps"][number] & { sliceRevision?: number })[];
-};
-
-export function buildStatusReport(ctx: BridgeContext): StatusReportV12 {
+export function buildStatusReport(ctx: BridgeContext): StatusReport {
   const t = ctx.table;
   const id = ctx.identity;
   if (!id) throw new Error("not enrolled");
   const now = nowS();
-  const apps: StatusReportV12["apps"] = (t ? [...t.apps.values()] : []).map((a) => {
+  const apps: StatusReport["apps"] = (t ? [...t.apps.values()] : []).map((a) => {
     const h = ctx.health.get(a.entry.ins);
     const claimed = !!t?.instanceKeys.has(`${a.entry.ins}|`);
     const stale = !h || now - h.lastSeen > 150;
@@ -389,6 +381,8 @@ export function buildStatusReport(ctx: BridgeContext): StatusReportV12 {
     keys,
     scopeSummaries: [...ctx.scopeSummaries.values()],
     connectionsCreated,
+    // v0.1.14: connections that authenticated since the previous ACCEPTED report (latest time each, ≤ 500)
+    connectionsSeen: [...ctx.connectionsSeen.entries()].slice(-MAX_CONNECTIONS_SEEN).map(([con, ms]) => ({ con: con as ConnectionId, lastSeen: new Date(ms).toISOString() })),
     connectionsRevoked: [...ctx.state.reports.revoked],
     claims: ctx.state.claims.map(({ reported: _r, ...c }) => c),
     rejected: [...ctx.rejected.entries()].map(([k, count]) => {
@@ -413,6 +407,8 @@ export async function sendStatus(ctx: BridgeContext): Promise<boolean> {
         ctx.state.saveReports();
       }
       ctx.rejected.clear();
+      // drop only what this report carried (a connection seen again meanwhile keeps its newer time)
+      for (const c of report.connectionsSeen ?? []) if (ctx.connectionsSeen.get(c.con) === Date.parse(c.lastSeen)) ctx.connectionsSeen.delete(c.con);
     } else ctx.log.warn("bridge.status.failed", { code: `http_${res.status}` });
     await res.body?.cancel().catch(() => undefined);
     return res.ok;

@@ -31,6 +31,8 @@ export function connectionState(ctx: BridgeContext, con: ConnectionId): { agt: A
 }
 
 export async function issueAccess(ctx: BridgeContext, agt: AgentId, con: ConnectionId, gen: number): Promise<string> {
+  // v0.1.14: an issued K5 (key assertion, pairing code exchange, refresh) counts as the connection being seen
+  ctx.sawConnection(con);
   const id = ctx.identity;
   const t = ctx.table;
   if (!id || !t) throw new BridgeError("temporarily_unavailable", 503);
@@ -71,6 +73,7 @@ export function authenticateAgent(ctx: BridgeContext, authorization: string | un
   const st = connectionState(ctx, c.con);
   if (!agt || !st?.active || st.gen !== c.gen || st.agt !== agt || c.ws !== t.ws) throw new BridgeError("unauthenticated", 401);
   if (!t.agents.has(agt)) throw new BridgeError("unauthenticated", 401);
+  ctx.sawConnection(c.con);
   return { agt, con: c.con };
 }
 

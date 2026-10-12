@@ -136,6 +136,11 @@ export function fakeApi(): ManifestApi {
     // shared rules are pure: the double uses the real implementations (L1)
     bridgeOpProofClaims: (bop, body) => realManifest.bridgeOpProofClaims(bop, body),
     deriveIdempotencyKey: (i) => realManifest.deriveIdempotencyKey(i),
+    hookResponseProblem: (phase, body, product) => realManifest.hookResponseProblem(phase, body, product),
+    reduceBeforeChain: (answers) => realManifest.reduceBeforeChain(answers as never) as never,
+    holdVerdictClaim: (r) => realManifest.holdVerdictClaim(r as never),
+    onBehalfOfFromMeta: (v) => realManifest.onBehalfOfFromMeta(v) as never,
+    isValidLaunchPath: (p) => realManifest.isValidLaunchPath(p),
   };
   return api;
 }

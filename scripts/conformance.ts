@@ -80,9 +80,8 @@ const problems: string[] = [];
 // programmatic `portalRootKeys` option, so B20 runs; the runner sets TB_OWN_INFRA_ORIGINS for its fake apps (B21).
 /**
  * Groups this release does not run, each with its reason (explicit, never a silent skip). Empty = all groups.
- * 0.1.16 is the C98 hotfix from main; the spine013 features (hv, tb.onBehalfOf) ship in 0.1.17.
  */
-const SKIP_GROUPS: Record<string, string> = { spine013: "spine 0.1.13 features ship in bridge 0.1.17 (C98 hotfix 0.1.16 from main)" };
+const SKIP_GROUPS: Record<string, string> = {};
 /** the suite's own group list (never hand-typed: a missing name would silently drop checks) */
 const GROUPS: readonly string[] = BRIDGE_GROUP_ORDER;
 for (const g of Object.keys(SKIP_GROUPS)) if (!GROUPS.includes(g)) throw new Error(`SKIP_GROUPS names an unknown group: ${g}`);

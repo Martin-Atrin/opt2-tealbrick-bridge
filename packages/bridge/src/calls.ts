@@ -38,6 +38,8 @@ export interface CallRequest {
   idempotencyKey?: string;
   parentCall?: CallId;
   signal?: AbortSignal;
+  /** bridge-written `tb.*` context (BRIDGE §8.5), set BEFORE the before hooks; e.g. `tb.onBehalfOf` */
+  reservedContext?: JsonObject;
 }
 
 export type CallOutcome = OpResult<JsonValue>;
@@ -125,7 +127,15 @@ export function appErrorMessage(message: unknown, fallback: string): string {
 interface Active {
   inHook: boolean;
   depth: number;
+  /** A2A-2: instances this call was delivered to (target app, hook apps); only they may name it as parentCall */
+  deliveredTo: Set<string>;
+  startedMs: number;
 }
+
+/** A2A-2/3: a parentCall is `call_` + ULID; anything else is refused before it is logged or looked up */
+export const CALL_ID_RE = /^call_[0-9A-HJKMNP-TV-Z]{26}$/;
+/** an open parent call is accepted as parentCall for at most this long (the op/hook answer windows are shorter) */
+export const PARENT_CALL_TTL_MS = 120_000;
 
 export class CallRouter {
   private readonly ctx: BridgeContext;
@@ -139,6 +149,17 @@ export class CallRouter {
     ctx.on("table", () => {
       this.catalogCache.clear();
     });
+  }
+
+  /**
+   * A2A-2: `parentCall` as the caller named it → the call id when it is an OPEN call this bridge delivered to that
+   * same (verified) caller instance within the TTL; otherwise undefined (the call is then app-initiated: limited and
+   * audited). A forged, foreign or finished id never grants the parent-chain exemptions.
+   */
+  parentCallFor(callerIns: string, parentCall: string): CallId | undefined {
+    const a = this.active.get(parentCall as CallId);
+    if (!a || !a.deliveredTo.has(callerIns) || Date.now() - a.startedMs > PARENT_CALL_TTL_MS) return undefined;
+    return parentCall as CallId;
   }
 
   private count(key: string): void {
@@ -165,18 +186,32 @@ export class CallRouter {
       ...this.ctx.api.bridgeOpProofClaims(bop, body as Json),
     };
     const proof = await this.ctx.api.signJws(TYP.callProof, claims, id.key);
-    const res = await this.ctx.fetch(new URL(`/tb/v1/bridge/${BRIDGE_OP_PATH[bop]}`, app.entry.internalUrl), {
-      method: "POST",
-      headers: { "content-type": "application/json", "TB-Call": proof },
-      body: JSON.stringify(body),
-      redirect: "error",
-      signal: AbortSignal.timeout(timeoutMs),
-    });
+    // L3 (spec 0.1.14): a failed bridge op is never only a log line; it is counted in the status report
+    const failed = (code: string, detail: string): never => {
+      this.ctx.reject({ kind: "bridge_op", code, detail: `${bop} ${app.entry.ins}: ${detail}` });
+      throw new BridgeError("app_error", 502, `bridge op ${bop} answered ${detail}`);
+    };
+    let res: Response;
+    try {
+      res = await this.ctx.fetch(new URL(`/tb/v1/bridge/${BRIDGE_OP_PATH[bop]}`, app.entry.internalUrl), {
+        method: "POST",
+        headers: { "content-type": "application/json", "TB-Call": proof },
+        body: JSON.stringify(body),
+        redirect: "error",
+        signal: AbortSignal.timeout(timeoutMs),
+      });
+    } catch (e) {
+      return failed(`${bop}_failed`, isTimeout(e) ? "timeout" : "network");
+    }
     if (!res.ok) {
       await res.body?.cancel().catch(() => undefined);
-      throw new BridgeError("app_error", 502, `bridge op ${bop} answered ${res.status}`);
+      return failed(`${bop}_failed`, String(res.status));
     }
-    return readCappedJson<T>(res, MAX_SMALL_ANSWER_BYTES);
+    try {
+      return await readCappedJson<T>(res, MAX_SMALL_ANSWER_BYTES);
+    } catch {
+      return failed(`${bop}_failed`, "bad answer");
+    }
   }
 
   async catalog(app: AppRuntime, op: string): Promise<DynamicCatalogEntry[]> {
@@ -261,6 +296,7 @@ export class CallRouter {
   }
 
   private async callHook<R>(t: Table, h: HookEntry, call: CallId, request: Record<string, unknown>, callerRef: string, input: Json | undefined): Promise<R> {
+    this.active.get(call)?.deliveredTo.add(h.ins);
     const app = t.apps.get(h.ins);
     // a hook app that is down (or refused by BSD-07) fails closed without a request
     if (!app || app.down || app.refused || t.pausedInstances.has(h.ins)) throw new BridgeError("hook_failed", 503);
@@ -322,7 +358,7 @@ export class CallRouter {
       depth = (parent?.depth ?? 0) + 1;
       if (depth > 3) throw new BridgeError("call_depth_exceeded", 409);
     }
-    const active: Active = { inHook: false, depth };
+    const active: Active = { inHook: false, depth, deliveredTo: new Set([target.app.entry.ins]), startedMs: Date.now() };
     this.active.set(call, active);
     try {
       if (target.app.down || !target.app.manifest) throw new BridgeError("app_unavailable", 503);
@@ -353,9 +389,13 @@ export class CallRouter {
         },
         input: req.input as JsonValue,
       };
-      let context: JsonObject = {};
-      // 6. before hooks (fail closed)
+      let context: JsonObject = { ...(req.reservedContext ?? {}) };
+      // 6. before hooks (fail closed). v0.1.13: answers allow | refuse | hold, shape-checked and reduced by the shared
+      // rule (manifest hookResponseProblem + reduceBeforeChain): the first refuse stops the chain at once; else the
+      // FIRST hold is kept and the remaining hooks still run (a later refuse wins). Runs for every call, a retry
+      // after an approval included (C82): a hook that now refuses refuses the retry.
       active.inHook = true;
+      const answers: { by: string; answer: { allow: boolean; reason?: string; hold?: { family: string; reason: string } } }[] = [];
       for (const h of this.matchingHooks(t0, "before", target, op)) {
         let r: BeforeHookResponse;
         try {
@@ -363,10 +403,15 @@ export class CallRouter {
         } catch {
           throw new BridgeError("hook_failed", 503, `hook ${h.id} failed`);
         }
-        if (!isRecord(r) || typeof r.allow !== "boolean") throw new BridgeError("hook_failed", 503, `hook ${h.id} bad answer`);
-        if (!r.allow) throw new BridgeError("hook_denied", 403, typeof r.reason === "string" ? r.reason.slice(0, 200) : `denied by ${h.id}`);
+        if (ctx.api.hookResponseProblem("before", r, h.product) !== null) throw new BridgeError("hook_failed", 503, `hook ${h.id} bad answer`);
+        const answer = r as unknown as { allow: boolean; reason?: string; hold?: { family: string; reason: string } };
+        answers.push({ by: `${h.product}/${h.hookId}`, answer });
+        if (!answer.allow && !answer.hold) break;
       }
-      // 7. context hooks (namespaced additions)
+      const chain = ctx.api.reduceBeforeChain(answers);
+      if (chain.kind === "refuse") throw new BridgeError("hook_denied", 403, chain.reason ? chain.reason.slice(0, 200) : `denied by ${chain.by}`);
+      const hv = chain.kind === "hold" ? ctx.api.holdVerdictClaim(chain) : undefined;
+      // 7. context hooks (namespaced additions; never `tb.*`, the shared rule checks both)
       for (const h of this.matchingHooks(t0, "context", target, op)) {
         let r: ContextHookResponse;
         try {
@@ -374,9 +419,9 @@ export class CallRouter {
         } catch {
           throw new BridgeError("hook_failed", 503, `hook ${h.id} failed`);
         }
-        if (!isRecord(r) || !isRecord(r.add)) throw new BridgeError("hook_failed", 503, `hook ${h.id} bad answer`);
-        for (const [k, val] of Object.entries(r.add)) {
-          // §8.5 (G4b): `tb.*` is the bridge's namespace — never writable by a hook, whatever the product is called
+        if (ctx.api.hookResponseProblem("context", r, h.product) !== null) throw new BridgeError("hook_failed", 503, `hook ${h.id} bad answer`);
+        for (const [k, val] of Object.entries((r as { add: Record<string, unknown> }).add)) {
+          // §8.5 (G4b): `tb.*` is the bridge's namespace (also enforced here, defence in depth)
           if (k.startsWith("tb.") || !k.startsWith(`${h.product}.`)) throw new BridgeError("hook_failed", 503, `hook ${h.id} wrote outside its namespace`);
           context = { ...context, [k]: val as JsonValue };
         }
@@ -389,7 +434,7 @@ export class CallRouter {
       const grant1 = t1 === t0 ? grant : this.selectGrant(t1, caller, target.app.entry.ins);
       this.runGate(t1, caller, target1, op, grant1);
       // 10. forward
-      const result = await this.forward(t1, call, callerRef, target1, op.id, grant1, req, context);
+      const result = await this.forward(t1, call, callerRef, target1, op.id, grant1, req, context, hv);
       // 12. after hooks (ok only)
       if (result.status === "ok") {
         let output: JsonValue = result.output;
@@ -398,7 +443,7 @@ export class CallRouter {
           let r: AfterHookResponse;
           try {
             r = await this.callHook<AfterHookResponse>(t1, h, call, { phase: "after", call: callInfo, context, output }, callerRef, req.input);
-            if (!isRecord(r)) throw new Error("shape");
+            if (ctx.api.hookResponseProblem("after", r, h.product) !== null) throw new Error("shape");
           } catch {
             void this.bridgeOp(target1.app, "mark", { call, mark: "after_failed" }).catch(() => undefined);
             throw new BridgeError("after_failed", 503, `after hook ${h.id} failed; output withheld`);
@@ -429,7 +474,7 @@ export class CallRouter {
     }
   }
 
-  private async forward(t: Table, call: CallId, callerRef: string, target: Target, opId: string, grant: string, req: CallRequest, context: JsonObject): Promise<CallOutcome> {
+  private async forward(t: Table, call: CallId, callerRef: string, target: Target, opId: string, grant: string, req: CallRequest, context: JsonObject, hv?: { f: string; r: string; by: string }): Promise<CallOutcome> {
     const id = this.ctx.identity;
     if (!id) throw new BridgeError("app_unavailable", 503);
     const grantClaims = t.grants.get(grantKey(callerRef, insRef(target.app.entry.ins)))?.claims;
@@ -450,6 +495,8 @@ export class CallRouter {
         op: opId,
         in: this.ctx.api.digest(input),
         ctx: this.ctx.api.digest(context as Json),
+        // v0.1.13 (G1): a kept before-hook hold verdict; the APP decides the hold (authorize), never the bridge
+        ...(hv ? { hv } : {}),
       },
       id.key,
     );

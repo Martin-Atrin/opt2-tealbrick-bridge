@@ -153,7 +153,14 @@ export function startRelay(o: RelayOptions): RunningRelay {
     }
     if (res.status === 202 || res.status === 204) return [];
     const ct = res.headers.get("content-type") ?? "";
-    const text = await res.text();
+    let text: string;
+    try {
+      text = await res.text();
+    } catch {
+      // F26: the bridge went away mid-response (restart, update): never leave the request without an answer
+      status("offline");
+      throw new RelayError(-32603, "bridge connection lost");
+    }
     if (ct.includes("text/event-stream")) return parseSse(text);
     try {
       const v = JSON.parse(text) as RpcMessage | RpcMessage[];
@@ -221,6 +228,11 @@ export function startRelay(o: RelayOptions): RunningRelay {
         for (const r of out) {
           if (isPausedResult(r)) status("paused");
           write(r);
+        }
+        // F26 / L21: a request (it has an id) ALWAYS gets an answer. An empty or cut-off stream, or a 202/204, means the
+        // bridge restarted mid-call: answer with an error so the client can retry instead of waiting forever.
+        if (m.id !== undefined && m.method !== undefined && !out.some((r) => r.id === m.id)) {
+          write({ jsonrpc: "2.0", id: m.id, error: { code: -32603, message: "bridge connection lost" } });
         }
       } catch (e) {
         if (m.id !== undefined) write({ jsonrpc: "2.0", id: m.id, error: { code: e instanceof RelayError ? e.rpcCode : -32603, message: e instanceof Error ? e.message : "relay error" } });

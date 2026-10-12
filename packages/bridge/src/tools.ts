@@ -105,9 +105,13 @@ export async function buildToolIndex(ctx: BridgeContext, router: CallRouter, t: 
       if (op.standard) continue;
       if (op.dynamic?.mode === "list") {
         let catalog: DynamicCatalogEntry[] = [];
+        const omitKey = `${app.entry.ins}|${op.id}`;
         try {
           catalog = await router.catalog(app, op.id);
+          if (ctx.toolsOmitted.get(omitKey)?.code === "catalog_failed") ctx.toolsOmitted.delete(omitKey);
         } catch {
+          // L3: the op's entries are missing — tell Core (status toolsOmitted), not only the log
+          ctx.toolsOmitted.set(omitKey, { ins: app.entry.ins, name: op.id, code: "catalog_failed" });
           ctx.log.warn("bridge.catalog.failed", { ins: app.entry.ins, op: op.id, code: "dynamic_resolve_failed" });
         }
         const ceiling = EFFECTS.indexOf(op.dynamic.effectCeiling);

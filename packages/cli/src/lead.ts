@@ -309,6 +309,9 @@ async function agentServe(ctx: Ctx): Promise<void> {
           }, { once: true });
         }),
       now: () => Date.now(),
+      reconnect: async () => {
+        await mcp.initialize("tealbrick-agent-serve");
+      },
     },
     abort.signal,
   );

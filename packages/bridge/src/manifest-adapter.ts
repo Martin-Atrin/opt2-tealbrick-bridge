@@ -60,6 +60,11 @@ export function manifestApi(): ManifestApi {
     isPrivateInternalUrl: (url, opts) => m.isPrivateInternalUrl(url, opts),
     bridgeOpProofClaims: (bop, body) => m.bridgeOpProofClaims(bop, body),
     deriveIdempotencyKey: (i) => m.deriveIdempotencyKey(i),
+    hookResponseProblem: (phase, body, product) => m.hookResponseProblem(phase, body, product),
+    reduceBeforeChain: (answers) => m.reduceBeforeChain(answers as Parameters<typeof m.reduceBeforeChain>[0]) as never,
+    holdVerdictClaim: (r) => m.holdVerdictClaim(r as never),
+    onBehalfOfFromMeta: (v) => m.onBehalfOfFromMeta(v) as never,
+    isValidLaunchPath: (p) => m.isValidLaunchPath(p),
   };
 }
 

@@ -57,17 +57,12 @@ export interface OnBehalfOfClaim {
   display?: string;
 }
 
-export const ON_BEHALF_OF_META_KEY = "tealbrick/onBehalfOf";
+export const ON_BEHALF_OF_META_KEY = "tealbrick/onBehalfOf"; // gitleaks:allow (MCP _meta key name, not a secret)
 
 /** Bounds check of a claim before it is sent (the bridge validates it again and treats it as unverified). */
 export function onBehalfOfOk(c: unknown): c is OnBehalfOfClaim {
-  if (!c || typeof c !== "object") return false;
-  const v = c as OnBehalfOfClaim;
-  if (v.kind !== "person" && v.kind !== "agent" && v.kind !== "channel_sender") return false;
-  if (typeof v.id !== "string" || v.id.length < 1 || v.id.length > 256) return false;
-  if (v.display !== undefined && (typeof v.display !== "string" || v.display.length > 128)) return false;
-  if (v.kind === "channel_sender" && !/^[a-z0-9_-]{1,32}:./.test(v.id)) return false;
-  return Buffer.byteLength(JSON.stringify(v)) <= 1024;
+  // the bridge's own acceptance rule (manifest onBehalfOfFromMeta, L1): send only what the bridge will keep
+  return manifestApi().onBehalfOfFromMeta(c) !== null;
 }
 
 export const encodeOnBehalfOf = (c: OnBehalfOfClaim): string => Buffer.from(JSON.stringify(c)).toString("base64url");

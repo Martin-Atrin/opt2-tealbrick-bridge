@@ -18,6 +18,7 @@ import { spawn } from "node:child_process";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { HeldResult, McpClient, McpToolResult } from "@opt2-tealbrick/bridge";
+import { channelSenderId } from "@opt2-tealbrick/manifest";
 import { TOOL_NAME_RULE } from "@opt2-tealbrick/spec/bridge";
 import { encodeOnBehalfOf, type OnBehalfOfClaim, onBehalfOfOk } from "./relay-main.ts";
 
@@ -121,6 +122,8 @@ export interface ServeDeps {
   log(event: string, fields?: Record<string, unknown>): void;
   sleep(ms: number, signal: AbortSignal): Promise<void>;
   now(): number;
+  /** F26: re-establish the MCP session after a failed or lost call (the bridge may have restarted) */
+  reconnect?(): Promise<void>;
 }
 
 const MAX_PROMPT_CHARS = 64_000;
@@ -176,8 +179,14 @@ export function senderOf(inbox: InboxSpec, item: Record<string, unknown>): OnBeh
   const channel = String(sp.channel ?? field(item, sp.channelField ?? "service") ?? "").toLowerCase();
   const value = field(item, sp.idField ?? "sender.id");
   const display = field(item, sp.nameField ?? "sender.name");
-  if (!/^[a-z0-9_-]{1,32}$/.test(channel) || (typeof value !== "string" && typeof value !== "number")) return undefined;
-  const claim: OnBehalfOfClaim = { kind: "channel_sender", id: `${channel}:${String(value)}`, ...(typeof display === "string" && display ? { display: display.slice(0, 128) } : {}) };
+  if (typeof value !== "string" && typeof value !== "number") return undefined;
+  let id: string;
+  try {
+    id = channelSenderId(channel, String(value)); // shared rule (manifest, L1)
+  } catch {
+    return undefined;
+  }
+  const claim: OnBehalfOfClaim = { kind: "channel_sender", id, ...(typeof display === "string" && display ? { display: display.slice(0, 128) } : {}) };
   return onBehalfOfOk(claim) ? claim : undefined;
 }
 
@@ -449,6 +458,15 @@ export async function serveLoop(cfg: ServeConfig, deps: ServeDeps, signal: Abort
       backoff = Math.min(backoff ? backoff * 2 : 5_000, MAX_BACKOFF_MS);
       deps.log("serve.error", { code: e instanceof Error ? e.message.slice(0, 80) : "error", retryInMs: backoff });
       await deps.sleep(backoff, signal);
+      // F26 / L21: a restart of the bridge must be invisible: start a fresh MCP session before the next poll
+      if (deps.reconnect && !signal.aborted) {
+        try {
+          await deps.reconnect();
+          deps.log("serve.reconnected", {});
+        } catch (err) {
+          deps.log("serve.reconnect_failed", { code: err instanceof Error ? err.message.slice(0, 80) : "error" });
+        }
+      }
       continue;
     }
     await deps.sleep(pollMs, signal);

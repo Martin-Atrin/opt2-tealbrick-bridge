@@ -35,6 +35,18 @@ export interface StdioTarget {
   env?: NodeJS.ProcessEnv;
   /** … or use existing streams (tests, in-process relay) */
   streams?: { input: Readable; output: Writable };
+  /** per-call timeout (default {@link MCP_CALL_TIMEOUT_MS}) */
+  callTimeoutMs?: number;
+}
+
+/** F26: default per-call timeout (above the relay's own 120 s upstream limit) */
+export const MCP_CALL_TIMEOUT_MS = 150_000;
+
+export class McpTimeoutError extends Error {
+  readonly code = "mcp_timeout";
+  constructor(method: string, ms: number) {
+    super(`mcp ${method}: no answer within ${Math.round(ms / 1000)} s`);
+  }
 }
 
 export function connectMcp(target: StdioTarget): McpClient {
@@ -73,10 +85,25 @@ export function connectMcp(target: StdioTarget): McpClient {
     for (const p of pending.values()) p.reject(new Error("mcp connection closed"));
     pending.clear();
   });
+  const timeoutMs = target.callTimeoutMs ?? MCP_CALL_TIMEOUT_MS;
   const request = <T>(method: string, params?: unknown): Promise<T> =>
     new Promise((resolve, reject) => {
       const id = nextId++;
-      pending.set(id, { resolve: resolve as (v: unknown) => void, reject });
+      // F26: a call never waits forever (a lost answer after a bridge restart): it fails after `timeoutMs`
+      const timer = setTimeout(() => {
+        if (pending.delete(id)) reject(new McpTimeoutError(method, timeoutMs));
+      }, timeoutMs);
+      timer.unref?.();
+      pending.set(id, {
+        resolve: (v) => {
+          clearTimeout(timer);
+          (resolve as (v: unknown) => void)(v);
+        },
+        reject: (e) => {
+          clearTimeout(timer);
+          reject(e);
+        },
+      });
       output.write(`${JSON.stringify({ jsonrpc: "2.0", id, method, ...(params === undefined ? {} : { params }) })}\n`);
     });
   const notify = (method: string) => output.write(`${JSON.stringify({ jsonrpc: "2.0", method })}\n`);

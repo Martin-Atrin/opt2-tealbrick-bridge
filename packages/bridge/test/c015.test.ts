@@ -4,7 +4,11 @@
  */
 import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
-import { launchRedirect } from "../src/person.ts";
+import { isValidLaunchPath } from "@opt2-tealbrick/manifest";
+import { launchRedirect as redirectWith } from "../src/person.ts";
+
+const launchRedirect = (product: string, location: string | undefined) => redirectWith(product, location, isValidLaunchPath);
+
 import { AGT, CON, INS, makeWorld, type World } from "./support/world.ts";
 
 describe("C86 launch redirect re-check", () => {
@@ -12,6 +16,8 @@ describe("C86 launch redirect re-check", () => {
     assert.equal(launchRedirect("notes", "/a/notes/board/7?tab=a"), "/a/notes/board/7?tab=a");
     assert.equal(launchRedirect("notes", "/a/notes"), "/a/notes/");
     assert.equal(launchRedirect("notes", "/a/notes/"), "/a/notes/");
+    // a colon inside a same-origin path segment is not a scheme (the Location stays /a/notes/…): shared rule allows it
+    assert.equal(launchRedirect("notes", "/a/notes/javascript:alert(1)"), "/a/notes/javascript:alert(1)");
   });
   test("anything doubtful falls back to /a/<product>/", () => {
     for (const bad of [
@@ -25,7 +31,6 @@ describe("C86 launch redirect re-check", () => {
       "/a/notes//evil.example",
       "/a/notes/x\\\\y",
       "/a/notes/%5Cevil",
-      "/a/notes/javascript:alert(1)",
       "/a/notes/x%0d%0aSet-Cookie:a",
       "/a/notes/%zz",
     ]) {
@@ -164,11 +169,11 @@ describe("G4b relay: toolCallMeta is added to every tools/call", () => {
     await waitFor(() => lines.some((l) => l.id === 1));
     rpc({ method: "notifications/initialized" });
     rpc({ id: 2, method: "tools/call", params: { name: "notes__notes_list", arguments: {} } });
-    rpc({ id: 3, method: "tools/call", params: { name: "notes__notes_list", arguments: {}, _meta: { "tealbrick/onBehalfOf": { kind: "person", id: "own" }, "tealbrick/idempotencyKey": "key-12345678" } } });
+    rpc({ id: 3, method: "tools/call", params: { name: "notes__notes_list", arguments: {}, _meta: { "tealbrick/onBehalfOf": { kind: "person", id: "own" }, "tealbrick/idempotencyKey": "retry-12345678" } } });
     await waitFor(() => lines.some((l) => l.id === 3) && lines.some((l) => l.id === 2));
     const calls = sent.filter((m) => m.method === "tools/call");
     assert.deepEqual(calls[0]?.params?._meta, { "tealbrick/onBehalfOf": claim });
-    assert.deepEqual(calls[1]?.params?._meta, { "tealbrick/onBehalfOf": { kind: "person", id: "own" }, "tealbrick/idempotencyKey": "key-12345678" }, "the client's own keys win");
+    assert.deepEqual(calls[1]?.params?._meta, { "tealbrick/onBehalfOf": { kind: "person", id: "own" }, "tealbrick/idempotencyKey": "retry-12345678" }, "the client's own keys win");
     assert.ok(!sent.some((m) => m.method !== "tools/call" && m.params?._meta), "other methods are forwarded unchanged");
     relay.stop();
   });

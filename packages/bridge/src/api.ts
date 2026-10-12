@@ -92,6 +92,23 @@ export interface ManifestApi {
   bridgeOpProofClaims(bop: "catalog" | "resolve" | "mark" | "scope_summary", body: Json): { bop: "catalog" | "resolve" | "mark" | "scope_summary"; op?: string; in?: Sha256Digest };
   /** C98: the idempotency key derived for a tools/call without a client key */
   deriveIdempotencyKey(i: { connection: string; session: string; op: string; input: unknown; now: number }): string;
+  // v0.1.13 spine (manifest 0.1.9): hook answers, before-chain precedence, hold verdict, onBehalfOf, launch path
+  /** shape problem of a hook answer for `phase` (incl. the reserved `tb.` namespace), or null */
+  hookResponseProblem(phase: "before" | "context" | "after", body: unknown, product: string): string | null;
+  /** first refuse wins; else the first hold is kept; else allow */
+  reduceBeforeChain(answers: readonly { by: string; answer: { allow: boolean; reason?: string; hold?: HoldVerdict } }[]): BeforeChainResult;
+  /** `hv` call-proof claim of a kept hold */
+  holdVerdictClaim(r: Extract<BeforeChainResult, { kind: "hold" }>): { f: string; r: string; by: string };
+  /** `_meta["tealbrick/onBehalfOf"]` → `tb.onBehalfOf` context (unverified), or null when invalid */
+  onBehalfOfFromMeta(value: unknown): Json | null;
+  /** C86 launch path rule */
+  isValidLaunchPath(path: string): boolean;
 }
+
+export interface HoldVerdict {
+  family: string;
+  reason: string;
+}
+export type BeforeChainResult = { kind: "allow" } | { kind: "refuse"; by: string; reason: string | null } | { kind: "hold"; by: string; verdict: HoldVerdict };
 
 export const isRefusal = (v: unknown): v is Refusal => !!v && typeof v === "object" && (v as { ok?: unknown }).ok === false;

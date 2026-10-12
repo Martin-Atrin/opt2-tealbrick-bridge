@@ -75,7 +75,8 @@ export async function startRealSdkApp(w: World, o: RealSdkAppOptions): Promise<R
   });
   const entry = (slice: string) => ({ ins: o.ins as never, product: o.product, version: String(manifest.version), sdkMajor: 1, manifestDigest: app.digest, internalUrl: `http://127.0.0.1:${o.port}`, ownInfra: true, entitled: true, slice }) as never;
   // Core's side: list the instance with its claim code
-  await w.publish((c) => {
+  // Core keeps listing the instance in every later revision: change the world's BASE config
+  await w.amend((c) => {
     c.apps.push(entry((c.apps[0] as { slice: string }).slice));
     c.enrolCodes.push({ digest: w.api.opaqueDigest(o.code), kind: "instance", ins: o.ins, product: o.product, exp: now() + 3600 } as never);
   });
@@ -115,7 +116,7 @@ export async function startRealSdkApp(w: World, o: RealSdkAppOptions): Promise<R
   const grant = o.agentGrantCrud
     ? await w.signPortal("tb-grant+jwt", { iss: "tb:portal", sub: `tb:agt:${AGT}`, aud: `tb:ins:${o.ins}`, iat: now(), exp: now() + 43200, jti: w.api.ulid(), ws: WS, cnf: { brg: BRG }, crud: o.agentGrantCrud, mode: "free", held: [], caps: {}, wf: [], polrev: 1 })
     : undefined;
-  await w.publish((c) => {
+  await w.amend((c) => {
     const e = c.apps.find((a) => a.ins === o.ins) as { slice: string } | undefined;
     if (e) e.slice = slice;
     else c.apps.push(entry(slice));

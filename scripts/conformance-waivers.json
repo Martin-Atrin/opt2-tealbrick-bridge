@@ -1,12 +1,4 @@
 {
   "note": "C45 waivers: each entry names ONE check id (+ status, optional assertedMatch), why it is waived, and when it is removed. Empty = none.",
-  "waivers": [
-    {
-      "target": "bridge",
-      "id": "B8.idempotency_required",
-      "status": "fail",
-      "reason": "C98: the bridge derives the key; conformance predates C98 (decision C98a). Replacement evidence: packages/bridge/test/c98.test.ts (real bridge -> real SDK app, model-style calls).",
-      "removeWhen": "@opt2-tealbrick/conformance flips B8 to C98"
-    }
-  ]
+  "waivers": []
 }

@@ -9,6 +9,7 @@ import { type InstanceAssertionClaims, type InstanceId, LIFETIME_S, TYP } from "
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import { isRefusal, type Json, type KeySet } from "./api.ts";
 import type { CallRouter } from "./calls.ts";
+import { CALL_ID_RE } from "./calls.ts";
 import { type BridgeContext, SDK_CURRENT_MAJOR } from "./context.ts";
 import { type AppRuntime, internalUrlAllowed, type Table } from "./table.ts";
 import { BridgeError, envelope, headerValue, isRecord, nowS, parseJson, readBody, sendError, sendJson, statusFor, TokenBucket } from "./util.ts";
@@ -280,9 +281,16 @@ export class InternalApi {
     if (app.down || !app.manifest) throw new BridgeError("app_unavailable", 503, "the target app is starting; retry");
     const op = app.ops.get(env.op);
     if (!op) throw new BridgeError("unknown_tool", 404);
-    // C85: an app-initiated call (no parentCall: timers, background work) is limited per caller instance like any
-    // caller (120/min, burst 30); calls inside a request chain are bounded by that request
-    if (!env.parentCall) {
+    // A2A-3: a parentCall must be a call id (format and size) before it is looked up or logged
+    if (env.parentCall !== undefined && (typeof env.parentCall !== "string" || !CALL_ID_RE.test(env.parentCall))) {
+      throw new BridgeError("parent_call_invalid", 400, "parentCall must be a call id (call_<ULID>)");
+    }
+    // A2A-2: only an OPEN call this bridge delivered to THIS (verified) caller instance counts as a parent
+    const parentCall = env.parentCall ? this.router.parentCallFor(caller.ins, env.parentCall) : undefined;
+    if (env.parentCall && !parentCall) this.ctx.log.warn("bridge.call.parent_call_unknown", { ins: caller.ins, parentCall: env.parentCall });
+    // C85: an app-initiated call (no valid parentCall: timers, background work) is limited per caller instance like
+    // any caller (120/min, burst 30); calls inside a request chain are bounded by that request
+    if (!parentCall) {
       const wait = this.appInitiated.take(caller.ins);
       if (wait) return sendError(res, new BridgeError("rate_limited", 429, "too many app-initiated calls from this instance; retry later"), requestId, { "retry-after": String(wait) });
     }
@@ -292,7 +300,7 @@ export class InternalApi {
         target: { app, op, ...(op.standard || !op.dynamic ? {} : isRecord(env.input) && typeof env.input.tool === "string" ? { tool: env.input.tool } : {}) },
         input: (env.input ?? {}) as Json,
         ...(env.idempotencyKey ? { idempotencyKey: env.idempotencyKey } : {}),
-        ...(env.parentCall ? { parentCall: env.parentCall } : {}),
+        ...(parentCall ? { parentCall } : {}),
       });
       sendJson(res, result.status === "held" ? 202 : 200, result);
     } catch (e) {
