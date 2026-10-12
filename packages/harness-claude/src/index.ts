@@ -71,6 +71,12 @@ export interface SessionOptions {
   sandbox?: Record<string, unknown>;
   onHeld?: (held: HeldResult & { tool: string }) => void;
   maxTurns?: number;
+  /** Claude Agent SDK `effort` (low | medium | high | xhigh | max) */
+  effort?: "low" | "medium" | "high" | "xhigh" | "max";
+  /** Claude Agent SDK `maxBudgetUsd`: the query stops when its estimated cost reaches this */
+  maxBudgetUsd?: number;
+  /** a turn is aborted after this many ms (runTurn passes an AbortController to the SDK) */
+  turnTimeoutMs?: number;
 }
 
 /** Text shown to the model next to a held result. */
@@ -105,6 +111,8 @@ export function buildOptions(o: SessionOptions): Record<string, unknown> {
     ...(builtins.includes("Bash") && o.sandbox ? { sandbox: o.sandbox } : {}),
     systemPrompt: { type: "preset", preset: "claude_code", ...(o.appendSystemPrompt ? { append: o.appendSystemPrompt } : {}) },
     ...(o.maxTurns ? { maxTurns: o.maxTurns } : {}),
+    ...(o.effort ? { effort: o.effort } : {}),
+    ...(o.maxBudgetUsd && o.maxBudgetUsd > 0 ? { maxBudgetUsd: o.maxBudgetUsd } : {}),
     hooks: {
       PostToolUse: [
         {
@@ -135,6 +143,11 @@ export type HarnessEvent =
 export async function runTurn(sdk: ClaudeSdk, prompt: string, o: SessionOptions & { resume?: string }, onEvent: (e: HarnessEvent) => void): Promise<void> {
   const options = buildOptions({ ...o, onHeld: (h) => onEvent({ type: "held", tool: h.tool, holdId: h.holdId, checkWith: h.checkWith, expiresAt: h.expiresAt }) });
   if (o.resume) options.resume = o.resume;
+  // a turn never runs forever: the SDK stops the query when its AbortController fires
+  const abort = new AbortController();
+  const timer = o.turnTimeoutMs && o.turnTimeoutMs > 0 ? setTimeout(() => abort.abort(), o.turnTimeoutMs) : undefined;
+  timer?.unref?.();
+  options.abortController = abort;
   try {
     for await (const m of sdk.query({ prompt, options })) {
       if (m.type === "system" && m.subtype === "init" && typeof m.session_id === "string") onEvent({ type: "session", sessionId: m.session_id });
@@ -147,7 +160,10 @@ export async function runTurn(sdk: ClaudeSdk, prompt: string, o: SessionOptions 
       if (m.type === "result") onEvent({ type: "result", ok: m.subtype === "success", ...(typeof m.result === "string" ? { text: m.result } : {}) });
     }
   } catch (e) {
-    onEvent({ type: "error", code: e instanceof Error ? e.name : "error" });
+    onEvent({ type: "error", code: abort.signal.aborted ? "turn_timeout" : e instanceof Error ? e.name : "error" });
+    if (abort.signal.aborted) onEvent({ type: "result", ok: false, text: "turn timed out" });
+  } finally {
+    if (timer) clearTimeout(timer);
   }
 }
 

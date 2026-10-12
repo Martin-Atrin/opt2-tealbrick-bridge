@@ -2,6 +2,17 @@
 
 The `tealbrick` command for Teal Brick (opt2 build). Owner mode reads and drafts. Agent mode connects agents to the workspace bridge and runs them.
 
+## Adopt an agent that already runs on this machine
+
+```sh
+tealbrick adopt --dry-run                          # detect + plan only: nothing is written, no network call
+tealbrick adopt --from-v1 ~/agents/research --yes   # a v1 Teal Brick agent (Claude Agent SDK)
+tealbrick adopt --harness codex --name "Codex helper" --yes
+tealbrick adopt --undo --name "Codex helper"        # restore the backups, delete the local key
+```
+
+`adopt` detects the harness, the model sign-in (presence only, never a value), the persona and the v1 settings, prints one plan, asks the owner for ONE approval in Portal, then wires the harness (one `tealbrick` MCP entry, the existing config backed up first) and, for Claude Agent SDK agents, writes an `agent serve` config. Credential-like files are classified by name and never opened or copied. A re-run changes only what differs; `--undo` restores the backups (only when the file is unchanged since adopt), stops its own `agent serve` and deletes the local key. Lines of the persona that mention tools or channels are listed for review; memory is not imported.
+
 ## Connect an agent
 
 ```sh
@@ -27,6 +38,8 @@ The command watches the agent's inboxes and scheduled routines through the bridg
 - **`inboxes[].wake`**: `"mentions"` (default) starts a turn only for channel messages that mention the agent (Connect `mentionsMe`). `"all"` starts a turn for every message. Direct messages always start a turn. Items that do not start a turn are marked as seen. If the inbox items have no `mentionsMe` field (Connect before 0.4.0), the inbox uses `"all"` and logs one warning.
 - **`routines[]`**: scheduled work (for example Evolution routines). Each claimed job gets exactly one turn. A job is never claimed or run twice, also after a restart.
 - **Concurrency**: one turn at a time for each agent.
+- **Claude harness fields**: `appendSystemPromptFile` (persona file, relative to the config), `builtinTools` (default none), `model`, `effort`, `maxTurns`, `maxBudgetUsd`, `turnTimeoutSeconds`.
+- **`--supervise`**: restarts the loop after a crash or a stall, with backoff. One loop per connection (pidfile). `tealbrick agent status` shows whether serve runs and its last poll.
 
 ## Write operations and idempotency
 

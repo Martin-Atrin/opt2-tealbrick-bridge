@@ -1,4 +1,5 @@
 import { SPEC_VERSION } from "@opt2-tealbrick/spec";
+import { adopt } from "./adopt.ts";
 import { connect } from "./connect.ts";
 import type { Ctx, Handler } from "./ctx.ts";
 import { makeCtx, parseCommandLine, unexpectedError } from "./ctx.ts";
@@ -24,9 +25,12 @@ Owner mode (person session; reads and drafts only):
   register agents --file <agents.json> [--draft <drf>]
 Harness:
   connect <claude-desktop|codex|claude-code|generic> [--agent <agt>] [--remote|--local] [--write [--yes]] [--bridge <url>]
+  adopt [--harness auto|claude-sdk|claude-code|claude-desktop|codex|command] [--from-v1 <dir>] [--name <card>] [--purpose <text>]
+        [--persona <file>] [--serve|--no-serve] [--wake mentions|all] [--dry-run] [--yes] | adopt --undo [--name <card>|--agent <agt>] [--purge]
+        onboard an agent already on this machine: one command, one owner approval (names and paths only, never secret values)
 Agent mode (agent items only):
   agent login (--agent <agt>... | --file <agents.json> | --create) [--name <card name>] [--purpose <text>] [--harness <id>] [--label <machine>] | status | logout | list
-  agent serve --file <agent-serve.json> [--agent <agt>]   answer inbox items with the agent's own harness
+  agent serve --file <agent-serve.json> [--agent <agt>] [--supervise]   answer inbox items with the agent's own harness
   (owner) agents export [--file <agents.json>]   writes card ids so agent login --file connects existing cards
 Local bridge: bridge serve --stdio [--agent <agt>] [--store file --config-dir <d>]   Own infrastructure: bridge enrol --code - [--data-dir <d>] | bridge run [--data-dir <d>]
 Standalone: standalone owner-key --ws <ws>   admin pause|resume [--agent] | revoke-connection <con> | ticket launch <product>|keys  --ws <ws> --bridge <url>
@@ -57,7 +61,7 @@ const ownerGroups: Record<string, Handler> = {
 };
 
 /** Harness connection: reads agent items (never the person item). */
-const harnessGroups: Record<string, Handler> = { connect };
+const harnessGroups: Record<string, Handler> = { connect, adopt };
 
 function dispatch(ctx: Ctx): Handler {
   const group = ctx.pos[0];

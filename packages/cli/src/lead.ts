@@ -4,7 +4,7 @@
  */
 import { chmod, mkdtemp, writeFile } from "node:fs/promises";
 import { hostname as osHostname, tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import {
   enrolBridge,
   type ManifestApi,
@@ -34,7 +34,7 @@ const MIN_INTERVAL_S = 5;
 const SLOW_DOWN_S = 5;
 
 const readAgentItems = (ctx: Ctx): Promise<AgentItem[]> => readItems(ctx.store());
-const pickAgent = (ctx: Ctx): Promise<AgentItem> => pickAgentItem(ctx.store(), ctx.g.agent);
+export const pickAgent = (ctx: Ctx): Promise<AgentItem> => pickAgentItem(ctx.store(), ctx.g.agent);
 
 async function keyOf(item: AgentItem) {
   return api().importKeyPair(new Uint8Array(Buffer.from(item.privateKey, "base64url")));
@@ -72,7 +72,7 @@ const CARD_NAME_MAX = 60;
 const CARD_PURPOSE_MAX = 280;
 
 // ── agent login (CLI.md §4; one device request for 1..64 agents, C16 S4) ──
-async function agentLogin(ctx: Ctx): Promise<void> {
+export async function agentLogin(ctx: Ctx): Promise<void> {
   if (ctx.v.code !== undefined) throw usageError("agent login takes no code (the owner approves in the browser)");
   const origin = ctx.portalOrigin();
   // C96: Core 3230e69 lists the CLI harness option as `tealbrick-cli` (old spellings stay accepted as aliases)
@@ -213,8 +213,8 @@ async function pollAgent(ctx: Ctx, client: ReturnType<Ctx["client"]>, start: Dev
   }
 }
 
-async function agentStatus(ctx: Ctx): Promise<void> {
-  const item = await pickAgent(ctx);
+/** One MCP round trip as the agent: is the bridge reachable, connected/paused, and how many tools are granted. */
+export async function probeAgent(ctx: Ctx, item: AgentItem): Promise<{ reachable: boolean; state: string; tools: number | null }> {
   let reachable = false;
   let tools: number | null = null;
   let state = "unknown";
@@ -233,7 +233,30 @@ async function agentStatus(ctx: Ctx): Promise<void> {
   } catch (e) {
     state = e instanceof CliError ? e.code : "offline";
   }
-  ctx.emit({ agent: item.agt, connection: item.con, bridge: item.bridgeUrl, reachable, state, tools }, `agent ${item.agt}\nconnection ${item.con}\nbridge ${item.bridgeUrl} (${state})\ntools ${tools ?? "-"}`);
+  return { reachable, state, tools };
+}
+
+async function agentStatus(ctx: Ctx): Promise<void> {
+  const item = await pickAgent(ctx);
+  const { reachable, state, tools } = await probeAgent(ctx, item);
+  // C96 §8: is `agent serve` running for this connection, and when did it last poll?
+  const sup = await import("./supervise.ts");
+  const hb = await sup.readHeartbeat(sup.heartbeatPath(ctx.configDir(), item.con));
+  const holder = await sup.readPid(sup.pidPath(ctx.configDir(), item.con));
+  let running = false;
+  if (holder) {
+    try {
+      process.kill(holder.pid, 0);
+      running = true;
+    } catch (e) {
+      running = (e as NodeJS.ErrnoException).code === "EPERM";
+    }
+  }
+  const serveInfo = { running, ...(holder ? { pid: holder.pid, mode: holder.role } : {}), lastPollAt: hb?.lastPollAt ?? null, phase: hb?.phase ?? null };
+  ctx.emit(
+    { agent: item.agt, connection: item.con, bridge: item.bridgeUrl, reachable, state, tools, serve: serveInfo },
+    `agent ${item.agt}\nconnection ${item.con}\nbridge ${item.bridgeUrl} (${state})\ntools ${tools ?? "-"}\nserve ${running ? `running (${serveInfo.mode} pid ${serveInfo.pid})` : "not running"}; last poll ${serveInfo.lastPollAt ?? "never"}`,
+  );
 }
 
 async function agentList(ctx: Ctx): Promise<void> {
@@ -265,6 +288,19 @@ async function agentServe(ctx: Ctx): Promise<void> {
     throw new CliError(EXIT.validation, "input_invalid", e instanceof Error ? e.message : "invalid config");
   }
   const item = await pickAgent(ctx);
+  const sup = await import("./supervise.ts");
+  const pidfile = sup.pidPath(ctx.configDir(), item.con);
+  // C96 §8: `--supervise` runs this same command as a child and restarts it (own pidfile, own child only, L20)
+  if (ctx.v.supervise === true && ctx.v["supervised-child"] !== true) {
+    const args = [process.argv[1] ?? "tealbrick", ...process.argv.slice(2).filter((a) => a !== "--supervise"), "--supervised-child"];
+    ctx.say(`supervising agent serve for ${item.agt} (restart with backoff); Ctrl-C to stop`);
+    await sup.supervise({ command: process.execPath, args, pidfile, log: (event, fields = {}) => ctx.io.stderr.write(`${JSON.stringify({ ts: new Date().toISOString(), event, agent: item.agt, ...fields })}\n`) });
+    return;
+  }
+  // one loop per connection: a plain serve takes the pidfile (a supervised child runs under its supervisor's)
+  const releasePid = ctx.v["supervised-child"] === true ? async () => undefined : await sup.acquirePidfile(pidfile, "serve").catch((e: Error) => {
+    throw new CliError(EXIT.validation, "already_running", e.message);
+  });
   const key = await keyOf(item);
   // in-process relay: the watcher's MCP connection to the deployed bridge, as this agent
   const toRelay = new PassThrough();
@@ -287,11 +323,22 @@ async function agentServe(ctx: Ctx): Promise<void> {
   const relayCmd = { command: process.execPath, args: [process.argv[1] ?? "tealbrick", "bridge", "serve", "--stdio", "--agent", item.agt, ...relayStoreArgs(ctx.io.env)] };
   const runTurn =
     cfg.harness.kind === "claude"
-      ? await serve.claudeRunner(cfg.harness, item.agt, relayCmd)
+      ? await serve.claudeRunner(cfg.harness, item.agt, relayCmd, dirname(resolve(ctx.v.file as string)))
       : await serve.commandRunner(cfg.harness, [relayCmd.command, ...relayCmd.args].map((a) => (/\s/.test(a) ? JSON.stringify(a) : a)).join(" "));
   const { join } = await import("node:path");
   const abort = new AbortController();
   for (const sig of ["SIGINT", "SIGTERM"] as const) process.once(sig, () => abort.abort());
+  // heartbeat for `agent status` + watchdog: a loop that stopped moving exits so its supervisor restarts it
+  const live = sup.liveness({
+    path: sup.heartbeatPath(ctx.configDir(), item.con),
+    pollMs: Math.max(cfg.pollSeconds ?? 20, 5) * 1000,
+    turnLimitMs: (cfg.harness.turnTimeoutSeconds ?? 3600) * 1000,
+    onStall: () => {
+      ctx.io.stderr.write(`${JSON.stringify({ ts: new Date().toISOString(), event: "serve.stalled", agent: item.agt })}\n`);
+      void releasePid().finally(() => process.exit(sup.EXIT_STALLED));
+    },
+  });
+  await live.beat("poll");
   ctx.say(`serving agent ${item.agt}: ${cfg.inboxes.length} inbox(es), ${(cfg.routines ?? []).length} routine source(s), harness ${cfg.harness.kind}; Ctrl-C to stop`);
   await serve.serveLoop(
     cfg,
@@ -312,9 +359,12 @@ async function agentServe(ctx: Ctx): Promise<void> {
       reconnect: async () => {
         await mcp.initialize("tealbrick-agent-serve");
       },
+      heartbeat: (phase) => live.beat(phase),
     },
     abort.signal,
   );
+  live.stop();
+  await releasePid();
   mcp.close();
   relay.stop();
 }

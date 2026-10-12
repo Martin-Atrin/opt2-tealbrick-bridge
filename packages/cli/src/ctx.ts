@@ -37,6 +37,19 @@ export const OPTIONS = {
   name: { type: "string" },
   /** agent login: suggested card purpose (spec 0.1.14, ≤ 280) */
   purpose: { type: "string" },
+  /** adopt (C96/C106) */
+  "from-v1": { type: "string" },
+  persona: { type: "string" },
+  serve: { type: "boolean" },
+  "no-serve": { type: "boolean" },
+  wake: { type: "string" },
+  "dry-run": { type: "boolean" },
+  undo: { type: "boolean" },
+  purge: { type: "boolean" },
+  /** agent serve: restart after a crash with backoff (own pidfile) */
+  supervise: { type: "boolean" },
+  /** internal: the process a supervisor started */
+  "supervised-child": { type: "boolean" },
   // connect
   write: { type: "boolean" },
   remote: { type: "boolean" },

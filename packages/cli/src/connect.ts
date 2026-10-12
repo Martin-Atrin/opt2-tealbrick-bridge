@@ -173,7 +173,7 @@ function utcStamp(ms: number): string {
   return new Date(ms).toISOString().replace(/[-:]/g, "").replace(/\.\d+Z$/, "Z");
 }
 
-async function confirm(ctx: Ctx, question: string): Promise<boolean> {
+export async function confirm(ctx: Ctx, question: string): Promise<boolean> {
   if (ctx.g.yes) return true;
   if (ctx.io.stdin.isTTY !== true) {
     throw new CliError(EXIT.usage, "bad_request", "confirmation needed: run in a terminal or pass --yes");
@@ -188,7 +188,7 @@ async function confirm(ctx: Ctx, question: string): Promise<boolean> {
   return /^y(es)?$/i.test(answer.trim());
 }
 
-async function readExisting(path: string): Promise<string | null> {
+export async function readExisting(path: string): Promise<string | null> {
   try {
     return await readFile(path, "utf8");
   } catch (e) {
@@ -233,7 +233,7 @@ export function mergeTomlConfig(old: string | null, body: string[], path: string
   }
 }
 
-async function writeAtomic(ctx: Ctx, path: string, oldText: string | null, newText: string): Promise<string | null> {
+export async function writeAtomic(ctx: Ctx, path: string, oldText: string | null, newText: string): Promise<string | null> {
   await mkdir(dirname(path), { recursive: true });
   let mode = 0o644;
   let backup: string | null = null;

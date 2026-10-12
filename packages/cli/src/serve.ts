@@ -76,9 +76,28 @@ export interface PendingReport {
 }
 
 export type HarnessSpec =
-  | { kind: "claude"; cwd?: string; model?: string; modelKeyEnv?: string; appendSystemPrompt?: string; sdkModule?: string; passthroughEnv?: string[]; maxTurns?: number }
+  | {
+      kind: "claude";
+      cwd?: string;
+      model?: string;
+      modelKeyEnv?: string;
+      appendSystemPrompt?: string;
+      /** C96/F14: the persona read from a file (path relative to the config file); appended after appendSystemPrompt */
+      appendSystemPromptFile?: string;
+      sdkModule?: string;
+      passthroughEnv?: string[];
+      maxTurns?: number;
+      /** C96/F8: Claude built-in tools the agent may use (default none, e.g. ["Read","Grep","WebSearch"]) */
+      builtinTools?: string[];
+      /** C96/F9: Claude Agent SDK effort */
+      effort?: "low" | "medium" | "high" | "xhigh" | "max";
+      /** C96/F9: stop a turn when its estimated cost reaches this (USD) */
+      maxBudgetUsd?: number;
+      /** C96/F9: abort a turn after this many seconds */
+      turnTimeoutSeconds?: number;
+    }
   /** any harness CLI: the prompt arrives on stdin; `{mcpCommand}` in an argument is replaced by the relay command */
-  | { kind: "command"; command: string[]; cwd?: string; passthroughEnv?: string[] };
+  | { kind: "command"; command: string[]; cwd?: string; passthroughEnv?: string[]; turnTimeoutSeconds?: number };
 
 export interface ServeConfig {
   format: "tealbrick.agent-serve/1";
@@ -124,6 +143,8 @@ export interface ServeDeps {
   now(): number;
   /** F26: re-establish the MCP session after a failed or lost call (the bridge may have restarted) */
   reconnect?(): Promise<void>;
+  /** C96 §8 liveness: "poll" after every poll cycle, "turn" when a harness turn starts */
+  heartbeat?(phase: "poll" | "turn"): Promise<void> | void;
 }
 
 const MAX_PROMPT_CHARS = 64_000;
@@ -148,6 +169,13 @@ export function validateServeConfig(raw: unknown): ServeConfig {
   const h = c.harness as HarnessSpec | undefined;
   if (!h || (h.kind !== "claude" && h.kind !== "command")) throw new Error("harness.kind must be claude or command");
   if (h.kind === "command" && (!Array.isArray(h.command) || h.command.length === 0 || !h.command.every((x) => typeof x === "string"))) throw new Error("harness.command: non-empty string array");
+  if (h.turnTimeoutSeconds !== undefined && (!Number.isInteger(h.turnTimeoutSeconds) || h.turnTimeoutSeconds < 10 || h.turnTimeoutSeconds > 86_400)) throw new Error("harness.turnTimeoutSeconds: integer 10..86400");
+  if (h.kind === "claude") {
+    if (h.effort !== undefined && !["low", "medium", "high", "xhigh", "max"].includes(h.effort)) throw new Error("harness.effort: low|medium|high|xhigh|max");
+    if (h.maxBudgetUsd !== undefined && !(typeof h.maxBudgetUsd === "number" && h.maxBudgetUsd > 0 && h.maxBudgetUsd <= 1000)) throw new Error("harness.maxBudgetUsd: number 0..1000");
+    if (h.builtinTools !== undefined && (!Array.isArray(h.builtinTools) || !h.builtinTools.every((t) => typeof t === "string" && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(t)))) throw new Error("harness.builtinTools: tool names");
+    if (h.appendSystemPromptFile !== undefined && typeof h.appendSystemPromptFile !== "string") throw new Error("harness.appendSystemPromptFile: a path");
+  }
   return c;
 }
 
@@ -244,6 +272,7 @@ export async function serveLoop(cfg: ServeConfig, deps: ServeDeps, signal: Abort
 
   const runOne = async (prompt: string, onBehalfOf?: OnBehalfOfClaim): Promise<{ ok: boolean; summary?: string; held: number }> => {
     let held = 0;
+    await deps.heartbeat?.("turn");
     const r = await deps.runTurn(
       prompt,
       {
@@ -454,6 +483,7 @@ export async function serveLoop(cfg: ServeConfig, deps: ServeDeps, signal: Abort
         } else h.next = deps.now() + 10_000;
       }
       backoff = 0;
+      await deps.heartbeat?.("poll");
     } catch (e) {
       backoff = Math.min(backoff ? backoff * 2 : 5_000, MAX_BACKOFF_MS);
       deps.log("serve.error", { code: e instanceof Error ? e.message.slice(0, 80) : "error", retryInMs: backoff });
@@ -494,8 +524,23 @@ export function fileState(path: string): Pick<ServeDeps, "loadState" | "saveStat
 
 // ── harness runners ──
 /** Claude Agent SDK via @opt2-tealbrick/harness-claude; the session reaches the bridge through the relay. */
-export async function claudeRunner(h: Extract<HarnessSpec, { kind: "claude" }>, agentId: string, relay: { command: string; args: string[] }): Promise<HarnessRunner> {
+/** The persona text: appendSystemPrompt + the file (read at start; relative to the config file's directory). */
+export async function systemPromptOf(h: Extract<HarnessSpec, { kind: "claude" }>, configDir: string): Promise<string | undefined> {
+  const parts: string[] = [];
+  if (h.appendSystemPrompt) parts.push(h.appendSystemPrompt);
+  if (h.appendSystemPromptFile) {
+    const { readFile } = await import("node:fs/promises");
+    const { resolve } = await import("node:path");
+    const text = await readFile(resolve(configDir, h.appendSystemPromptFile), "utf8");
+    if (text.length > 200_000) throw new Error("harness.appendSystemPromptFile: over 200 000 characters");
+    parts.push(text);
+  }
+  return parts.length ? parts.join("\n\n") : undefined;
+}
+
+export async function claudeRunner(h: Extract<HarnessSpec, { kind: "claude" }>, agentId: string, relay: { command: string; args: string[] }, configDir = process.cwd()): Promise<HarnessRunner> {
   const { runTurn } = await import("@opt2-tealbrick/harness-claude");
+  const systemPrompt = await systemPromptOf(h, configDir);
   const spec = h.sdkModule ?? "@anthropic-ai/claude-agent-sdk";
   let sdk: Parameters<typeof runTurn>[0];
   try {
@@ -515,9 +560,13 @@ export async function claudeRunner(h: Extract<HarnessSpec, { kind: "claude" }>, 
         cwd: h.cwd ?? process.cwd(),
         ...(h.model ? { model: h.model } : {}),
         modelKeyEnv: h.modelKeyEnv ?? "ANTHROPIC_API_KEY",
-        ...(h.appendSystemPrompt ? { appendSystemPrompt: h.appendSystemPrompt } : {}),
+        ...(systemPrompt ? { appendSystemPrompt: systemPrompt } : {}),
         ...(h.passthroughEnv ? { passthroughEnv: h.passthroughEnv } : {}),
         ...(h.maxTurns ? { maxTurns: h.maxTurns } : {}),
+        ...(h.builtinTools ? { builtinTools: h.builtinTools } : {}),
+        ...(h.effort ? { effort: h.effort } : {}),
+        ...(h.maxBudgetUsd ? { maxBudgetUsd: h.maxBudgetUsd } : {}),
+        ...(h.turnTimeoutSeconds ? { turnTimeoutMs: h.turnTimeoutSeconds * 1000 } : {}),
       },
       (e) => {
         if (e.type === "held") events.onHeld({ status: "held", holdId: e.holdId, expiresAt: e.expiresAt, checkWith: e.checkWith, tool: e.tool });
@@ -540,9 +589,14 @@ export async function commandRunner(h: Extract<HarnessSpec, { kind: "command" }>
       const mcpCommand = turnOpts?.onBehalfOf ? `${relayCommand} --on-behalf-of ${encodeOnBehalfOf(turnOpts.onBehalfOf)}` : relayCommand;
       const [cmd, ...args] = h.command.map((a) => a.replaceAll("{mcpCommand}", mcpCommand));
       const child = spawn(cmd as string, args, { cwd: h.cwd ?? process.cwd(), env: sessionEnv(process.env, { ...(h.passthroughEnv ? { passthrough: h.passthroughEnv } : {}) }), stdio: ["pipe", "inherit", "inherit"] });
+      // a turn never runs forever: SIGTERM after turnTimeoutSeconds (the child this runner started, never anything else)
+      const timer = h.turnTimeoutSeconds ? setTimeout(() => child.kill("SIGTERM"), h.turnTimeoutSeconds * 1000) : undefined;
       child.on("error", () => resolve({ ok: false, summary: "harness did not start" }));
       // command harnesses: the exit code only (their output is not parsed, STEP-B-DESIGN §2.2 f)
-      child.on("exit", (code) => resolve({ ok: code === 0, summary: `exit code ${code ?? "none"}` }));
+      child.on("exit", (code, signal) => {
+        if (timer) clearTimeout(timer);
+        resolve({ ok: code === 0, summary: signal === "SIGTERM" && timer ? "turn timed out" : `exit code ${code ?? "none"}` });
+      });
       child.stdin.end(prompt);
     });
 }
