@@ -4,14 +4,14 @@
  */
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
-import type { AddressInfo } from "node:net";
+import type { AddressInfo, Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import type { StatusReport, WorkspaceConfig } from "@opt2-tealbrick/spec/bridge";
 import type { Ed25519KeyPair, ManifestApi } from "../../src/api.ts";
 import { manifestApi } from "../../src/manifest-adapter.ts";
-import { type RunningBridge, startBridge } from "../../src/server.ts";
+import { type ListenerLimits, type RunningBridge, startBridge } from "../../src/server.ts";
 import { silentLogger } from "../../src/util.ts";
 import { fakeApi } from "./fake-api.ts";
 
@@ -108,6 +108,21 @@ export interface World {
   agentToken(): Promise<string>;
   mcp(token: string, body: unknown, session?: string): Promise<{ status: number; json: any; session: string | null }>;
   signPortal(typ: string, claims: object): Promise<string>;
+  /** access token for any connection of the config (key method, the world's agent key) */
+  agentTokenFor(agt: string, con: string): Promise<string>;
+  /** test hook in the fake app's op route: return true when it answered the request itself */
+  appOps: { override?: (op: string, body: Record<string, unknown>, res: ServerResponse) => boolean };
+}
+
+export interface WorldOptions {
+  withHook?: boolean;
+  real?: boolean;
+  manifestFailures?: number;
+  /** bridge env overrides (e.g. an https TB_PUBLIC_URL) */
+  env?: Record<string, string>;
+  limits?: Partial<ListenerLimits>;
+  /** extra key connections of the first agent */
+  extraConnections?: string[];
 }
 
 async function listen(handler: (req: IncomingMessage, res: ServerResponse) => void): Promise<{ server: Server; url: string }> {
@@ -123,7 +138,7 @@ async function body(req: IncomingMessage): Promise<any> {
   return t ? JSON.parse(t) : undefined;
 }
 
-export async function makeWorld(opts: { withHook?: boolean; real?: boolean; manifestFailures?: number } = {}): Promise<World> {
+export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
   let manifestFailures = opts.manifestFailures ?? 0;
   let servedManifest: Record<string, unknown> = notesManifest;
   const real = !!opts.real;
@@ -133,6 +148,7 @@ export async function makeWorld(opts: { withHook?: boolean; real?: boolean; mani
   const acks: StatusReport[] = [];
   const appLog: AppLog = { ops: [], hooks: [] };
   const hookMode = { mode: "allow" as "allow" | "deny" | "fail" };
+  const appOps: World["appOps"] = {};
   let down = false;
   let pulls = 0;
   let assertFailures = 0;
@@ -157,6 +173,7 @@ export async function makeWorld(opts: { withHook?: boolean; real?: boolean; mani
       const op = url.pathname.slice(11);
       const b = await body(req);
       appLog.ops.push({ op, auth: req.headers.authorization, proof: req.headers["tb-call"] as string | undefined, body: b });
+      if (appOps.override?.(op, b, res)) return;
       if (op === "notes_send") return res.writeHead(202, { "content-type": "application/json" }).end(JSON.stringify({ status: "held", holdId: "hold_1", expiresAt: new Date(Date.now() + 900_000).toISOString() }));
       if (op === "tb.hold_status") return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ status: "ok", output: { status: "pending" } }));
       return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ status: "ok", output: { op, secret: "s3cret", items: [1, 2] } }));
@@ -170,6 +187,13 @@ export async function makeWorld(opts: { withHook?: boolean; real?: boolean; mani
       return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ path: url.pathname, auth: req.headers.authorization ?? null, tb: req.headers["tb-call"] ?? null, body: b }));
     }
     res.writeHead(404).end();
+  });
+  // WebSocket upgrades: answer 101 and report the request headers the app received (base64 JSON)
+  app.server.on("upgrade", (req: IncomingMessage, socket: Socket) => {
+    const seen = Buffer.from(JSON.stringify(req.headers)).toString("base64url");
+    socket.write(`HTTP/1.1 101 Switching Protocols\r\nupgrade: websocket\r\nconnection: Upgrade\r\nx-seen: ${seen}\r\n\r\n`);
+    socket.on("error", () => undefined);
+    socket.on("end", () => socket.end());
   });
   const hookApp = await listen(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://x");
@@ -202,7 +226,7 @@ export async function makeWorld(opts: { withHook?: boolean; real?: boolean; mani
     portalKeys: [{ jwk: portalKey.publicJwk, status: "active" }],
     pause: { workspace: false, agents: [], instances: [] },
     revoked: { jtis: [] },
-    connections: [{ con: CON, agt: AGT, method: "key", gen: 1, publicKey: agentKey.publicJwk, status: "active" }],
+    connections: [CON, ...(opts.extraConnections ?? [])].map((con) => ({ con: con as never, agt: AGT as never, method: "key" as const, gen: 1, publicKey: agentKey.publicJwk, status: "active" as const })),
     instanceKeys: [],
     grants: [await grant(`tb:agt:${AGT}`, ["read", "create"])],
     apps: [
@@ -280,7 +304,8 @@ export async function makeWorld(opts: { withHook?: boolean; real?: boolean; mani
     api,
     logger: silentLogger,
     ports: { public: 0, internal: 0 },
-    env: { TB_DATA_DIR: dir, TB_PORTAL_URL: portal.url, TB_PUBLIC_URL: "http://127.0.0.1", TB_KEYS_PUBLIC_URL: "http://localhost", TB_ENROL_CODE: ENROL, TB_KEK: "11".repeat(32) },
+    env: { TB_DATA_DIR: dir, TB_PORTAL_URL: portal.url, TB_PUBLIC_URL: "http://127.0.0.1", TB_KEYS_PUBLIC_URL: "http://localhost", TB_ENROL_CODE: ENROL, TB_KEK: "11".repeat(32), ...opts.env },
+    ...(opts.limits ? { limits: opts.limits } : {}),
   });
   const publicUrl = `http://127.0.0.1:${(bridge.publicServer.address() as AddressInfo).port}`;
   const keysUrl = `http://localhost:${(bridge.publicServer.address() as AddressInfo).port}`;
@@ -291,12 +316,13 @@ export async function makeWorld(opts: { withHook?: boolean; real?: boolean; mani
   const agentAssertion = (agt: string, con: string) => api.signAssertion("tb-agent-assert+jwt", { iss: `tb:agt:${agt}`, sub: `tb:agt:${agt}`, aud: brgRef, iat: now(), exp: now() + 60, jti: api.ulid(), con }, agentKey);
   const signRaw = async (input: string): Promise<string> =>
     real ? Buffer.from(await crypto.subtle.sign("Ed25519", agentKey.privateKey, new TextEncoder().encode(input))).toString("base64url") : `sig-${agentKey.kid}`;
-  const agentToken = async () => {
-    const assertion = await agentAssertion(AGT, CON);
+  const agentTokenFor = async (agt: string, con: string) => {
+    const assertion = await agentAssertion(agt, con);
     const r = await fetch(`${publicUrl}/oauth/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion }) });
     const j = (await r.json()) as { access_token: string };
     return j.access_token;
   };
+  const agentToken = () => agentTokenFor(AGT, CON);
   const mcp = async (token: string, b: unknown, session?: string) => {
     const r = await fetch(`${publicUrl}/mcp`, { method: "POST", headers: { "content-type": "application/json", authorization: `Bearer ${token}`, ...(session ? { "mcp-session-id": session } : {}) }, body: JSON.stringify(b) });
     const text = await r.text();
@@ -320,6 +346,8 @@ export async function makeWorld(opts: { withHook?: boolean; real?: boolean; mani
     publish,
     rev: () => rev,
     agentToken,
+    agentTokenFor,
+    appOps,
     mcp,
     signPortal: sign,
     async serveForged() {

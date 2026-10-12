@@ -41,6 +41,8 @@ export function statusFor(code: string): number {
     case "key_not_set":
     case "not_found":
       return 404;
+    case "request_timeout":
+      return 408;
     case "payload_too_large":
       return 413;
     case "rate_limited":
@@ -96,17 +98,90 @@ export function jsonLogger(write: (line: string) => void = (l) => process.stderr
 
 export const silentLogger: Logger = { info() {}, warn() {}, error() {} };
 
-/** Reads a request body with a hard size cap. */
-export async function readBody(req: IncomingMessage, max: number): Promise<Buffer> {
-  const chunks: Buffer[] = [];
+/** Default deadline for a whole request body (BSD-01); TB_BODY_DEADLINE_MS overrides it (tests). */
+export const BODY_DEADLINE_MS = 15_000;
+
+function bodyDeadlineMs(): number {
+  const v = Number(process.env.TB_BODY_DEADLINE_MS);
+  return Number.isFinite(v) && v > 0 ? v : BODY_DEADLINE_MS;
+}
+
+/**
+ * Reads a request body with a hard size cap and a deadline: a body that is not complete in time is refused
+ * with 408 `request_timeout` (a slow sender cannot hold a socket and a buffer open, BSD-01).
+ */
+export function readBody(req: IncomingMessage, max: number, deadlineMs = bodyDeadlineMs()): Promise<Buffer> {
+  return new Promise((resolve, reject) => {
+    const chunks: Buffer[] = [];
+    let size = 0;
+    let done = false;
+    const finish = (err: Error | undefined) => {
+      if (done) return;
+      done = true;
+      clearTimeout(timer);
+      req.off("data", onData);
+      req.off("end", onEnd);
+      req.off("error", onError);
+      req.off("close", onClose);
+      if (err) {
+        req.pause();
+        reject(err);
+      } else resolve(Buffer.concat(chunks));
+    };
+    const onData = (chunk: Buffer) => {
+      size += chunk.length;
+      if (size > max) return finish(new BridgeError("payload_too_large", 413));
+      chunks.push(chunk);
+    };
+    const onEnd = () => finish(undefined);
+    const onError = () => finish(new BridgeError("input_invalid", 400, "request body aborted"));
+    const onClose = () => finish(new BridgeError("input_invalid", 400, "request body aborted"));
+    const timer = setTimeout(() => finish(new BridgeError("request_timeout", 408, "request body not received in time")), deadlineMs);
+    timer.unref();
+    if (req.readableEnded) return finish(undefined);
+    req.on("data", onData);
+    req.on("end", onEnd);
+    req.on("error", onError);
+    req.on("close", onClose);
+  });
+}
+
+/**
+ * Reads a bridge→app response body with a hard cap while it streams (BSD-05): the bridge never buffers more
+ * than `maxBytes` of an app's answer, whatever the app sends or claims in Content-Length.
+ */
+export async function readCapped(res: Response, maxBytes: number): Promise<Buffer> {
+  const tooLarge = () => new BridgeError("payload_too_large", 502, "app answer too large");
+  const declared = Number(res.headers.get("content-length") ?? "");
+  if (Number.isFinite(declared) && declared > maxBytes) {
+    await res.body?.cancel().catch(() => undefined);
+    throw tooLarge();
+  }
+  if (!res.body) return Buffer.alloc(0);
+  const reader = res.body.getReader();
+  const chunks: Uint8Array[] = [];
   let size = 0;
-  for await (const chunk of req) {
-    const b = chunk as Buffer;
-    size += b.length;
-    if (size > max) throw new BridgeError("payload_too_large", 413);
-    chunks.push(b);
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    size += value.byteLength;
+    if (size > maxBytes) {
+      await reader.cancel().catch(() => undefined);
+      throw tooLarge();
+    }
+    chunks.push(value);
   }
   return Buffer.concat(chunks);
+}
+
+/** Parses a capped app answer as JSON (`app_error` when it is not JSON). */
+export async function readCappedJson<T>(res: Response, maxBytes: number): Promise<T> {
+  const buf = await readCapped(res, maxBytes);
+  try {
+    return JSON.parse(buf.toString("utf8")) as T;
+  } catch {
+    throw new BridgeError("app_error", 502, "app answered non-JSON");
+  }
 }
 
 export function parseJson(body: Buffer): unknown {
@@ -132,7 +207,11 @@ export function sendError(res: ServerResponse, err: unknown, requestId: string, 
     res.end();
     return;
   }
-  sendJson(res, status, envelope(code, message, requestId), headers);
+  // refused before the request body was received (deadline, size cap): close the connection instead of
+  // draining the rest of a slow or huge body
+  const extra: Record<string, string> = res.req && !res.req.complete ? { connection: "close" } : {};
+  if (code === "rate_limited" && !headers["retry-after"]) extra["retry-after"] = "1";
+  sendJson(res, status, envelope(code, message, requestId), { ...extra, ...headers });
 }
 
 export function isRecord(v: unknown): v is Record<string, unknown> {
@@ -168,6 +247,60 @@ export class RateLimiter {
     }
     w.count += 1;
     return w.count <= this.limit;
+  }
+}
+
+/** Token bucket keyed by a string: `ratePerS` tokens per second up to `burst` (BSD-02 per-connection limit). */
+export class TokenBucket {
+  private readonly buckets = new Map<string, { tokens: number; at: number }>();
+  private readonly ratePerS: number;
+  private readonly burst: number;
+  constructor(ratePerS: number, burst: number) {
+    this.ratePerS = ratePerS;
+    this.burst = burst;
+  }
+  /** Takes one token; returns 0 when granted, else the seconds until the next token. */
+  take(key: string): number {
+    const now = Date.now();
+    let b = this.buckets.get(key);
+    if (!b) {
+      if (this.buckets.size > 10_000) this.buckets.clear();
+      b = { tokens: this.burst, at: now };
+      this.buckets.set(key, b);
+    }
+    b.tokens = Math.min(this.burst, b.tokens + ((now - b.at) / 1000) * this.ratePerS);
+    b.at = now;
+    if (b.tokens >= 1) {
+      b.tokens -= 1;
+      return 0;
+    }
+    return Math.max(1, Math.ceil((1 - b.tokens) / this.ratePerS));
+  }
+}
+
+/** Counts open items (connections, requests, upgrades) per key with a cap. */
+export class OpenCounter {
+  private readonly open = new Map<string, number>();
+  private readonly cap: number;
+  constructor(cap: number) {
+    this.cap = cap;
+  }
+  /** Returns a release function, or undefined when the key is at its cap. */
+  acquire(key: string): (() => void) | undefined {
+    const n = this.open.get(key) ?? 0;
+    if (n >= this.cap) return undefined;
+    this.open.set(key, n + 1);
+    let released = false;
+    return () => {
+      if (released) return;
+      released = true;
+      const m = (this.open.get(key) ?? 1) - 1;
+      if (m <= 0) this.open.delete(key);
+      else this.open.set(key, m);
+    };
+  }
+  count(key: string): number {
+    return this.open.get(key) ?? 0;
   }
 }
 

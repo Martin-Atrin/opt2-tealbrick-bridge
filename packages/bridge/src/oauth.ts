@@ -64,6 +64,9 @@ export class OAuthServer {
   private readonly tokenIpLimit = new RateLimiter(120);
   /** pairing-code attempts per pending authorize request */
   private readonly redeemLimit = new RateLimiter(5, 600_000);
+  /** unauthenticated body routes (pair callback, revoke), per client address (BSD-01) */
+  private readonly pairCallbackLimit = new RateLimiter(30);
+  private readonly revokeLimit = new RateLimiter(30);
   private readonly kek: { id: string; key: Uint8Array };
 
   constructor(ctx: BridgeContext, kek: { id: string; key: Uint8Array }) {
@@ -245,6 +248,7 @@ export class OAuthServer {
 
   /** Path A return: Portal auto-submits `code=<K2b>` (never in a URL). */
   async pairCallback(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!this.pairCallbackLimit.take(clientIp(req))) return htmlPage(res, 429, "Too many requests", "<p>Please wait a minute and try again.</p>", { "retry-after": "60" });
     const form = parseBody(await readBody(req, 16 * 1024), req.headers["content-type"]);
     const code = typeof form.code === "string" ? form.code.trim() : "";
     const peek = peekRid(code);
@@ -379,6 +383,7 @@ export class OAuthServer {
   }
 
   async revoke(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!this.revokeLimit.take(clientIp(req))) return oauthError(res, 429, "slow_down", "rate limited");
     const form = parseBody(await readBody(req, 16 * 1024), req.headers["content-type"]);
     const token = typeof form.token === "string" ? form.token : "";
     if (token.startsWith("tbr_")) {

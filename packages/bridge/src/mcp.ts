@@ -3,6 +3,7 @@
  * DELETE ends the session). Tools come from grants; skills are resources + an instructions index +
  * the `<product>__tb_skills` fallback tool. Every request re-authenticates the agent (K5).
  */
+import { randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { HeldToolResult } from "@opt2-tealbrick/spec/bridge";
 import { TOOL_NAME_RULE } from "@opt2-tealbrick/spec/bridge";
@@ -14,7 +15,7 @@ import { BRIDGE_VERSION, type BridgeContext, MCP_VERSIONS } from "./context.ts";
 import { authenticateAgent } from "./identity.ts";
 import type { Table } from "./table.ts";
 import { agentPausedOrEmpty, buildToolIndex, grantedProducts, type ToolIndex, type ToolRoute } from "./tools.ts";
-import { BridgeError, envelope, headerValue, isRecord, readBody, sendError, sendJson } from "./util.ts";
+import { BridgeError, envelope, headerValue, isRecord, readBody, sendError, sendJson, TokenBucket } from "./util.ts";
 
 interface Session {
   id: string;
@@ -35,13 +36,30 @@ interface RpcRequest {
 }
 
 const MAX_BODY = 2 * 1024 * 1024;
-const SESSION_IDLE_MS = 24 * 3600_000;
+const SESSION_IDLE_MS = 3600_000;
+
+/** Per-connection and global limits (BSD-02); counted per verified `con`, after K5 verification. */
+export const MCP_LIMITS = Object.freeze({
+  sessionsPerConnection: 16,
+  streamsPerSession: 2,
+  /** POST /mcp token bucket per connection */
+  ratePerS: 10,
+  burst: 40,
+  callsPerConnection: 8,
+  callsGlobal: 256,
+});
+
+type Principal = { agt: AgentId; con: ConnectionId };
 
 export class McpServer {
   private readonly ctx: BridgeContext;
   private readonly router: CallRouter;
+  /** insertion order = least recently used first (a touched session moves to the end) */
   private readonly sessions = new Map<string, Session>();
   private readonly indexCache = new Map<string, Promise<ToolIndex>>();
+  private readonly postBucket = new TokenBucket(MCP_LIMITS.ratePerS, MCP_LIMITS.burst);
+  private readonly callsByCon = new Map<string, number>();
+  private callsInFlight = 0;
 
   constructor(ctx: BridgeContext, router: CallRouter) {
     this.ctx = ctx;
@@ -57,6 +75,27 @@ export class McpServer {
       const now = Date.now();
       for (const [id, s] of this.sessions) if (now - s.lastSeen > SESSION_IDLE_MS && s.streams.size === 0) this.sessions.delete(id);
     }, 600_000).unref();
+  }
+
+  /** The caller's own live session: same agent AND same connection (H-4); touching it marks it recently used. */
+  private sessionFor(sid: string | undefined, p: Principal): Session | undefined {
+    const s = sid ? this.sessions.get(sid) : undefined;
+    if (!s || s.agt !== p.agt || s.con !== p.con) return undefined;
+    if (Date.now() - s.lastSeen > SESSION_IDLE_MS && s.streams.size === 0) {
+      this.endSession(s.id);
+      return undefined;
+    }
+    s.lastSeen = Date.now();
+    this.sessions.delete(s.id);
+    this.sessions.set(s.id, s);
+    return s;
+  }
+
+  /** Adds a session; past the per-connection cap the least recently used session of that connection ends. */
+  private addSession(s: Session): void {
+    const mine = [...this.sessions.values()].filter((x) => x.con === s.con);
+    for (let i = 0; i <= mine.length - MCP_LIMITS.sessionsPerConnection; i++) this.endSession((mine[i] as Session).id);
+    this.sessions.set(s.id, s);
   }
 
   private index(t: Table, agt: AgentId): Promise<ToolIndex> {
@@ -135,8 +174,12 @@ export class McpServer {
     });
   }
 
+  private tooMany(res: ServerResponse, requestId: string, message: string, retryAfterS: number): void {
+    sendJson(res, 429, envelope("rate_limited", message, requestId), { "retry-after": String(retryAfterS) });
+  }
+
   async handle(req: IncomingMessage, res: ServerResponse, requestId: string): Promise<void> {
-    let principal: { agt: AgentId; con: ConnectionId };
+    let principal: Principal;
     try {
       principal = authenticateAgent(this.ctx, headerValue(req, "authorization"));
     } catch {
@@ -147,8 +190,8 @@ export class McpServer {
     const missingSession = () => sendJson(res, 400, envelope("input_invalid", "Mcp-Session-Id header required", requestId));
     if (req.method === "DELETE") {
       if (!sid) return missingSession();
-      const s = this.sessions.get(sid);
-      if (!s || s.agt !== principal.agt) {
+      const s = this.sessionFor(sid, principal);
+      if (!s) {
         sendJson(res, 404, envelope("not_found", "unknown session", requestId));
         return;
       }
@@ -158,11 +201,12 @@ export class McpServer {
     }
     if (req.method === "GET") {
       if (!sid) return missingSession();
-      const s = this.sessions.get(sid);
-      if (!s || s.agt !== principal.agt) {
+      const s = this.sessionFor(sid, principal);
+      if (!s) {
         sendJson(res, 404, envelope("not_found", "unknown session", requestId));
         return;
       }
+      if (s.streams.size >= MCP_LIMITS.streamsPerSession) return this.tooMany(res, requestId, "too many open streams for this session", 5);
       res.writeHead(200, { "content-type": "text/event-stream", "cache-control": "no-store", connection: "keep-alive" });
       res.write(": ok\n\n");
       s.streams.add(res);
@@ -177,6 +221,8 @@ export class McpServer {
       res.writeHead(405, { allow: "GET, POST, DELETE" }).end();
       return;
     }
+    const wait = this.postBucket.take(principal.con);
+    if (wait > 0) return this.tooMany(res, requestId, "too many requests for this connection", wait);
     let msg: unknown;
     try {
       const body = await readBody(req, MAX_BODY);
@@ -198,8 +244,8 @@ export class McpServer {
       const requested = typeof rpc.params?.protocolVersion === "string" ? rpc.params.protocolVersion : "";
       const protocol = MCP_VERSIONS.includes(requested) ? requested : (MCP_VERSIONS[0] as string);
       const clientName = isRecord(rpc.params?.clientInfo) && typeof rpc.params.clientInfo.name === "string" ? rpc.params.clientInfo.name.slice(0, 64) : "";
-      session = { id: this.ctx.api.ulid(), agt: principal.agt, con: principal.con, protocol, streams: new Set(), toolDigest: "", skillsDigest: "", lastSeen: Date.now() };
-      this.sessions.set(session.id, session);
+      session = { id: randomBytes(16).toString("base64url"), agt: principal.agt, con: principal.con, protocol, streams: new Set(), toolDigest: "", skillsDigest: "", lastSeen: Date.now() };
+      this.addSession(session);
       const t = this.ctx.table as Table;
       this.ctx.log.info("bridge.mcp.initialize", { agt: principal.agt, protocol, client: clientName });
       sendJson(
@@ -223,12 +269,11 @@ export class McpServer {
       sendJson(res, 400, { jsonrpc: "2.0", id: rpc.id ?? null, error: { code: -32600, message: "Mcp-Session-Id header required (initialize first)" } });
       return;
     }
-    session = this.sessions.get(sid);
-    if (!session || session.agt !== principal.agt) {
+    session = this.sessionFor(sid, principal);
+    if (!session) {
       sendJson(res, 404, { jsonrpc: "2.0", id: rpc.id ?? null, error: { code: -32001, message: "session not found; re-initialize" } });
       return;
     }
-    session.lastSeen = Date.now();
     if (isNotification) {
       res.writeHead(202).end();
       return;
@@ -241,13 +286,14 @@ export class McpServer {
       const result = await this.dispatch(session, principal, rpc, requestId, controller.signal);
       sendJson(res, 200, { jsonrpc: "2.0", id: rpc.id, result });
     } catch (e) {
+      // only messages the bridge wrote reach the agent; anything else is a generic internal error (H-7)
       const code = e instanceof RpcError ? e.rpcCode : -32603;
-      const message = e instanceof Error ? e.message : "internal error";
+      const message = e instanceof RpcError || e instanceof BridgeError ? e.message : "internal error";
       sendJson(res, 200, { jsonrpc: "2.0", id: rpc.id, error: { code, message } });
     }
   }
 
-  private async dispatch(s: Session, p: { agt: AgentId; con: ConnectionId }, rpc: RpcRequest, requestId: string, signal: AbortSignal): Promise<unknown> {
+  private async dispatch(s: Session, p: Principal, rpc: RpcRequest, requestId: string, signal: AbortSignal): Promise<unknown> {
     const t = this.ctx.table;
     if (!t) throw new RpcError(-32603, "bridge not ready");
     switch (rpc.method) {
@@ -284,7 +330,7 @@ export class McpServer {
     }
   }
 
-  private async callTool(t: Table, p: { agt: AgentId; con: ConnectionId }, params: Record<string, unknown>, requestId: string, signal: AbortSignal): Promise<unknown> {
+  private async callTool(t: Table, p: Principal, params: Record<string, unknown>, requestId: string, signal: AbortSignal): Promise<unknown> {
     const name = typeof params.name === "string" ? params.name : "";
     const args = (isRecord(params.arguments) ? params.arguments : {}) as Json;
     const meta = isRecord(params._meta) ? params._meta : {};
@@ -292,6 +338,11 @@ export class McpServer {
     if (idem !== undefined && (typeof idem !== "string" || idem.length < 8 || idem.length > 128)) {
       return toolError("input_invalid", "idempotency key must be 8–128 chars", requestId);
     }
+    const inFlight = this.callsByCon.get(p.con) ?? 0;
+    if (inFlight >= MCP_LIMITS.callsPerConnection) return toolError("rate_limited", "too many concurrent calls for this connection; retry shortly", requestId);
+    if (this.callsInFlight >= MCP_LIMITS.callsGlobal) return toolError("rate_limited", "the bridge is busy; retry shortly", requestId);
+    this.callsByCon.set(p.con, inFlight + 1);
+    this.callsInFlight += 1;
     try {
       // pause is gate step 1: a paused agent or workspace is told `paused`, not that the tool is unknown
       if (t.pausedWorkspace || t.pausedAgents.has(p.agt)) throw new BridgeError("paused", 403, "paused by the owner");
@@ -310,10 +361,15 @@ export class McpServer {
       const code = e instanceof BridgeError ? e.code : "app_error";
       const message = e instanceof BridgeError ? e.message : "internal error";
       return toolError(code, message, requestId);
+    } finally {
+      this.callsInFlight -= 1;
+      const left = (this.callsByCon.get(p.con) ?? 1) - 1;
+      if (left <= 0) this.callsByCon.delete(p.con);
+      else this.callsByCon.set(p.con, left);
     }
   }
 
-  private async runRoute(t: Table, p: { agt: AgentId; con: ConnectionId }, route: ToolRoute, args: Json, idem: string | undefined, _requestId: string, signal: AbortSignal): Promise<unknown> {
+  private async runRoute(t: Table, p: Principal, route: ToolRoute, args: Json, idem: string | undefined, _requestId: string, signal: AbortSignal): Promise<unknown> {
     const caller = { type: "agent" as const, agt: p.agt, con: p.con };
     if (route.kind === "skills") {
       const skillId = isRecord(args) && typeof args.skillId === "string" ? args.skillId : undefined;
