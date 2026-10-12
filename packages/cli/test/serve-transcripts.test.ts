@@ -44,6 +44,10 @@ describe("F48: serve transcripts stay inside the agent folder", () => {
     const lines = readFileSync(file, "utf8").trim().split("\n").map((l) => JSON.parse(l));
     assert.equal(lines[0].type, "prompt");
     assert.ok(lines.some((l) => l.type === "result" && l.ok === true));
+    // F57: each tool call's outcome is recorded (isError + the error code), never the payload
+    assert.ok(lines.some((l) => l.type === "tool_result" && l.name === "mcp__tealbrick__connect__buzz_post" && l.isError === true && l.code === "hook_failed"));
+    assert.ok(lines.some((l) => l.type === "tool_result" && l.name === "mcp__tealbrick__knowledge__recall" && l.isError === false && l.code === undefined));
+    assert.ok(!readFileSync(file, "utf8").includes("items"), "no tool payload in the transcript");
   });
 
   it("F54: harness.memory keeps auto-memory inside the agent folder", async () => {

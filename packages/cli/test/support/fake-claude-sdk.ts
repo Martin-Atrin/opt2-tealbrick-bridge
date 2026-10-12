@@ -21,6 +21,9 @@ export function query(params: { prompt: string; options: Record<string, unknown>
   }
   return (async function* () {
     yield { type: "system", subtype: "init", session_id: "s1" };
+    // F57: one tool call that the bridge refused (error envelope in a text block), one that succeeded
+    yield { type: "assistant", message: { content: [{ type: "tool_use", id: "tu1", name: "mcp__tealbrick__connect__buzz_post" }, { type: "tool_use", id: "tu2", name: "mcp__tealbrick__knowledge__recall" }] } };
+    yield { type: "user", message: { content: [{ type: "tool_result", tool_use_id: "tu1", is_error: true, content: [{ type: "text", text: JSON.stringify({ error: { code: "hook_failed", message: "x", requestId: "req_1" } }) }] }, { type: "tool_result", tool_use_id: "tu2", content: [{ type: "text", text: "{\"items\":[]}" }] }] } };
     yield { type: "assistant", message: { content: [{ type: "text", text: "done" }] } };
     yield { type: "result", subtype: "success", result: "done" };
   })();

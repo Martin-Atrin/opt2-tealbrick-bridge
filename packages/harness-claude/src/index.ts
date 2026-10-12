@@ -147,6 +147,8 @@ export type HarnessEvent =
   | { type: "session"; sessionId: string }
   | { type: "text"; text: string }
   | { type: "tool"; name: string }
+  /** F57: the outcome of one tool call (error code from the Teal Brick error envelope when there is one; no payload) */
+  | { type: "tool_result"; name: string; isError: boolean; code?: string }
   | { type: "held"; tool: string; holdId: string; checkWith: string; expiresAt: string }
   | { type: "result"; ok: boolean; text?: string }
   | { type: "error"; code: string };
@@ -161,12 +163,26 @@ export async function runTurn(sdk: ClaudeSdk, prompt: string, o: SessionOptions 
   timer?.unref?.();
   options.abortController = abort;
   try {
+    const toolNames = new Map<string, string>();
     for await (const m of sdk.query({ prompt, options })) {
       if (m.type === "system" && m.subtype === "init" && typeof m.session_id === "string") onEvent({ type: "session", sessionId: m.session_id });
       if (m.type === "assistant" && Array.isArray(m.message?.content)) {
         for (const block of m.message.content as { type: string; text?: string; name?: string }[]) {
           if (block.type === "text" && block.text) onEvent({ type: "text", text: block.text });
-          if (block.type === "tool_use" && block.name) onEvent({ type: "tool", name: block.name });
+          if (block.type === "tool_use" && block.name) {
+            onEvent({ type: "tool", name: block.name });
+            const id = (block as { id?: unknown }).id;
+            if (typeof id === "string") toolNames.set(id, block.name);
+          }
+        }
+      }
+      if (m.type === "user" && Array.isArray(m.message?.content)) {
+        for (const block of m.message.content as { type: string; tool_use_id?: string; is_error?: boolean; content?: unknown }[]) {
+          if (block.type !== "tool_result" || !block.tool_use_id) continue;
+          const name = toolNames.get(block.tool_use_id) ?? "unknown";
+          const isError = block.is_error === true;
+          const code = isError ? errorCodeOf(block.content) : undefined;
+          onEvent({ type: "tool_result", name, isError, ...(code ? { code } : {}) });
         }
       }
       if (m.type === "result") onEvent({ type: "result", ok: m.subtype === "success", ...(typeof m.result === "string" ? { text: m.result } : {}) });
@@ -181,3 +197,17 @@ export async function runTurn(sdk: ClaudeSdk, prompt: string, o: SessionOptions 
 
 /** Claude Desktop / Claude Code / Codex connection assets live in `tealbrick connect` (CLI) and connect/*.md. */
 export const HARNESS_ID = "claude_agent_sdk";
+
+/** F57: the `error.code` of a Teal Brick error envelope inside a tool_result (text block JSON); never the payload. */
+function errorCodeOf(content: unknown): string | undefined {
+  const texts = typeof content === "string" ? [content] : Array.isArray(content) ? content.map((c) => (c && typeof c === "object" && typeof (c as { text?: unknown }).text === "string" ? (c as { text: string }).text : "")) : [];
+  for (const t of texts) {
+    try {
+      const code = (JSON.parse(t) as { error?: { code?: unknown } }).error?.code;
+      if (typeof code === "string" && /^[a-z][a-z0-9_]{0,63}$/.test(code)) return code;
+    } catch {
+      /* not an envelope */
+    }
+  }
+  return undefined;
+}

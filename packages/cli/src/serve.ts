@@ -170,6 +170,9 @@ const MAX_PROMPT_CHARS = 64_000;
 const MAX_SEEN = 1000;
 const MAX_BACKOFF_MS = 300_000;
 const INBOX_MAX_BACKOFF_MS = 1_800_000;
+/** F58: codes worth one quick retry on an inbox poll (transient: restart / update windows) */
+const TRANSIENT_CODES = /^(hook_failed|app_unavailable|app_timeout|temporarily_unavailable|upstream_[a-z_]+|rate_limited)$/;
+export const TRANSIENT_RETRY_MS = 5_000;
 
 export function validateServeConfig(raw: unknown): ServeConfig {
   const c = raw as ServeConfig;
@@ -361,7 +364,7 @@ export async function serveLoop(cfg: ServeConfig, deps: ServeDeps, signal: Abort
     }
     return out;
   };
-  const refused = new Map<string, { count: number; next: number }>();
+  const refused = new Map<string, { count: number; next: number; quick?: boolean }>();
   /** F15: does this item start a turn? (DMs always; channels per `wake`, default mentions) */
   const wakes = (inbox: InboxSpec, it: Record<string, unknown>, key: string): boolean => {
     if (it.conversationType === "direct") return true;
@@ -502,12 +505,20 @@ export async function serveLoop(cfg: ServeConfig, deps: ServeDeps, signal: Abort
         const args = { ...(inbox.args ?? {}), ...(inbox.cursor && cursor !== undefined ? { [inbox.cursor.param]: cursor } : {}) };
         const res = await deps.mcp.callTool(inbox.tool, args);
         if (res.isError) {
+          const code = String((structured(res)?.error as { code?: string } | undefined)?.code ?? "error");
+          // F58: a transient gate code (a hook app or the target restarting) gets ONE quick retry before the long
+          // back-off meant for refused inboxes (scope_denied, no_grant)
+          if (TRANSIENT_CODES.test(code) && !off?.quick) {
+            refused.set(key, { count: off?.count ?? 0, next: deps.now() + TRANSIENT_RETRY_MS, quick: true });
+            deps.log("serve.inbox.retry", { tool: inbox.tool, code, retryInMs: TRANSIENT_RETRY_MS });
+            continue;
+          }
           const n = (off?.count ?? 0) + 1;
           const waitMs = Math.min(pollMs * 2 ** n, INBOX_MAX_BACKOFF_MS);
-          refused.set(key, { count: n, next: deps.now() + waitMs });
+          refused.set(key, { count: n, next: deps.now() + waitMs, quick: false });
           // F35: a refused derived inbox (left the channel, bot removed) → choose again on the next cycle
           for (const [idx, a] of auto) if (a.inboxes.some((x) => inboxKey(x) === key)) auto.set(idx, { ...a, at: 0 });
-          deps.log("serve.inbox.refused", { tool: inbox.tool, code: String((structured(res)?.error as { code?: string } | undefined)?.code ?? "error"), retryInMs: waitMs });
+          deps.log("serve.inbox.refused", { tool: inbox.tool, code, retryInMs: waitMs });
           continue;
         }
         if (off) {
@@ -588,7 +599,9 @@ export async function serveLoop(cfg: ServeConfig, deps: ServeDeps, signal: Abort
       }
       continue;
     }
-    await deps.sleep(pollMs, signal);
+    // F58: wake early for a pending quick retry
+    const quickAt = Math.min(...[...refused.values()].filter((r) => r.quick).map((r) => r.next));
+    await deps.sleep(Number.isFinite(quickAt) ? Math.max(0, Math.min(pollMs, quickAt - deps.now())) : pollMs, signal);
   }
 }
 

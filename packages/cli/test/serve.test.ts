@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { McpToolResult } from "@opt2-tealbrick/bridge";
 import { decodeOnBehalfOf, encodeOnBehalfOf } from "../src/relay-main.ts";
-import { promptFor, type ServeConfig, type ServeState, senderOf, serveLoop, validateServeConfig } from "../src/serve.ts";
+import { promptFor, type ServeConfig, type ServeState, senderOf, serveLoop, TRANSIENT_RETRY_MS, validateServeConfig } from "../src/serve.ts";
 
 interface World {
   inbox: Record<string, unknown>[];
@@ -301,3 +301,44 @@ describe("agent serve: refused inbox backs off (F35)", () => {
     assert.equal(logs.filter((l) => l === "serve.inbox.refused").length, calls.connect__channel_inbox, "one log line per back-off step");
   });
 });
+
+describe("agent serve: transient gate codes get one quick retry (F58)", () => {
+  it("hook_failed once → retried after ~5 s (not after the long back-off); scope_denied still backs off at once", async () => {
+    const abort = new AbortController();
+    let state: ServeState = { cursors: {}, seen: {}, primed: {} };
+    let clock = 0;
+    const at: number[] = [];
+    const logs: string[] = [];
+    await serveLoop(
+      validateServeConfig({ format: "tealbrick.agent-serve/1", harness: { kind: "command", command: ["true"] }, inboxes: [{ tool: "connect__buzz_read", args: { channel: "c1" } }], pollSeconds: 30 }),
+      {
+        mcp: {
+          async callTool() {
+            at.push(clock);
+            if (at.length === 1) return { isError: true, structuredContent: { error: { code: "hook_failed" } } };
+            if (at.length >= 3) abort.abort();
+            return { structuredContent: { messages: [] } };
+          },
+        },
+        async runTurn() {
+          return { ok: true };
+        },
+        loadState: async () => structuredClone(state),
+        saveState: async (x) => {
+          state = structuredClone(x);
+        },
+        log: (e) => logs.push(e),
+        sleep: async (ms) => {
+          clock += ms;
+          await new Promise((r) => setTimeout(r, 0));
+        },
+        now: () => clock,
+      },
+      abort.signal,
+    );
+    assert.equal((at[1] ?? 0) - (at[0] ?? 0), TRANSIENT_RETRY_MS, `retried after ${(at[1] ?? 0) - (at[0] ?? 0)} ms`);
+    assert.ok(logs.includes("serve.inbox.retry"));
+    assert.ok(!logs.includes("serve.inbox.refused"), "no long back-off for one transient refusal");
+  });
+});
+
