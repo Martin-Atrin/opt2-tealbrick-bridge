@@ -10,13 +10,14 @@ import { join } from 'node:path';
 /**
  * Internal host names never sit in git. Extra forbidden names come from TB_EXTRA_DENY (comma list) and from
  * the git-ignored `.env.denylist` (or ~/.config/opt2-tealbrick/denylist.env, or $TB_DENYLIST_FILE): line `TB_EXTRA_DENY=a,b`.
+ * A name with a capital letter matches case-sensitively (person names); an all-lowercase name matches any case.
  */
 const extraDeny = (): RegExp[] => {
   const files = process.env.TB_DENYLIST_FILE ? [process.env.TB_DENYLIST_FILE] : ['.env.denylist', join(homedir(), '.config', 'opt2-tealbrick', 'denylist.env')];
   const lists = [process.env.TB_EXTRA_DENY ?? ''];
   for (const f of files) if (existsSync(f)) lists.push(/^TB_EXTRA_DENY=(.*)$/m.exec(readFileSync(f, 'utf8'))?.[1] ?? '');
   return lists.flatMap((l) => l.split(',')).map((w) => w.trim()).filter(Boolean)
-    .map((w) => new RegExp(`\\b${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, 'i'));
+    .map((w) => new RegExp(`\\b${w.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')}\\b`, /[A-Z]/.test(w) ? '' : 'i'));
 };
 
 const banned: Array<[RegExp, string]> = [
