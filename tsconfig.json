@@ -18,6 +18,9 @@
     "paths": {
       "@opt2-tealbrick/bridge": [
         "./packages/bridge/src/index.ts"
+      ],
+      "@opt2-tealbrick/bridge/relay": [
+        "./packages/bridge/src/relay-entry.ts"
       ]
     }
   },

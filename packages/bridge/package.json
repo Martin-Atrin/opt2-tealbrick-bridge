@@ -12,6 +12,10 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
+    },
+    "./relay": {
+      "types": "./dist/relay-entry.d.ts",
+      "default": "./dist/relay-entry.js"
     }
   },
   "files": [

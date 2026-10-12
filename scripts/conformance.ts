@@ -71,7 +71,9 @@ function judge(target: string, rep: Report): string[] {
 }
 
 const problems: string[] = [];
-problems.push(...judge("bridge", run("bridge", ["--cmd", `"${node}" "${server}"`, "--timeout", "15000"])));
+// `exec`: the suite runs --cmd through `sh -c` and signals the whole process tree (SIGUSR2 for the heap snapshot);
+// dash (Debian/CI) stays as a parent and dies on SIGUSR2, bash (macOS) execs. Harnesses spawn the command directly.
+problems.push(...judge("bridge", run("bridge", ["--cmd", `exec "${node}" "${server}"`, "--timeout", "15000"])));
 
 const home = mkdtempSync(join(tmpdir(), "tb-relay-conf-"));
 try {
@@ -79,7 +81,7 @@ try {
   problems.push(
     ...judge(
       "relay",
-      run("relay", ["--cmd", `"${node}" "${tealbrick}" bridge serve --stdio`, "--login-cmd", `"${node}" "${tealbrick}" agent login --harness generic --label conformance`, "--timeout", "15000"], relayEnv),
+      run("relay", ["--cmd", `exec "${node}" "${tealbrick}" bridge serve --stdio`, "--login-cmd", `"${node}" "${tealbrick}" agent login --harness generic --label conformance`, "--timeout", "15000"], relayEnv),
     ),
   );
 } finally {

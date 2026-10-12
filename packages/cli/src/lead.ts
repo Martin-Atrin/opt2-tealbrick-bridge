@@ -10,37 +10,18 @@ import {
   type ManifestApi,
   manifestApi,
   ownInfraEnv,
-  type RelayStatus,
   startBridge,
-  startRelay,
 } from "@opt2-tealbrick/bridge";
-import type { AgentId, BridgeId, ConnectionId, Ed25519PublicJwk } from "@opt2-tealbrick/spec/credentials";
+import type { AgentId, Ed25519PublicJwk } from "@opt2-tealbrick/spec/credentials";
 import type { DeviceAgentTokenResult, DeviceStart, DeviceStartAgentInput, DeviceTokenInput } from "@opt2-tealbrick/spec/routes";
 import type { Ctx, Handler } from "./ctx.ts";
 import { requirePos } from "./ctx.ts";
 import { CliError, EXIT, isRecord, usageError } from "./io.ts";
 import { defaultOpenUrl } from "./owner.ts";
+import { type AgentItem, pickAgentItem, readAgentItems as readItems, serveRelay } from "./relay-main.ts";
 import { requireSession } from "./session.ts";
-import { AGENT_ITEM_PREFIX, isAgentItem } from "./store.ts";
+import { AGENT_ITEM_PREFIX } from "./store.ts";
 import { CLIENT_ID } from "./version.ts";
-
-/** One key connection on this machine: keychain item `tealbrick.agent.<con>` (K4 + bridge endpoints). */
-export interface AgentItem {
-  v: 1;
-  kind: "agent";
-  con: ConnectionId;
-  agt: AgentId;
-  ws: string;
-  bridgeId: BridgeId;
-  bridgeUrl: string;
-  tokenEndpoint: string;
-  harness: string;
-  label: string;
-  publicJwk: Ed25519PublicJwk;
-  /** PKCS#8 of the K4 private key, base64url; only in the OS keychain (or 0600 file store, headless) */
-  privateKey: string;
-  createdAt: string;
-}
 
 let apiCache: ManifestApi | undefined;
 const api = (): ManifestApi => {
@@ -52,32 +33,8 @@ const MAX_AGENTS = 64;
 const MIN_INTERVAL_S = 5;
 const SLOW_DOWN_S = 5;
 
-async function readAgentItems(ctx: Ctx): Promise<AgentItem[]> {
-  const store = ctx.store();
-  const out: AgentItem[] = [];
-  for (const name of await store.list()) {
-    if (!isAgentItem(name)) continue;
-    const raw = await store.get(name);
-    if (!raw) continue;
-    try {
-      const v = JSON.parse(raw) as AgentItem;
-      if (v.kind === "agent" && typeof v.con === "string" && typeof v.privateKey === "string") out.push(v);
-    } catch {
-      /* not an agent item of ours */
-    }
-  }
-  return out;
-}
-
-/** Picks the item for --agent / TB_AGENT, or the only one. */
-async function pickAgent(ctx: Ctx): Promise<AgentItem> {
-  const items = await readAgentItems(ctx);
-  const want = ctx.g.agent;
-  const matches = want ? items.filter((i) => i.agt === want || i.con === want) : items;
-  if (matches.length === 0) throw new CliError(EXIT.notSignedIn, "unauthenticated", want ? `no agent item for ${want} on this machine; run tealbrick agent login` : "no agent signed in on this machine; run tealbrick agent login");
-  if (matches.length > 1) throw usageError("more than one agent item on this machine; pass --agent <agt_…>");
-  return matches[0] as AgentItem;
-}
+const readAgentItems = (ctx: Ctx): Promise<AgentItem[]> => readItems(ctx.store());
+const pickAgent = (ctx: Ctx): Promise<AgentItem> => pickAgentItem(ctx.store(), ctx.g.agent);
 
 async function keyOf(item: AgentItem) {
   return api().importKeyPair(new Uint8Array(Buffer.from(item.privateKey, "base64url")));
@@ -270,19 +227,7 @@ export const bridge: Handler = async (ctx) => {
   const cmd = requirePos(ctx, 1, "bridge command (serve|enrol|run)");
   if (cmd === "serve") {
     if (ctx.v.stdio !== true) throw usageError("bridge serve needs --stdio (the relay has no listener)");
-    const item = await pickAgent(ctx);
-    const key = await keyOf(item);
-    const relay = startRelay({
-      api: api(),
-      bridgeUrl: item.bridgeUrl,
-      connection: { con: item.con, agt: item.agt, bridgeId: item.bridgeId },
-      signer: {
-        sign: async (input) => Buffer.from(await crypto.subtle.sign("Ed25519", key.privateKey, new TextEncoder().encode(input))).toString("base64url"),
-        publicJwk: () => item.publicJwk,
-      },
-      onStatus: (s: RelayStatus) => ctx.io.stderr.write(`${JSON.stringify({ event: "relay.status", status: s, agent: item.agt })}\n`),
-    });
-    await relay.done;
+    await serveRelay({ store: ctx.store(), agent: ctx.g.agent, stderr: ctx.io.stderr });
     return;
   }
   const dataDir = ctx.v["data-dir"] ?? ctx.io.env.TB_DATA_DIR;
