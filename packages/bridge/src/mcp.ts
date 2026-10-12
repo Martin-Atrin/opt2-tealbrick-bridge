@@ -144,8 +144,10 @@ export class McpServer {
       return;
     }
     const sid = headerValue(req, "mcp-session-id");
+    const missingSession = () => sendJson(res, 400, envelope("input_invalid", "Mcp-Session-Id header required", requestId));
     if (req.method === "DELETE") {
-      const s = sid ? this.sessions.get(sid) : undefined;
+      if (!sid) return missingSession();
+      const s = this.sessions.get(sid);
       if (!s || s.agt !== principal.agt) {
         sendJson(res, 404, envelope("not_found", "unknown session", requestId));
         return;
@@ -155,7 +157,8 @@ export class McpServer {
       return;
     }
     if (req.method === "GET") {
-      const s = sid ? this.sessions.get(sid) : undefined;
+      if (!sid) return missingSession();
+      const s = this.sessions.get(sid);
       if (!s || s.agt !== principal.agt) {
         sendJson(res, 404, envelope("not_found", "unknown session", requestId));
         return;
@@ -216,7 +219,11 @@ export class McpServer {
       );
       return;
     }
-    session = sid ? this.sessions.get(sid) : undefined;
+    if (!sid) {
+      sendJson(res, 400, { jsonrpc: "2.0", id: rpc.id ?? null, error: { code: -32600, message: "Mcp-Session-Id header required (initialize first)" } });
+      return;
+    }
+    session = this.sessions.get(sid);
     if (!session || session.agt !== principal.agt) {
       sendJson(res, 404, { jsonrpc: "2.0", id: rpc.id ?? null, error: { code: -32001, message: "session not found; re-initialize" } });
       return;
@@ -286,6 +293,8 @@ export class McpServer {
       return toolError("input_invalid", "idempotency key must be 8–128 chars", requestId);
     }
     try {
+      // pause is gate step 1: a paused agent or workspace is told `paused`, not that the tool is unknown
+      if (t.pausedWorkspace || t.pausedAgents.has(p.agt)) throw new BridgeError("paused", 403, "paused by the owner");
       const idx = await this.index(t, p.agt);
       const route = idx.routes.get(name);
       if (!route) throw new BridgeError("unknown_tool", 404);

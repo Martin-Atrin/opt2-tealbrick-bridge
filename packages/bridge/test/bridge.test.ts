@@ -211,6 +211,8 @@ describe(`deployed bridge (${real ? "real manifest crypto" : "test double"})`, (
     await waitFor(() => (w.bridge.ctx.table?.rev ?? 0) === w.rev(), 3000);
     const list = await w.mcp(s.token, { jsonrpc: "2.0", id: 9, method: "tools/list" }, s.sid);
     assert.deepEqual(list.json.result.tools, []);
+    const refused = await call(w, s, "notes__notes_list", {});
+    assert.equal(refused.structuredContent.error.code, "paused", "pause is reported as paused, not unknown_tool");
     await w.publish();
     await waitFor(() => (w.bridge.ctx.table?.rev ?? 0) === w.rev(), 3000);
   });
@@ -289,6 +291,33 @@ describe(`deployed bridge (${real ? "real manifest crypto" : "test double"})`, (
     await w.publish();
     await waitFor(() => (w.bridge.ctx.table?.rev ?? 0) === w.rev(), 3000);
     assert.equal((await call(w, s, "notes__notes_list", {})).isError, undefined);
+  });
+
+  test("MCP without Mcp-Session-Id → 400; unknown session → 404", async () => {
+    const token = await w.agentToken();
+    const r = await w.mcp(token, { jsonrpc: "2.0", id: 1, method: "tools/list" });
+    assert.equal(r.status, 400);
+    const r2 = await w.mcp(token, { jsonrpc: "2.0", id: 1, method: "tools/list" }, "01HUNKNOWNSESSIONXXXXXXXXX");
+    assert.equal(r2.status, 404);
+  });
+
+  test("Approve in Portal on an http public URL answers a clear configuration error (not 500)", async () => {
+    const reg = await (await fetch(`${w.publicUrl}/oauth/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: ["http://127.0.0.1:1/cb"], client_name: "x" }) })).json();
+    const q = new URLSearchParams({ response_type: "code", client_id: reg.client_id, redirect_uri: "http://127.0.0.1:1/cb", code_challenge: "a".repeat(43), code_challenge_method: "S256", state: "s", resource: "http://127.0.0.1/mcp" });
+    const page = await (await fetch(`${w.publicUrl}/oauth/authorize?${q}`)).text();
+    const rid = /name="rid" value="([^"]+)"/.exec(page)?.[1] as string;
+    const r = await fetch(`${w.publicUrl}/oauth/authorize`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ rid, action: "portal" }) });
+    assert.equal(r.status, 400);
+    assert.match(await r.text(), /configuration error/i);
+  });
+
+  test("a refused config document is not re-pulled in a tight loop", async () => {
+    const before = w.configPulls();
+    await w.serveForged();
+    await new Promise((r) => setTimeout(r, 1500));
+    assert.ok(w.configPulls() - before <= 2, `pulls in 1.5 s: ${w.configPulls() - before}`);
+    await w.publish();
+    await waitFor(() => (w.bridge.ctx.table?.rev ?? 0) === w.rev(), 10000);
   });
 
   test("Portal down: calls keep working on the last good config (C9)", async () => {

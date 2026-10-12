@@ -14,6 +14,8 @@ import { BridgeError, isRecord, jitter, nowS, sleep } from "./util.ts";
 
 const API = "/api/v1";
 const MAX_CONFIG_BYTES = 4 * 1024 * 1024;
+/** Pause between pulls after a refused config document (tight-loop guard). */
+export const REFUSED_PULL_DELAY_MS = 5_000;
 
 /** BRIDGE §4.1: first start, or re-enrolment when TB_ENROL_CODE changed (§4.3). */
 export async function ensureEnrolled(ctx: BridgeContext, enrolCode: string | undefined): Promise<void> {
@@ -328,7 +330,10 @@ export async function runConfigLoop(ctx: BridgeContext, signal: AbortSignal): Pr
         const jws = (await res.text()).trim();
         ctx.lastPull = nowS();
         backoff = 15_000;
-        await applyConfig(ctx, jws);
+        const applied = await applyConfig(ctx, jws);
+        // A refused document would be served again at once (`after` is unchanged): wait before the next pull
+        // instead of re-pulling it in a tight loop. Pause/revoke in the next valid revision is still picked up ≤ ~6 s.
+        if (!applied) await sleep(jitter(REFUSED_PULL_DELAY_MS), signal);
         continue;
       }
       await res.body?.cancel().catch(() => undefined);

@@ -206,6 +206,11 @@ export class OAuthServer {
   private async toPortal(res: ServerResponse, p: PendingAuth): Promise<void> {
     const id = this.ctx.identity;
     if (!id || this.ctx.table?.standalone) return htmlPage(res, 400, "Not available", "<p>Approve in Portal is not available for this workspace. Use a pairing code.</p>");
+    if (!this.issuer.startsWith("https://")) {
+      // the pairing state must name an https return URL (CREDENTIALS §10); say so instead of failing
+      this.ctx.log.warn("bridge.pairing.config_error", { code: "public_url_not_https" });
+      return htmlPage(res, 400, "Bridge configuration error", "<p>Approve in Portal needs the bridge to run on an https public address (TB_PUBLIC_URL). Ask the workspace owner to fix the bridge address, or connect with a pairing code from the agent card.</p>");
+    }
     const now = nowS();
     const ref = this.ctx.bridgeRef;
     const state = await this.ctx.api.signAssertion(

@@ -95,6 +95,9 @@ export interface World {
   rev(): number;
   close(): Promise<void>;
   rotateKey(phase: "announce" | "activate" | "retire"): Promise<void>;
+  /** serve a document signed by an untrusted key as the next revision */
+  serveForged(): Promise<void>;
+  configPulls(): number;
   /** stop answering as Portal (simulates Portal down) */
   portalDown(): void;
   rejectedBridgeAssertions(): number;
@@ -125,6 +128,7 @@ export async function makeWorld(opts: { withHook?: boolean; real?: boolean } = {
   const appLog: AppLog = { ops: [], hooks: [] };
   const hookMode = { mode: "allow" as "allow" | "deny" | "fail" };
   let down = false;
+  let pulls = 0;
   let assertFailures = 0;
   let bridgeJwk: Ed25519KeyPair["publicJwk"] | undefined;
   let configJws = "";
@@ -243,6 +247,7 @@ export async function makeWorld(opts: { withHook?: boolean; real?: boolean } = {
       return res.writeHead(401).end();
     }
     if (url.pathname === "/api/v1/bridge/config") {
+      pulls += 1;
       const after = Number(url.searchParams.get("after"));
       const deadline = Date.now() + 300;
       while (rev <= after && Date.now() < deadline) await new Promise((r) => setTimeout(r, 25));
@@ -301,6 +306,13 @@ export async function makeWorld(opts: { withHook?: boolean; real?: boolean } = {
     agentToken,
     mcp,
     signPortal: sign,
+    async serveForged() {
+      const stranger = await api.generateKeyPair();
+      rev += 1;
+      const c = JSON.parse(Buffer.from(configJws.split(".")[1] as string, "base64url").toString("utf8"));
+      configJws = await api.signJws("tb-config+jws" as never, { ...c, rev, jti: api.ulid() }, stranger);
+    },
+    configPulls: () => pulls,
     async rotateKey(phase) {
       if (phase === "announce") keyEntries.push({ key: await api.generateKeyPair(), status: "pending" });
       if (phase === "activate") {
