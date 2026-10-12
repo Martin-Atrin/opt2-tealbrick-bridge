@@ -3,6 +3,7 @@
  * DELETE ends the session). Tools come from grants; skills are resources + an instructions index +
  * the `<product>__tb_skills` fallback tool. Every request re-authenticates the agent (K5).
  */
+
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { HeldToolResult } from "@opt2-tealbrick/spec/bridge";
 import { TOOL_NAME_RULE } from "@opt2-tealbrick/spec/bridge";
@@ -12,6 +13,7 @@ import type { Json } from "./api.ts";
 import type { CallRouter } from "./calls.ts";
 import { BRIDGE_VERSION, type BridgeContext, MCP_VERSIONS } from "./context.ts";
 import { authenticateAgent } from "./identity.ts";
+import { tooDeep, validRpcId } from "./json-limits.ts";
 import type { Table } from "./table.ts";
 import { agentPausedOrEmpty, buildToolIndex, grantedProducts, type ToolIndex, type ToolRoute } from "./tools.ts";
 import { BridgeError, envelope, headerValue, isRecord, readBody, sendError, sendJson } from "./util.ts";
@@ -189,6 +191,10 @@ export class McpServer {
     if (!isRecord(msg) || msg.jsonrpc !== "2.0" || typeof msg.method !== "string") {
       // responses or batches from the client: accepted and ignored (no server→client requests)
       res.writeHead(202).end();
+      return;
+    }
+    if (!validRpcId(msg.id) || tooDeep(msg)) {
+      sendJson(res, 400, { jsonrpc: "2.0", id: null, error: { code: -32600, message: !validRpcId(msg.id) ? "invalid request id" : "request nested too deep" } });
       return;
     }
     const rpc = msg as unknown as RpcRequest;
