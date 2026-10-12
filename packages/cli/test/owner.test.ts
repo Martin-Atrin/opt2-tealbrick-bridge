@@ -1,5 +1,7 @@
 import assert from "node:assert/strict";
-import { afterEach, beforeEach, describe, it } from "node:test";
+import { readFile, writeFile } from "node:fs/promises";
+import { join } from "node:path";
+import { after, afterEach, before, beforeEach, describe, it } from "node:test";
 import { SPEC_VERSION } from "@opt2-tealbrick/spec";
 import { apiError, Harness } from "./fixtures.ts";
 
@@ -154,5 +156,38 @@ describe("owner commands: envelope, exit codes, credential kind", () => {
     assert.equal(show.code, 0);
     assert.equal(show.json.connections[0].id, "con_1");
     assert.ok(h.portal.requests.some((r) => r.path === "/api/v1/workspaces/ws_9/agents/agt_1/connections"));
+  });
+});
+
+describe("agents export (owner): card ids for agent login --file", () => {
+  const h = new Harness();
+  before(async () => {
+    await h.setup();
+  });
+  after(async () => {
+    await h.teardown();
+  });
+  it("fills ids by unique name into an existing file and reports the rest", async () => {
+    await h.signIn();
+    h.portal.on("GET", "/workspaces/{ws}/agents", () => ({
+      body: {
+        items: [
+          { id: "agt_01HAAAAAAAAAAAAAAAAAAAAAAA", name: "Agent 01", purpose: "p", harnessOptionId: "generic-mcp" },
+          { id: "agt_01HBBBBBBBBBBBBBBBBBBBBBBB", name: "Twin", purpose: "p", harnessOptionId: "generic-mcp" },
+          { id: "agt_01HCCCCCCCCCCCCCCCCCCCCCCC", name: "Twin", purpose: "p", harnessOptionId: "generic-mcp" },
+        ],
+        nextCursor: null,
+      },
+    }));
+    const file = join(h.dir, "agents.json");
+    await writeFile(file, JSON.stringify({ format: "tealbrick.agents/1", agents: [{ name: "Agent 01", create: true }, { name: "Twin" }, { name: "Missing" }] }));
+    const r = await h.run(["agents", "export", "--file", file, "--ws", "ws_01HZZZZZZZZZZZZZZZZZZZZZZZ", "--json"]);
+    assert.equal(r.code, 0, r.err);
+    const doc = JSON.parse(await readFile(file, "utf8"));
+    assert.equal(doc.agents[0].id, "agt_01HAAAAAAAAAAAAAAAAAAAAAAA");
+    assert.equal(doc.agents[0].create, undefined, "a resolved entry no longer asks to create");
+    assert.equal(doc.agents[1].id, undefined, "ambiguous names are not guessed");
+    assert.equal(doc.agents[2].id, undefined);
+    assert.equal(r.json.unmatched.length, 2);
   });
 });

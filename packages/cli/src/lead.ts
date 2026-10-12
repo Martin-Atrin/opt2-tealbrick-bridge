@@ -73,15 +73,30 @@ async function agentLogin(ctx: Ctx): Promise<void> {
   const origin = ctx.portalOrigin();
   const harness = ctx.v.harness ?? "tealbrick_cli";
   const label = (ctx.v.label ?? ctx.io.hostname ?? osHostname()).slice(0, 64) || "machine";
-  // agents: --agent ids, or names from --file (the owner picks the cards at approval)
+  // Every slot names an existing card (`id`) or asks for a new one (`create: true`): an approval must never
+  // create cards by accident (QA S2: entries without ids produced duplicate cards). Ids come from the owner's
+  // `tealbrick agents export --file <agents.json>`; agent mode cannot read the card list itself.
   let slots: { agt?: AgentId; name?: string }[] = ctx.g.agents.map((a) => ({ agt: a as AgentId }));
   if (ctx.v.file) {
     const { readFile } = await import("node:fs/promises");
-    const doc = JSON.parse(await readFile(ctx.v.file, "utf8")) as { format?: string; agents?: { name?: string }[] };
+    const doc = JSON.parse(await readFile(ctx.v.file, "utf8")) as { format?: string; agents?: { name?: unknown; id?: unknown; create?: unknown }[] };
     if (doc.format !== "tealbrick.agents/1" || !Array.isArray(doc.agents)) throw new CliError(EXIT.validation, "input_invalid", "file is not tealbrick.agents/1");
-    slots = doc.agents.map((a) => ({ name: String(a.name ?? "") }));
+    const problems: string[] = [];
+    slots = doc.agents.map((a, i) => {
+      const name = typeof a.name === "string" && a.name ? a.name : `#${i + 1}`;
+      if (typeof a.id === "string" && a.create === true) problems.push(`${name}: has both id and create`);
+      else if (typeof a.id === "string") return { agt: a.id as AgentId, name };
+      else if (a.create !== true) problems.push(`${name}: no id (run \`tealbrick agents export --file ${ctx.v.file}\` as the owner) and no "create": true`);
+      return { name };
+    });
+    if (problems.length) throw new CliError(EXIT.validation, "input_invalid", `refusing to start: every entry needs an agent id or "create": true — ${problems.join("; ")}`);
   }
-  if (slots.length === 0) slots = [{}];
+  if (slots.length === 0) {
+    if (ctx.v.create !== true) throw usageError("pass --agent <agt_…> (an existing card) or --create (choose or create the card at approval)");
+    slots = [{}];
+  }
+  const ids = slots.map((x) => x.agt).filter((x): x is AgentId => !!x);
+  if (new Set(ids).size !== ids.length) throw new CliError(EXIT.validation, "input_invalid", "the same agent id appears twice");
   if (slots.length > MAX_AGENTS) throw new CliError(EXIT.validation, "input_invalid", `at most ${MAX_AGENTS} agents per request`);
   for (const s of slots) if (s.agt && !/^agt_[0-9A-HJKMNP-TV-Z]{26}$/.test(s.agt)) throw usageError(`not an agent id: ${s.agt}`);
   const keys = await Promise.all(slots.map(() => api().generateKeyPair()));

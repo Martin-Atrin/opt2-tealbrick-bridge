@@ -40,6 +40,7 @@ export const OPTIONS = {
   bridge: { type: "string" },
   // lead sections (agent / bridge / admin): parsed here so the lead only reads them
   harness: { type: "string" },
+  create: { type: "boolean" },
   stdio: { type: "boolean" },
   "data-dir": { type: "string" },
   path: { type: "string" },

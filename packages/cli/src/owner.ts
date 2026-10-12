@@ -1,5 +1,5 @@
 import { spawn } from "node:child_process";
-import { writeFile } from "node:fs/promises";
+import { readFile, rename, writeFile } from "node:fs/promises";
 import { hostname as osHostname } from "node:os";
 import { resolve } from "node:path";
 import type { DeviceOwnerTokenResult, DeviceStart, DeviceStartOwnerInput, DeviceTokenInput } from "@opt2-tealbrick/spec/routes";
@@ -227,8 +227,60 @@ export const agents: Handler = async (ctx) => {
     const agent = await client.call("agents.get", { ws, agt });
     const conns = await client.call<{ items?: unknown[] }>("connections.list", { ws, agt });
     ctx.emit({ agent, connections: conns.items ?? [] });
+  } else if (sub === "export") {
+    await exportAgents(ctx, client, ws);
   } else throw usageError(`unknown command: agents ${sub}`);
 };
+
+/**
+ * `tealbrick agents export [--file <agents.json>]` (owner read, local write): writes the workspace's agent card ids
+ * into a tealbrick.agents/1 file so `tealbrick agent login --file` can connect EXISTING cards (no duplicates).
+ * An existing file keeps its entries; each entry gets the `id` of the card with the same name (unique match).
+ */
+async function exportAgents(ctx: Parameters<Handler>[0], client: Awaited<ReturnType<typeof requireSession>>["client"], ws: string): Promise<void> {
+  const cards: Record<string, unknown>[] = [];
+  let cursor: string | undefined;
+  do {
+    const page = await client.call<{ items?: Record<string, unknown>[]; nextCursor?: string | null }>("agents.list", { ws, limit: 200, ...(cursor ? { cursor } : {}) });
+    cards.push(...(page.items ?? []));
+    cursor = page.nextCursor ?? undefined;
+  } while (cursor);
+  const byName = new Map<string, Record<string, unknown>[]>();
+  for (const c of cards) byName.set(str(c.name), [...(byName.get(str(c.name)) ?? []), c]);
+  const file = ctx.v.file;
+  let doc: { format: string; agents: Record<string, unknown>[] } = { format: "tealbrick.agents/1", agents: cards.map((c) => ({ name: str(c.name), id: str(c.id), purpose: str(c.purpose), harness: str(c.harnessOptionId) })) };
+  const unmatched: string[] = [];
+  if (file) {
+    let existing: unknown;
+    try {
+      existing = JSON.parse(await readFile(file, "utf8"));
+    } catch (e) {
+      if ((e as NodeJS.ErrnoException).code !== "ENOENT") throw new CliError(EXIT.validation, "input_invalid", `${file} is not readable JSON`);
+    }
+    if (existing !== undefined) {
+      const ex = existing as { format?: string; agents?: Record<string, unknown>[] };
+      if (ex.format !== "tealbrick.agents/1" || !Array.isArray(ex.agents)) throw new CliError(EXIT.validation, "input_invalid", `${file} is not tealbrick.agents/1`);
+      doc = {
+        ...ex,
+        format: "tealbrick.agents/1",
+        agents: ex.agents.map((a) => {
+          const hits = byName.get(str(a.name)) ?? [];
+          if (hits.length === 1) {
+            const { create: _c, ...rest } = a;
+            return { ...rest, id: str(hits[0]?.id) };
+          }
+          unmatched.push(`${str(a.name)} (${hits.length ? "several cards with this name" : "no card"})`);
+          return a;
+        }),
+      };
+    }
+    const tmp = `${file}.tmp-${process.pid}`;
+    await writeFile(tmp, `${JSON.stringify(doc, null, 2)}\n`, { mode: 0o600 });
+    await rename(tmp, file);
+  }
+  if (unmatched.length) ctx.say(`No unique card for: ${unmatched.join(", ")}. Create them in Portal (or with a draft) and export again, or mark them "create": true.`);
+  ctx.emit(file ? { file, agents: doc.agents.length, unmatched } : doc, file ? `wrote ${doc.agents.length} agent(s) to ${file}` : JSON.stringify(doc, null, 2));
+}
 
 /** Local search over discovery intents and keywords (plus name/slug), every term must match. */
 export function searchCatalog(items: Record<string, unknown>[], text: string): Record<string, unknown>[] {

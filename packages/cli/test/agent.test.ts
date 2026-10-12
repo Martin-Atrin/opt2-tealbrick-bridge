@@ -1,6 +1,8 @@
 import assert from "node:assert/strict";
+import { writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
+import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 import { manifestApi } from "@opt2-tealbrick/bridge";
 import { Harness } from "./fixtures.ts";
@@ -18,6 +20,7 @@ describe("agent mode (key connections)", () => {
   let registeredKey: { kty: "OKP"; crv: "Ed25519"; x: string } | undefined;
   let accepted = 0;
   let known = false;
+  let lastStart: any;
 
   before(async () => {
     await h.setup();
@@ -47,7 +50,7 @@ describe("agent mode (key connections)", () => {
     h.portal.on("POST", "/device/authorize", (req) => {
       assert.equal(req.body.scope, "agent");
       assert.equal(req.body.client_id, "tealbrick-cli");
-      assert.equal(req.body.agents.length, 1);
+      lastStart = req.body;
       registeredKey = req.body.agents[0].public_key;
       return { body: { device_code: "tbdv_x", user_code: "BCDF-GHJK", verification_uri: `${h.portal.origin}/device`, verification_uri_complete: `${h.portal.origin}/device?code=BCDFGHJK`, expires_in: 600, interval: 5 } };
     });
@@ -89,6 +92,31 @@ describe("agent mode (key connections)", () => {
     assert.equal(item.bridgeId, BRG);
     assert.ok(item.privateKey.length > 40);
     assert.ok(accepted >= 1);
+  });
+
+  test("agent login --file refuses entries with neither id nor create: true, before any network call (QA S2)", async () => {
+    const before = h.portal.requests.length;
+    const file = join(h.dir, "agents.json");
+    await writeFile(file, JSON.stringify({ format: "tealbrick.agents/1", agents: [{ name: "Agent 01", id: AGT }, { name: "Agent 02" }] }));
+    const r = await h.run(["agent", "login", "--file", file, "--json"]);
+    assert.equal(r.code, 8);
+    assert.match(r.json.error.message, /Agent 02: no id/);
+    assert.equal(h.portal.requests.length, before, "no device request was started");
+  });
+
+  test("agent login without --agent, --file or --create is refused", async () => {
+    const r = await h.run(["agent", "login", "--json"]);
+    assert.equal(r.code, 2);
+  });
+
+  test("agent login --file sends the ids of existing cards; create: true sends an unbound slot", async () => {
+    const file = join(h.dir, "agents2.json");
+    await writeFile(file, JSON.stringify({ format: "tealbrick.agents/1", agents: [{ name: "Agent 01", id: AGT }, { name: "New one", create: true }] }));
+    known = false;
+    await h.run(["agent", "login", "--file", file, "--json"]);
+    assert.equal(lastStart.agents.length, 2);
+    assert.equal(lastStart.agents[0].agt, AGT);
+    assert.equal(lastStart.agents[1].agt, undefined);
   });
 
   test("agent status reaches the bridge with K5 and counts tools", async () => {
