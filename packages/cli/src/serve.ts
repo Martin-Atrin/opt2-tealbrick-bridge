@@ -150,6 +150,7 @@ export interface ServeDeps {
 const MAX_PROMPT_CHARS = 64_000;
 const MAX_SEEN = 1000;
 const MAX_BACKOFF_MS = 300_000;
+const INBOX_MAX_BACKOFF_MS = 1_800_000;
 
 export function validateServeConfig(raw: unknown): ServeConfig {
   const c = raw as ServeConfig;
@@ -286,6 +287,7 @@ export async function serveLoop(cfg: ServeConfig, deps: ServeDeps, signal: Abort
     return { ...r, held };
   };
   const warnedNoMentions = new Set<string>();
+  const refused = new Map<string, { count: number; next: number }>();
   /** F15: does this item start a turn? (DMs always; channels per `wake`, default mentions) */
   const wakes = (inbox: InboxSpec, it: Record<string, unknown>, key: string): boolean => {
     if (it.conversationType === "direct") return true;
@@ -418,12 +420,23 @@ export async function serveLoop(cfg: ServeConfig, deps: ServeDeps, signal: Abort
       for (const inbox of cfg.inboxes) {
         if (signal.aborted) break;
         const key = inboxKey(inbox);
+        // F35: an inbox the bridge or app refuses (e.g. scope_denied under a read-only grant) backs off on its own,
+        // up to 30 min, and is logged once per back-off step, not every poll
+        const off = refused.get(key);
+        if (off && deps.now() < off.next) continue;
         const cursor = state.cursors[key];
         const args = { ...(inbox.args ?? {}), ...(inbox.cursor && cursor !== undefined ? { [inbox.cursor.param]: cursor } : {}) };
         const res = await deps.mcp.callTool(inbox.tool, args);
         if (res.isError) {
-          deps.log("serve.inbox.refused", { tool: inbox.tool, code: String((structured(res)?.error as { code?: string } | undefined)?.code ?? "error") });
+          const n = (off?.count ?? 0) + 1;
+          const waitMs = Math.min(pollMs * 2 ** n, INBOX_MAX_BACKOFF_MS);
+          refused.set(key, { count: n, next: deps.now() + waitMs });
+          deps.log("serve.inbox.refused", { tool: inbox.tool, code: String((structured(res)?.error as { code?: string } | undefined)?.code ?? "error"), retryInMs: waitMs });
           continue;
+        }
+        if (off) {
+          refused.delete(key);
+          deps.log("serve.inbox.recovered", { tool: inbox.tool });
         }
         const out = structured(res) ?? {};
         const list = Array.isArray(out[inbox.items ?? "messages"]) ? (out[inbox.items ?? "messages"] as Record<string, unknown>[]) : [];

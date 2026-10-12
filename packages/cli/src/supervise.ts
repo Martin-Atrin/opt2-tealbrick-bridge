@@ -10,6 +10,8 @@ import { dirname, join } from "node:path";
 
 export interface Heartbeat {
   pid: number;
+  /** F38: the supervisor that started this loop (its pidfile holder), when supervised */
+  supervisorPid?: number;
   /** last completed poll (ISO) */
   lastPollAt: string | null;
   /** "poll" between turns, "turn" while a harness turn runs */
@@ -73,7 +75,7 @@ export async function readHeartbeat(path: string): Promise<Heartbeat | null> {
  * Heartbeat + watchdog for one serve loop. `beat("poll")` after every poll, `beat("turn")` when a turn starts.
  * The watchdog fires `onStall` when nothing moved for longer than the limit of the current phase.
  */
-export function liveness(o: { path: string; pollMs: number; turnLimitMs: number; onStall: () => void; nowMs?: () => number; checkEveryMs?: number }) {
+export function liveness(o: { path: string; pollMs: number; turnLimitMs: number; onStall: () => void; nowMs?: () => number; checkEveryMs?: number; supervisorPid?: number }) {
   const now = o.nowMs ?? (() => Date.now());
   let last = now();
   let phase: Heartbeat["phase"] = "poll";
@@ -89,7 +91,7 @@ export function liveness(o: { path: string; pollMs: number; turnLimitMs: number;
       last = now();
       phase = p;
       if (p === "poll") lastPollAt = new Date(last).toISOString();
-      await writeJson(o.path, { pid: process.pid, lastPollAt, phase, since: new Date(last).toISOString() } satisfies Heartbeat).catch(() => undefined);
+      await writeJson(o.path, { pid: process.pid, ...(o.supervisorPid ? { supervisorPid: o.supervisorPid } : {}), lastPollAt, phase, since: new Date(last).toISOString() } satisfies Heartbeat).catch(() => undefined);
     },
     stop(): void {
       clearInterval(timer);
@@ -142,4 +144,35 @@ export async function supervise(o: {
     process.removeListener("SIGTERM", stop);
     await release();
   }
+}
+
+/** true while `pid` exists (signal 0: existence check only) */
+export function isAlive(pid: number): boolean {
+  return alive(pid);
+}
+
+/**
+ * F38: stops the loop that holds a connection's pidfile — the holder itself, confirmed by a recent heartbeat that names
+ * it (plain serve: heartbeat.pid; supervised: heartbeat.supervisorPid). Waits for the exit; the pidfile and heartbeat
+ * are removed ONLY when the process is gone (never delete a pidfile whose process still runs).
+ */
+export async function stopLoop(o: { pidfile: string; heartbeat: string; nowMs: number; waitMs?: number }): Promise<{ stopped: number | null; left: string | null }> {
+  const holder = await readPid(o.pidfile);
+  if (!holder) return { stopped: null, left: null };
+  if (!alive(holder.pid)) {
+    await rm(o.pidfile, { force: true });
+    await rm(o.heartbeat, { force: true });
+    return { stopped: null, left: null };
+  }
+  const hb = await readHeartbeat(o.heartbeat);
+  const recent = !!hb && Date.parse(hb.since) > o.nowMs - 15 * 60_000;
+  const confirmed = recent && (hb?.pid === holder.pid || hb?.supervisorPid === holder.pid);
+  if (!confirmed) return { stopped: null, left: `agent serve (${holder.role} pid ${holder.pid}) is not confirmed by this connection's heartbeat; stop it yourself` };
+  process.kill(holder.pid, "SIGTERM"); // the supervisor stops its own child
+  const until = Date.now() + (o.waitMs ?? 10_000);
+  while (alive(holder.pid) && Date.now() < until) await new Promise((r) => setTimeout(r, 100));
+  if (alive(holder.pid)) return { stopped: null, left: `agent serve (${holder.role} pid ${holder.pid}) did not stop within ${Math.round((o.waitMs ?? 10_000) / 1000)} s; its pidfile is kept` };
+  await rm(o.pidfile, { force: true });
+  await rm(o.heartbeat, { force: true });
+  return { stopped: holder.pid, left: null };
 }

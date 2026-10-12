@@ -72,7 +72,17 @@ const CARD_NAME_MAX = 60;
 const CARD_PURPOSE_MAX = 280;
 
 // ── agent login (CLI.md §4; one device request for 1..64 agents, C16 S4) ──
-export async function agentLogin(ctx: Ctx): Promise<void> {
+/**
+ * C106a (Core 1527fe8): `agents[].adopt` — a SUGGESTION the owner's approval page pre-fills (grants, channel, wake);
+ * the owner decides. Typed locally until spec 0.1.18 (Core shape, coordination REQUESTS "C106a adopt").
+ */
+export interface AdoptSuggestion {
+  grants: { product: string; crud?: ("create" | "read" | "update" | "delete")[]; operations?: string[] }[];
+  channel?: { kind: "buzz_channel" | "connect_inbox"; id?: string; createName?: string };
+  wake?: "serve" | "poll" | "none";
+}
+
+export async function agentLogin(ctx: Ctx, extra: { adopt?: AdoptSuggestion } = {}): Promise<void> {
   if (ctx.v.code !== undefined) throw usageError("agent login takes no code (the owner approves in the browser)");
   const origin = ctx.portalOrigin();
   // C96: Core 3230e69 lists the CLI harness option as `tealbrick-cli` (old spellings stay accepted as aliases)
@@ -117,7 +127,7 @@ export async function agentLogin(ctx: Ctx): Promise<void> {
   for (const s of slots) if (s.agt && !/^agt_[0-9A-HJKMNP-TV-Z]{26}$/.test(s.agt)) throw usageError(`not an agent id: ${s.agt}`);
   const keys = await Promise.all(slots.map(() => api().generateKeyPair()));
   const client = ctx.client(origin);
-  const startInput: DeviceStartAgentInput = {
+  const startInput: DeviceStartAgentInput & { agents: (DeviceStartAgentInput["agents"][number] & { adopt?: AdoptSuggestion })[] } = {
     scope: "agent",
     client_id: CLIENT_ID,
     machine_label: label,
@@ -125,6 +135,7 @@ export async function agentLogin(ctx: Ctx): Promise<void> {
     // C96: the slot's suggested card name, so the owner approves a NAMED card in one click (GUI prefills it).
     // Placeholder names of unnamed file entries (`#3`) are never sent.
     agents: slots.map((s, i) => ({
+      ...(extra.adopt && i === 0 ? { adopt: extra.adopt } : {}),
       ...(s.agt ? { agt: s.agt } : {}),
       ...(s.name && !/^#\d+$/.test(s.name) ? { name: s.name.trim() } : {}),
       ...((s as { purpose?: string }).purpose ? { purpose: ((s as { purpose?: string }).purpose as string).trim() } : {}),
@@ -333,6 +344,8 @@ async function agentServe(ctx: Ctx): Promise<void> {
     path: sup.heartbeatPath(ctx.configDir(), item.con),
     pollMs: Math.max(cfg.pollSeconds ?? 20, 5) * 1000,
     turnLimitMs: (cfg.harness.turnTimeoutSeconds ?? 3600) * 1000,
+    // F38: a supervised child names its supervisor (the pidfile holder), so --undo can confirm and stop it
+    ...(ctx.v["supervised-child"] === true ? { supervisorPid: process.ppid } : {}),
     onStall: () => {
       ctx.io.stderr.write(`${JSON.stringify({ ts: new Date().toISOString(), event: "serve.stalled", agent: item.agt })}\n`);
       void releasePid().finally(() => process.exit(sup.EXIT_STALLED));

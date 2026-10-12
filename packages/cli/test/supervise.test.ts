@@ -5,7 +5,7 @@ import { existsSync, mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, it } from "node:test";
-import { acquirePidfile, EXIT_STALLED, liveness, readHeartbeat, readPid, supervise } from "../src/supervise.ts";
+import { acquirePidfile, EXIT_STALLED, isAlive, liveness, readHeartbeat, readPid, stopLoop, supervise } from "../src/supervise.ts";
 
 const dir = mkdtempSync(join(tmpdir(), "tb-supervise-"));
 after(() => rmSync(dir, { recursive: true, force: true }));
@@ -62,5 +62,40 @@ describe("agent serve liveness (C96 §8)", () => {
     assert.deepEqual(waits, [1000, 2000, 4000], "backoff doubles");
     assert.ok(events.some((x) => x.e === "serve.supervisor.restart" && x.f?.stalled === true), "a watchdog exit is reported as stalled");
     assert.equal(existsSync(path), false);
+  });
+
+  it("F38: stopLoop stops a SUPERVISOR confirmed by heartbeat.supervisorPid, waits for it, then removes the pidfile", async () => {
+    const { writeFile } = await import("node:fs/promises");
+    const sup = spawn(process.execPath, ["-e", "setTimeout(() => {}, 30000)"], { stdio: "ignore" });
+    await new Promise((r) => setTimeout(r, 100));
+    const pf = join(dir, "f38.pid");
+    const hb = join(dir, "f38.hb.json");
+    await writeFile(pf, JSON.stringify({ pid: sup.pid, role: "supervisor", startedAt: "x" }));
+    await writeFile(hb, JSON.stringify({ pid: 999999, supervisorPid: sup.pid, lastPollAt: null, phase: "poll", since: new Date().toISOString() }));
+    const r = await stopLoop({ pidfile: pf, heartbeat: hb, nowMs: Date.now() });
+    assert.equal(r.stopped, sup.pid);
+    assert.equal(isAlive(sup.pid as number), false);
+    assert.equal(existsSync(pf), false);
+  });
+
+  it("F38: a process that does not stop keeps its pidfile; an unconfirmed holder is never signalled", async () => {
+    const { writeFile } = await import("node:fs/promises");
+    const stubborn = spawn(process.execPath, ["-e", "process.on('SIGTERM', () => {}); setTimeout(() => {}, 30000)"], { stdio: "ignore" });
+    await new Promise((r) => setTimeout(r, 150));
+    const pf = join(dir, "f38b.pid");
+    const hb = join(dir, "f38b.hb.json");
+    await writeFile(pf, JSON.stringify({ pid: stubborn.pid, role: "serve", startedAt: "x" }));
+    await writeFile(hb, JSON.stringify({ pid: stubborn.pid, lastPollAt: null, phase: "poll", since: new Date().toISOString() }));
+    const r = await stopLoop({ pidfile: pf, heartbeat: hb, nowMs: Date.now(), waitMs: 300 });
+    assert.equal(r.stopped, null);
+    assert.match(r.left ?? "", /did not stop/);
+    assert.equal(existsSync(pf), true, "pidfile kept while the process runs");
+    // unconfirmed (no heartbeat naming it): left alone, pidfile kept
+    await writeFile(hb, JSON.stringify({ pid: 4242, lastPollAt: null, phase: "poll", since: new Date().toISOString() }));
+    const u = await stopLoop({ pidfile: pf, heartbeat: hb, nowMs: Date.now(), waitMs: 300 });
+    assert.match(u.left ?? "", /not confirmed/);
+    assert.equal(existsSync(pf), true);
+    stubborn.kill("SIGKILL"); // the test's own child
+    await new Promise((r2) => stubborn.once("exit", r2));
   });
 });

@@ -116,6 +116,14 @@ describe("tealbrick adopt (C96 phase 1)", () => {
     assert.equal(r.code, 0, r.err);
     assert.equal(r.json.agent, AGT);
     assert.equal(r.json.reused, false);
+    const start = h.portal.requests.filter((q) => q.path.endsWith("/device/authorize")).at(-1)?.body as { agents: { adopt?: { grants: { product: string; crud?: string[]; operations?: string[] }[]; channel?: { kind: string }; wake?: string } }[] };
+    const sugg = start.agents[0]?.adopt;
+    assert.ok(sugg, "C106a: the device request carries the adopt suggestion");
+    assert.equal(sugg?.wake, "serve");
+    assert.deepEqual(sugg?.channel, { kind: "connect_inbox" });
+    assert.deepEqual(sugg?.grants.find((g) => g.product === "knowledge"), { product: "knowledge", crud: ["read"], operations: ["document_create"] }, "read + the write op the persona needs");
+    assert.ok(sugg?.grants.some((g) => g.product === "connect"));
+    assert.equal(r.json.toolsReady, true);
     assert.equal(r.json.probe.tools, 2);
     assert.ok(r.json.personaReview.some((l: string) => /mcp__mail__send/.test(l)), "risky persona lines listed for review");
     const dir = join(adoptDir(), AGT);
@@ -164,17 +172,23 @@ describe("tealbrick adopt (C96 phase 1)", () => {
     assert.ok(wired.mcpServers.mine, "the user's own server is kept");
     assert.equal(r.json.backups.length, 1);
     assert.equal(await readFile(r.json.backups[0], "utf8"), original);
-    // F32: a second Teal Brick entry for a new card is refused unless --keep-existing
-    const other = await h.run(["adopt", "--harness", "claude-desktop", "--name", "Another agent", "--yes", "--json"]);
-    assert.equal(other.code, 8, other.err);
-    assert.equal(other.json.error.code, "existing_entry");
+    // F32: an existing Teal Brick entry is REUSED (same entry, same card), never a second entry or card
     const dry = await h.run(["adopt", "--harness", "claude-desktop", "--name", "Another agent", "--dry-run", "--json"]);
-    assert.deepEqual(dry.json.existingEntries, ["tealbrick"]);
+    assert.deepEqual(dry.json.existingEntries, [{ name: "tealbrick", agt: AGT, remote: false }]);
+    assert.equal(dry.json.entry, "tealbrick");
+    assert.equal(dry.json.card, AGT, "the card named in the entry is reused");
     assert.equal(dry.json.target, cfgPath, "the plan names the config path");
     const u = await h.run(["adopt", "--undo", "--name", "Desk agent", "--json"]);
     assert.equal(u.code, 0, u.err);
     assert.equal(await readFile(cfgPath, "utf8"), original, "restored byte for byte");
     assert.equal(await h.store.get(`tealbrick.agent.${CON}`), null, "local key deleted");
+    assert.equal(u.json.connection, CON, "F39: the exact connection id is named");
+    assert.equal(u.json.revokeNeeded, true);
+    // F40: re-adopt after undo = SAME card, NEW connection (not "reused")
+    const again = await h.run(["adopt", "--harness", "claude-desktop", "--name", "Desk agent", "--yes", "--json"]);
+    assert.equal(again.code, 0, again.err);
+    assert.equal(again.json.reused, false);
+    assert.equal(again.json.sameCard, true);
   });
 
   test("F30: --inbox buzz:<channel> adds a Buzz inbox to the serve config; a bad value is refused", async () => {

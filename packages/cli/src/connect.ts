@@ -203,7 +203,7 @@ function jsonIndent(old: string | null): string | number {
 }
 
 /** New text of a JSON config with `mcpServers.tealbrick` set. Throws exit 8 when the file does not parse. */
-export function mergeJsonConfig(old: string | null, entry: Record<string, unknown>, path: string): string {
+export function mergeJsonConfig(old: string | null, entry: Record<string, unknown>, path: string, name = "tealbrick"): string {
   let root: Record<string, unknown> = {};
   if (old !== null && old.trim() !== "") {
     let parsed: unknown;
@@ -219,14 +219,14 @@ export function mergeJsonConfig(old: string | null, entry: Record<string, unknow
     throw new CliError(EXIT.validation, "validation_failed", `mcpServers in ${path} is not an object; not touching it`);
   }
   const servers = (isRecord(root.mcpServers) ? root.mcpServers : {}) as Record<string, unknown>;
-  servers.tealbrick = entry;
+  servers[name] = entry;
   root.mcpServers = servers;
   return `${JSON.stringify(root, null, jsonIndent(old))}\n`;
 }
 
-export function mergeTomlConfig(old: string | null, body: string[], path: string): string {
+export function mergeTomlConfig(old: string | null, body: string[], path: string, name = "tealbrick"): string {
   try {
-    return upsertMcpTable(old ?? "", body);
+    return upsertMcpTable(old ?? "", body, name);
   } catch (e) {
     if (e instanceof TomlError) throw new CliError(EXIT.validation, "validation_failed", `${path}: ${e.message}; not touching it`);
     throw e;

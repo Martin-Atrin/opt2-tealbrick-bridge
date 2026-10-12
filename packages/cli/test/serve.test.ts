@@ -260,3 +260,44 @@ describe("agent serve: onBehalfOf (G4b)", () => {
     assert.deepEqual(turns[2]?.onBehalfOf, turns[0]?.onBehalfOf, "the follow-up acts for the same sender");
   });
 });
+
+describe("agent serve: refused inbox backs off (F35)", () => {
+  it("a scope_denied inbox is polled less and less and logged per back-off step; the other inbox keeps working", async () => {
+    const abort = new AbortController();
+    let state: ServeState = { cursors: {}, seen: {}, primed: {} };
+    let clock = 0;
+    const calls: Record<string, number> = {};
+    const logs: string[] = [];
+    let polls = 0;
+    await serveLoop(
+      validateServeConfig({ format: "tealbrick.agent-serve/1", harness: { kind: "command", command: ["true"] }, inboxes: [{ tool: "connect__channel_inbox" }, { tool: "connect__buzz_read", args: { channel: "c1" } }], pollSeconds: 10 }),
+      {
+        mcp: {
+          async callTool(name) {
+            calls[name] = (calls[name] ?? 0) + 1;
+            if (name === "connect__buzz_read" && ++polls > 40) abort.abort();
+            if (name === "connect__channel_inbox") return { isError: true, structuredContent: { error: { code: "scope_denied" } } };
+            return { structuredContent: { messages: [] } };
+          },
+        },
+        async runTurn() {
+          return { ok: true };
+        },
+        loadState: async () => structuredClone(state),
+        saveState: async (x) => {
+          state = structuredClone(x);
+        },
+        log: (e) => logs.push(e),
+        sleep: async (ms) => {
+          clock += ms;
+          await new Promise((r) => setTimeout(r, 0));
+        },
+        now: () => clock,
+      },
+      abort.signal,
+    );
+    assert.equal(calls.connect__buzz_read, 41, "the readable inbox is polled every cycle");
+    assert.ok((calls.connect__channel_inbox ?? 0) <= 6, `the refused inbox backs off (${calls.connect__channel_inbox} calls in 41 cycles)`);
+    assert.equal(logs.filter((l) => l === "serve.inbox.refused").length, calls.connect__channel_inbox, "one log line per back-off step");
+  });
+});

@@ -14,10 +14,10 @@ import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } fro
 import { confirm, desktopConfigPath, mergeJsonConfig, mergeTomlConfig, planConnect, readExisting, writeAtomic } from "./connect.ts";
 import type { Ctx, Handler } from "./ctx.ts";
 import { CliError, EXIT, usageError } from "./io.ts";
-import { agentLogin, probeAgent } from "./lead.ts";
+import { type AdoptSuggestion, agentLogin, probeAgent } from "./lead.ts";
 import { pickAgentItem } from "./relay-main.ts";
 import { AGENT_ITEM_PREFIX } from "./store.ts";
-import { heartbeatPath, pidPath, readHeartbeat, readPid } from "./supervise.ts";
+import { heartbeatPath, isAlive, pidPath, readPid, stopLoop } from "./supervise.ts";
 
 export const ADOPT_HARNESSES = ["claude-sdk", "claude-code", "claude-desktop", "codex", "command"] as const;
 export type AdoptHarness = (typeof ADOPT_HARNESSES)[number];
@@ -390,30 +390,88 @@ async function writeIfChanged(ctx: Ctx, path: string, text: string): Promise<{ c
 }
 
 /**
- * F32: Teal Brick entries that already exist in the harness config (entry NAMES only). A run that would add a second
- * entry for a new card is refused unless --keep-existing says the owner wants both.
+ * F32: Teal Brick entries that already exist in the harness config — NAME, the card id when the entry names one
+ * (`--agent agt_…` in a stdio entry), and whether it is a remote (URL/OAuth) entry. No other value is kept.
  */
-export async function existingTealbrickEntries(harness: AdoptHarness, target: string): Promise<string[]> {
+export interface ExistingEntry {
+  name: string;
+  agt: string | null;
+  remote: boolean;
+}
+
+export async function existingTealbrickEntries(harness: AdoptHarness, target: string): Promise<ExistingEntry[]> {
   const text = await readExisting(target);
   if (text === null) return [];
-  const names = new Set<string>();
+  const out: ExistingEntry[] = [];
+  const agtOf = (s: string) => /--agent["',\s=]+(agt_[0-9A-HJKMNP-TV-Z]{26})/.exec(s)?.[1] ?? null;
   if (harness === "codex") {
     for (const m of text.matchAll(/^\s*\[mcp_servers\.("?)([^\]"]+)\1\]\s*$/gm)) {
       const name = m[2] as string;
       const start = (m.index ?? 0) + m[0].length;
       const next = text.slice(start).search(/^\s*\[/m);
       const body = text.slice(start, next < 0 ? undefined : start + next);
-      if (/tealbrick/i.test(name) || /tealbrick|\/mcp\b.*bridge|bridge.*\/mcp\b/i.test(body)) names.add(name);
+      if (/tealbrick/i.test(name) || /tealbrick|\/mcp\b.*bridge|bridge.*\/mcp\b/i.test(body)) out.push({ name, agt: agtOf(body), remote: /^\s*url\s*=/m.test(body) });
     }
   } else {
     try {
       const servers = (JSON.parse(text) as { mcpServers?: Record<string, { command?: unknown; args?: unknown; url?: unknown }> }).mcpServers ?? {};
-      for (const [name, v] of Object.entries(servers)) if (/tealbrick/i.test(name) || /tealbrick/i.test(JSON.stringify([v?.command, v?.args, v?.url]))) names.add(name);
+      for (const [name, v] of Object.entries(servers)) {
+        const flat = JSON.stringify([v?.command, v?.args, v?.url]);
+        if (/tealbrick/i.test(name) || /tealbrick/i.test(flat)) out.push({ name, agt: agtOf(flat), remote: typeof v?.url === "string" });
+      }
     } catch {
       /* not JSON: the wiring step reports it */
     }
   }
-  return [...names];
+  return out;
+}
+
+async function askLine(ctx: Ctx, question: string): Promise<string> {
+  const { createInterface } = await import("node:readline");
+  ctx.io.stderr.write(question);
+  const rl = createInterface({ input: ctx.io.stdin as unknown as NodeJS.ReadableStream, terminal: false });
+  const answer = await new Promise<string>((res) => {
+    rl.once("line", res);
+    rl.once("close", () => res(""));
+  });
+  rl.close();
+  return answer.trim();
+}
+
+/** Opt2 tools the persona refers to after the rewrites (code spans / mcp__ names), e.g. knowledge__document_create. */
+export async function referencedTools(files: string[]): Promise<string[]> {
+  const out = new Set<string>();
+  for (const f of files) {
+    for (const line of (await readFile(f, "utf8")).split("\n")) {
+      const r = rewriteLine(line);
+      for (const m of r.line.matchAll(/\b([a-z][a-z0-9-]{1,31})__([a-z][a-z0-9_]{1,63})\b/g)) out.add(`${m[1]}__${m[2]}`);
+    }
+  }
+  return [...out];
+}
+
+/** write ops among the rewrite targets (the table's opt2 names that change data) */
+const WRITE_TOOLS = new Set(["knowledge__document_create", "knowledge__document_update", "knowledge__collection_create", "connect__buzz_post"]);
+
+/**
+ * C106a: the grant SUGGESTION sent with the device request — read for every Teal Brick product the agent uses (Connect
+ * always, for its inbox) and the write ops its persona needs. Write ops are never pre-approved: the owner ticks them.
+ */
+export function adoptSuggestion(tools: string[], plan: Pick<AdoptPlan, "serve" | "buzzChannels">): AdoptSuggestion {
+  const products = new Map<string, Set<string>>();
+  const use = (p: string) => products.get(p) ?? products.set(p, new Set()).get(p) ?? new Set<string>();
+  if (plan.serve) use("connect");
+  for (const t of tools) {
+    const [p, op] = t.split("__") as [string, string];
+    const ops = use(p);
+    if (WRITE_TOOLS.has(t)) ops.add(op);
+  }
+  const grants = [...products.entries()].slice(0, 16).map(([product, writes]) => ({ product, crud: ["read" as const], ...(writes.size ? { operations: [...writes] } : {}) }));
+  return {
+    grants,
+    ...(plan.buzzChannels.length ? { channel: { kind: "buzz_channel" as const, id: plan.buzzChannels[0] as string } } : plan.serve ? { channel: { kind: "connect_inbox" as const } } : {}),
+    wake: plan.serve ? "serve" : "none",
+  };
 }
 
 /** `tealbrick adopt` */
@@ -424,8 +482,17 @@ export const adopt: Handler = async (ctx) => {
   const d = await detect(ctx.io.env, ctx.cwd(), { ...(ctx.v.harness ? { harness: String(ctx.v.harness) } : {}), ...(ctx.v["from-v1"] ? { fromV1: resolve(ctx.cwd(), String(ctx.v["from-v1"])) } : {}), ...(ctx.v.persona ? { persona: String(ctx.v.persona) } : {}) });
   if (!d.harness.chosen) {
     const why: Record<string, string> = { codex: "~/.codex/config.toml found", "claude-desktop": "Claude Desktop config found", "claude-code": "`claude` on PATH" };
-    throw usageError([d.harness.reason, ...d.harness.candidates.map((c) => `  --harness ${c.padEnd(14)} ${why[c] ?? ""}`), "  --harness claude-sdk      a Claude Agent SDK agent (tealbrick agent serve)"].join("\n"));
+    const choices: AdoptHarness[] = [...d.harness.candidates, ...(d.harness.candidates.includes("claude-sdk") ? [] : (["claude-sdk"] as AdoptHarness[]))];
+    // F31: in a terminal, ask; otherwise refuse with one line per choice
+    if (ctx.io.stdin.isTTY === true && ctx.g.yes !== true && !ctx.g.json) {
+      ctx.say([d.harness.reason.replace(": pass --harness", ""), ...choices.map((c, i) => `  ${i + 1}) ${c.padEnd(14)} ${why[c] ?? "a Claude Agent SDK agent (tealbrick agent serve)"}`)].join("\n"));
+      const pick = await askLine(ctx, `Which harness? [1-${choices.length}] `);
+      const n = Number(pick);
+      if (!Number.isInteger(n) || n < 1 || n > choices.length) throw usageError("no harness chosen");
+      d.harness = { chosen: choices[n - 1] as AdoptHarness, candidates: choices, reason: "chosen in the terminal" };
+    } else throw usageError([d.harness.reason, ...choices.map((c) => `  --harness ${c.padEnd(14)} ${why[c] ?? "a Claude Agent SDK agent (tealbrick agent serve)"}`)].join("\n"));
   }
+  if (!d.harness.chosen) throw usageError("no harness chosen");
   const harness = d.harness.chosen;
   const name = String(ctx.v.name ?? d.v1?.agentName ?? "").trim();
   if (!name) throw usageError("pass --name <card name> (no v1 agent name found)");
@@ -446,28 +513,38 @@ export const adopt: Handler = async (ctx) => {
     });
   const plan: AdoptPlan = { name, purpose: ctx.v.purpose ? String(ctx.v.purpose) : null, harness, detection: d, serve, wake, buzzChannels };
   const prior = await findState(ctx, name, harness);
-  // F32: the target config and the Teal Brick entries it already has
+  // F32: the target config and the Teal Brick entries it already has. One existing entry → adopt REUSES it: the same
+  // entry name and, when known, the same card (no second entry, no second card).
   const target = harness === "codex" ? join(home, ".codex", "config.toml") : harness === "claude-desktop" ? desktopConfigPath(ctx) : null;
-  const existing = target ? (await existingTealbrickEntries(harness, target)).filter((n) => !(prior && n === "tealbrick")) : [];
+  const existing = target ? await existingTealbrickEntries(harness, target) : [];
+  const reuse = existing.length === 1 ? existing[0] : undefined;
+  const entryName = reuse?.name ?? "tealbrick";
+  const reuseCard = prior?.state.agt ?? ctx.g.agent ?? reuse?.agt ?? null;
   const dirFor = (agt: string) => join(adoptRoot(ctx), agt);
-  const planned = [...(serve ? ["<adopt>/serve.json"] : []), ...(d.persona.files.length ? ["<adopt>/persona/persona.md"] : []), ...(harness === "claude-code" || harness === "claude-desktop" || harness === "codex" ? [`${target ?? `${harness} MCP config`} (entry "tealbrick")`] : [])];
-  const text = [planText(plan, planned), ...existing.map((n) => `  EXISTING       ${target}: Teal Brick entry "${n}" — a real run adds a SECOND entry and a new card (pass --keep-existing to allow, or remove it first)`)].join("\n");
+  const planned = [...(serve ? ["<adopt>/serve.json"] : []), ...(d.persona.files.length ? ["<adopt>/persona/persona.md"] : []), ...(harness === "claude-code" || harness === "claude-desktop" || harness === "codex" ? [`${target ?? `${harness} MCP config`} (entry "${entryName}")`] : [])];
+  const existingLines = existing.map((e) => `  EXISTING       ${target}: Teal Brick entry "${e.name}" (${e.remote ? "remote/OAuth" : "local relay"}${e.agt ? `, card ${e.agt}` : ""})${reuse ? ` → adopt REUSES it${reuseCard ? ` and card ${reuseCard}` : " (card unknown: pass --agent <agt_…> to keep the same card)"}` : ""}`);
+  if (existing.length > 1) existingLines.push(`  CHOOSE         several Teal Brick entries: remove the ones you do not need, or pass --keep-existing to add "tealbrick" next to them`);
+  const text = [planText(plan, planned), ...existingLines].join("\n");
 
   if (ctx.v["dry-run"] === true) {
-    ctx.emit({ dryRun: true, plan: { ...plan, files: planned }, existing: prior ? { agent: prior.state.agt, connection: prior.state.con } : null, existingEntries: existing, target }, `${text}\n\n--dry-run: nothing was written.`);
+    ctx.emit({ dryRun: true, plan: { ...plan, files: planned }, existing: prior ? { agent: prior.state.agt, connection: prior.state.con } : null, existingEntries: existing, target, entry: entryName, card: reuseCard }, `${text}\n\n--dry-run: nothing was written.`);
     return;
   }
   ctx.say(text);
-  if (existing.length && ctx.v["keep-existing"] !== true) throw new CliError(EXIT.validation, "existing_entry", `${target} already has a Teal Brick entry (${existing.join(", ")}); remove it first or pass --keep-existing`);
+  if (existing.length > 1 && ctx.v["keep-existing"] !== true) throw new CliError(EXIT.validation, "existing_entry", `${target} has several Teal Brick entries (${existing.map((e) => e.name).join(", ")}); remove the ones you do not need or pass --keep-existing`);
+  if (reuse && !reuseCard && ctx.v["keep-existing"] !== true) throw new CliError(EXIT.validation, "existing_entry", `${target} has the Teal Brick entry "${reuse.name}" for a card adopt cannot see; pass --agent <agt_…> (owner: tealbrick agents export) to keep that card, or --keep-existing for a new card`);
   if (ctx.v.yes !== true && !(await confirm(ctx, "Go ahead? This asks the owner for ONE approval in Portal."))) throw new CliError(EXIT.usage, "cancelled", "adopt cancelled; nothing was written");
 
   // §10 / §4: re-use a valid connection; otherwise ONE device flow for the card (same card id on a re-run)
   let item = prior ? await pickAgentItem(ctx.store(), prior.state.con).catch(() => null) : null;
+  // F40: "reused" means the CONNECTION was reused (no device flow), not that adopt ran before
+  const connectionReused = !!item;
   if (!item) {
     const captured: { connections?: { con: string; agt: string }[] }[] = [];
-    const sub: Ctx = { ...ctx, v: { ...ctx.v, ...(prior ? { create: undefined } : { create: true }), name, ...(plan.purpose ? { purpose: plan.purpose } : {}) }, g: { ...ctx.g, agents: prior ? [prior.state.agt] : [], agent: prior?.state.agt }, emit: (r) => void captured.push(r as never) };
-    if (prior) delete (sub.v as Record<string, unknown>).create;
-    await agentLogin(sub);
+    const card = ctx.v["keep-existing"] === true && !prior && !ctx.g.agent ? null : reuseCard;
+    const sub: Ctx = { ...ctx, v: { ...ctx.v, ...(card ? {} : { create: true }), name, ...(plan.purpose ? { purpose: plan.purpose } : {}) }, g: { ...ctx.g, agents: card ? [card] : [], agent: card ?? undefined }, emit: (r) => void captured.push(r as never) };
+    if (card) delete (sub.v as Record<string, unknown>).create;
+    await agentLogin(sub, { adopt: adoptSuggestion(await referencedTools(d.persona.files), plan) });
     const con = captured.flatMap((c) => c.connections ?? [])[0]?.con;
     if (!con) throw new CliError(EXIT.unexpected, "internal", "the device flow returned no connection");
     item = await pickAgentItem(ctx.store(), con);
@@ -496,7 +573,8 @@ export const adopt: Handler = async (ctx) => {
     const cp = await planConnect(sub, harness);
     if (!cp.target) throw new CliError(EXIT.unexpected, "internal", `no config path for ${harness}`);
     const old = await readExisting(cp.target);
-    const next = cp.toml ? mergeTomlConfig(old, cp.toml, cp.target) : mergeJsonConfig(old, cp.entry as Record<string, unknown>, cp.target);
+    const name2 = ctx.v["keep-existing"] === true && existing.length > 1 ? "tealbrick" : entryName;
+    const next = cp.toml ? mergeTomlConfig(old, cp.toml, cp.target, name2) : mergeJsonConfig(old, cp.entry as Record<string, unknown>, cp.target, name2);
     const w = await writeIfChanged(ctx, cp.target, next);
     const known = state.wired.find((x) => x.target === cp.target);
     if (w.changed) {
@@ -549,16 +627,7 @@ export const adopt: Handler = async (ctx) => {
   let started: { pid: number | null; log: string } | null = null;
   if (ctx.v.start === true && state.serve) {
     const held = await readPid(pidPath(ctx.configDir(), state.con));
-    let running = false;
-    if (held) {
-      try {
-        process.kill(held.pid, 0);
-        running = true;
-      } catch (e) {
-        running = (e as NodeJS.ErrnoException).code === "EPERM";
-      }
-    }
-    if (!running) {
+    if (!held || !isAlive(held.pid)) {
       const { openSync } = await import("node:fs");
       const { spawn } = await import("node:child_process");
       const log = join(adir, "serve.log");
@@ -576,8 +645,10 @@ export const adopt: Handler = async (ctx) => {
     agent: item.agt,
     connection: item.con,
     harness,
-    reused: !!prior,
+    reused: connectionReused,
+    sameCard: !!prior,
     probe,
+    toolsReady: (probe.tools ?? 0) > 0,
     changed: changes,
     backups: state.wired.filter((x) => x.backup).map((x) => x.backup),
     personaReview,
@@ -588,8 +659,8 @@ export const adopt: Handler = async (ctx) => {
   ctx.emit(
     report,
     [
-      `adopted ${item.agt} (${item.con}) — ${prior ? "re-run, connection reused" : "new connection"}`,
-      `bridge ${probe.state}, tools ${probe.tools ?? "-"}`,
+      `adopted ${item.agt} (${item.con}) — ${connectionReused ? "connection reused" : prior ? "same card, NEW connection" : "new card and connection"}`,
+      `bridge ${probe.state}, tools ${probe.tools ?? "-"}${probe.tools === 0 ? " — NO TOOLS: the approval granted no operations (owner: tick the grants on the card)" : ""}`,
       changes.length ? `changed: ${changes.join(", ")}` : "nothing changed (already adopted)",
       ...(report.backups.length ? [`backups: ${report.backups.join(", ")}`] : []),
       ...(personaReview.length ? ["review these persona lines (tool or channel references):", ...personaReview.map((l) => `  ${l}`)] : []),
@@ -608,23 +679,9 @@ async function adoptUndo(ctx: Ctx): Promise<void> {
   const left: string[] = [];
   // stop the serve loop of THIS connection via its own pidfile (never by name)
   const pf = pidPath(ctx.configDir(), state.con);
-  const holder = await readPid(pf);
-  if (holder) {
-    // L20: signal only when the heartbeat of THIS connection names the same pid and is recent (a stale pidfile may
-    // name a pid the OS gave to an unrelated process)
-    const hb = await readHeartbeat(heartbeatPath(ctx.configDir(), state.con));
-    const recent = hb && Date.parse(hb.since) > ctx.now() - 15 * 60_000;
-    if (hb && hb.pid === holder.pid && recent) {
-      try {
-        process.kill(holder.pid, "SIGTERM");
-        done.push(`stopped agent serve (pid ${holder.pid})`);
-      } catch {
-        /* not running */
-      }
-    } else if (holder.role === "supervisor") left.push(`agent serve supervisor pid ${holder.pid}: not confirmed by a recent heartbeat; stop it yourself if it still runs`);
-    await rm(pf, { force: true });
-    await rm(heartbeatPath(ctx.configDir(), state.con), { force: true });
-  }
+  const stop = await stopLoop({ pidfile: pf, heartbeat: heartbeatPath(ctx.configDir(), state.con), nowMs: ctx.now() });
+  if (stop.stopped) done.push(`stopped agent serve (pid ${stop.stopped})`);
+  if (stop.left) left.push(stop.left);
   for (const w of state.wired) {
     const now = await readExisting(w.target);
     const unchanged = now !== null && digestOf(now) === w.digest;
@@ -648,6 +705,7 @@ async function adoptUndo(ctx: Ctx): Promise<void> {
     state.serve = null;
     await writePrivate(join(dir, "adopt.json"), `${JSON.stringify({ ...state, undone: new Date(ctx.now()).toISOString() }, null, 2)}\n`);
   }
-  ctx.emit({ undone: state.agt, connection: state.con, done, left }, [...done, ...left.map((l) => `left: ${l}`), "Owner: revoke the connection in Portal → the agent card → Connections."].join("\n"));
+  // F39: no agent-side self-revoke exists yet (Core connections.revoke is browser-only): name the exact connection
+  ctx.emit({ undone: state.agt, connection: state.con, revokeNeeded: true, done, left }, [...done, ...left.map((l) => `left: ${l}`), `Owner: revoke connection ${state.con} of agent ${state.agt} in Portal → the agent card → Connections (the local key is gone; the server connection stays valid until then).`].join("\n"));
 }
 

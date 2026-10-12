@@ -137,34 +137,39 @@ export function scanToml(text: string): Stmt[] {
   return stmts;
 }
 
-const TABLE = ["mcp_servers", "tealbrick"];
+const DEFAULT_ENTRY = "tealbrick";
 const startsWith = (path: string[], prefix: string[]): boolean => prefix.every((p, i) => path[i] === p);
 const sameLength = (path: string[], other: string[]): boolean => path.length === other.length && startsWith(path, other);
 
-/** Replace `[mcp_servers.tealbrick]` with `bodyLines`, or append it. Throws TomlError when it cannot be done cleanly. */
-export function upsertMcpTable(text: string, bodyLines: string[]): string {
+/**
+ * Replace `[mcp_servers.<entry>]` (default `tealbrick`) with `bodyLines`, or append it. Throws TomlError when it cannot
+ * be done cleanly. `entry` must be a bare TOML key ([A-Za-z0-9_-]).
+ */
+export function upsertMcpTable(text: string, bodyLines: string[], entry: string = DEFAULT_ENTRY): string {
+  if (!/^[A-Za-z0-9_-]{1,64}$/.test(entry)) throw new TomlError(`entry name ${entry} is not a bare key`);
+  const TABLE = ["mcp_servers", entry];
   const stmts = scanToml(text);
   const headers = stmts.filter((s) => s.kind === "header");
   const main = headers.filter((h) => !h.array && sameLength(h.path, TABLE));
   for (const s of stmts) {
-    if (s.kind === "header" && s.array && startsWith(s.path, TABLE)) throw new TomlError("an array of tables named mcp_servers.tealbrick exists");
+    if (s.kind === "header" && s.array && startsWith(s.path, TABLE)) throw new TomlError(`an array of tables named mcp_servers.${entry} exists`);
     if (s.kind === "header" && !s.array && startsWith(s.path, TABLE) && s.path.length > TABLE.length) {
       throw new TomlError(`a sub-table [${s.path.join(".")}] exists; edit it by hand`);
     }
     if (s.kind === "kv" && startsWith(s.path, TABLE) && !startsWith(s.table, TABLE)) {
-      throw new TomlError("mcp_servers.tealbrick is defined with dotted or inline keys; edit it by hand");
+      throw new TomlError(`mcp_servers.${entry} is defined with dotted or inline keys; edit it by hand`);
     }
     if (s.kind === "kv" && s.table.length === 0 && s.path[0] === "mcp_servers") {
       throw new TomlError("mcp_servers is defined with dotted or inline keys at the top level; edit it by hand");
     }
-    if (s.kind === "kv" && sameLength(s.table, ["mcp_servers"]) && s.path[1] === "tealbrick") {
-      throw new TomlError("mcp_servers.tealbrick is defined inside [mcp_servers]; edit it by hand");
+    if (s.kind === "kv" && sameLength(s.table, ["mcp_servers"]) && s.path[1] === entry) {
+      throw new TomlError(`mcp_servers.${entry} is defined inside [mcp_servers]; edit it by hand`);
     }
   }
-  if (main.length > 1) throw new TomlError("[mcp_servers.tealbrick] appears more than once");
+  if (main.length > 1) throw new TomlError(`[mcp_servers.${entry}] appears more than once`);
 
   const rows = text.length === 0 ? [] : text.split("\n");
-  const header = ["[mcp_servers.tealbrick]", ...bodyLines];
+  const header = [`[mcp_servers.${entry}]`, ...bodyLines];
   const found = main[0];
   if (!found) {
     const base = text.length === 0 ? [] : text.endsWith("\n") ? rows.slice(0, -1) : rows;
