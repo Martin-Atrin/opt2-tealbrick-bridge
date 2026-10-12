@@ -29,6 +29,8 @@ class FakeEvolution {
   /** the claim is recorded but its answer is lost */
   loseClaimAnswer = false;
   dueRefused: string | null = null;
+  /** Evolution 0.2: the Kanban issue it opened for the claimed run (null = Kanban down or absent) */
+  kanbanIssueId: string | null = "iss_01HRUNISSUE";
   dueCalls = 0;
 
   async call(runner: string, name: string, args: Record<string, unknown>, meta?: Record<string, unknown>): Promise<McpToolResult> {
@@ -45,7 +47,7 @@ class FakeEvolution {
       if (this.claims.has(occ)) return { structuredContent: { claimed: false, reason: "already_claimed" } };
       this.claims.set(occ, runner);
       if (this.loseClaimAnswer) throw new Error("connection reset");
-      return { structuredContent: { claimed: true, job: { occurrence: occ, workflowId: job.workflowId, version: job.version, instruction: "Do the weekly report.", steps: ["read", "write"], allowed: ["kanban__issue_create"], deadline: "2026-10-12T12:00:00Z" } } };
+      return { structuredContent: { claimed: true, job: { occurrence: occ, workflowId: job.workflowId, version: job.version, instruction: "Do the weekly report.", steps: ["read", "write"], allowed: ["kanban__issue_comment"], deadline: "2026-10-12T12:00:00Z", kanbanIssueId: this.kanbanIssueId } } };
     }
     if (name === "evolution__routine_report") {
       if (this.failReports > 0) {
@@ -135,8 +137,24 @@ describe("agent serve: routines poll mode (C83 G10)", () => {
     assert.deepEqual(statuses(srv, OCC(1)), ["dispatched", "completed"]);
     assert.equal(srv.reports.at(-1)?.summary, "Report written to Kanban issue KAN-7.");
     assert.match(r.prompts[0] as string, /evolution__workflow_get \{"id": "wfl_01HWEEKLY"\}/);
-    assert.match(r.prompts[0] as string, /kanban__issue_create/);
+    assert.match(r.prompts[0] as string, /kanban__issue_comment/);
     assert.equal(r.state().routineRuns?.[OCC(1)]?.s, "reported");
+  });
+
+  it("Evolution 0.2: the prompt names the run's own Kanban issue; with kanbanIssueId null it says nothing about Kanban", async () => {
+    const srv = new FakeEvolution();
+    srv.jobs.push(job(1), job(2));
+    const r = runner("m1", srv, { polls: 2 });
+    srv.call = ((orig) => async (runner: string, name: string, args: Record<string, unknown>, meta?: Record<string, unknown>) => {
+      if (name === "evolution__routine_claim" && args.occurrence === OCC(2)) srv.kanbanIssueId = null;
+      return orig(runner, name, args, meta);
+    })(srv.call.bind(srv));
+    await r.done;
+    assert.equal(r.prompts.length, 2);
+    assert.match(r.prompts[0] as string, /already has Kanban issue iss_01HRUNISSUE assigned to you; add comments there; do not create another issue\./);
+    // the runner's own text says nothing about Kanban (the job's allowed-op list may still name kanban ops)
+    const head = (r.prompts[1] as string).split("\n{")[0] as string;
+    assert.doesNotMatch(head, /kanban/i, "no Kanban text when Evolution opened no issue");
   });
 
   it("R2: two runners for the same agent → one claims, the other gets already_claimed; one turn in total", async () => {

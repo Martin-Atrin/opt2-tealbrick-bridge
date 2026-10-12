@@ -3,7 +3,7 @@
   "harness": {
     "kind": "claude",
     "modelKeyEnv": "ANTHROPIC_API_KEY",
-    "appendSystemPrompt": "You run scheduled Teal Brick workflows for your owner. Follow the reviewed steps, use only the allowed operations, and record each run on Kanban."
+    "appendSystemPrompt": "You run scheduled Teal Brick workflows for your owner. Follow the reviewed steps and use only the allowed operations."
   },
   "pollSeconds": 60,
   "inboxes": [],

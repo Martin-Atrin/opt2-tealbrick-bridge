@@ -177,7 +177,9 @@ export function routinePrompt(spec: RoutineSpec, job: Record<string, unknown>, t
   const head = [
     `Scheduled run of workflow ${title ? `"${title}" ` : ""}${wf} version ${String(job.version ?? "?")} (occurrence ${String(job.occurrence ?? "")}${job.deadline ? `, finish before ${String(job.deadline)}` : ""}).`,
     `Read ${product}__workflow_get {"id": "${wf}"} first. You may call only the allowed operations below; the bridge blocks every other one.`,
-    "Write the run to Kanban under your own name (one issue per run), then stop. Do not start another run of this workflow yourself.",
+    // Evolution 0.2 opens ONE Kanban issue per claimed run and returns its id; null (Kanban down/absent) → no Kanban text
+    ...(typeof job.kanbanIssueId === "string" && job.kanbanIssueId ? [`This run already has Kanban issue ${job.kanbanIssueId} assigned to you; add comments there; do not create another issue.`] : []),
+    "When the steps are done, stop. Do not start another run of this workflow yourself.",
     "",
   ].join("\n");
   let body = JSON.stringify({ instruction: job.instruction, steps: job.steps, allowed: job.allowed }, null, 2);
