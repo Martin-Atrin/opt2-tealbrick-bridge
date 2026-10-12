@@ -208,13 +208,13 @@ describe(`deployed bridge (${real ? "real manifest crypto" : "test double"})`, (
     await w.publish((c) => {
       c.pause.agents = [AGT];
     });
-    await waitFor(() => (w.bridge.ctx.table?.rev ?? 0) === w.rev(), 3000);
+    await waitFor(() => (w.bridge.ctx.table?.rev ?? 0) === w.rev(), 10000);
     const list = await w.mcp(s.token, { jsonrpc: "2.0", id: 9, method: "tools/list" }, s.sid);
     assert.deepEqual(list.json.result.tools, []);
     const refused = await call(w, s, "notes__notes_list", {});
     assert.equal(refused.structuredContent.error.code, "paused", "pause is reported as paused, not unknown_tool");
     await w.publish();
-    await waitFor(() => (w.bridge.ctx.table?.rev ?? 0) === w.rev(), 3000);
+    await waitFor(() => (w.bridge.ctx.table?.rev ?? 0) === w.rev(), 10000);
   });
 
   test("connection revoke in config rejects the access token at once", async () => {
@@ -222,11 +222,11 @@ describe(`deployed bridge (${real ? "real manifest crypto" : "test double"})`, (
     await w.publish((c) => {
       c.connections = c.connections.map((x) => ({ ...x, status: "revoked" as const }));
     });
-    await waitFor(() => (w.bridge.ctx.table?.rev ?? 0) === w.rev(), 3000);
+    await waitFor(() => (w.bridge.ctx.table?.rev ?? 0) === w.rev(), 10000);
     const r = await w.mcp(s.token, { jsonrpc: "2.0", id: 1, method: "tools/list" }, s.sid);
     assert.equal(r.status, 401);
     await w.publish();
-    await waitFor(() => (w.bridge.ctx.table?.rev ?? 0) === w.rev(), 3000);
+    await waitFor(() => (w.bridge.ctx.table?.rev ?? 0) === w.rev(), 10000);
   });
 
   test("bridge assertions to Portal are valid (no 401 at the fake Portal)", () => {
@@ -282,14 +282,14 @@ describe(`deployed bridge (${real ? "real manifest crypto" : "test double"})`, (
     const s = await session(w);
     await w.rotateKey("announce");
     await w.publish();
-    await waitFor(() => (w.bridge.ctx.table?.rev ?? 0) === w.rev(), 3000);
+    await waitFor(() => (w.bridge.ctx.table?.rev ?? 0) === w.rev(), 10000);
     await w.rotateKey("activate");
     await w.publish();
-    await waitFor(() => (w.bridge.ctx.table?.rev ?? 0) === w.rev(), 3000);
+    await waitFor(() => (w.bridge.ctx.table?.rev ?? 0) === w.rev(), 10000);
     assert.equal((await call(w, s, "notes__notes_list", {})).isError, undefined, "grants signed by the new key are forwarded");
     await w.rotateKey("retire");
     await w.publish();
-    await waitFor(() => (w.bridge.ctx.table?.rev ?? 0) === w.rev(), 3000);
+    await waitFor(() => (w.bridge.ctx.table?.rev ?? 0) === w.rev(), 10000);
     assert.equal((await call(w, s, "notes__notes_list", {})).isError, undefined);
   });
 

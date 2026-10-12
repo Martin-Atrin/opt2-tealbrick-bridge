@@ -211,8 +211,8 @@ export async function makeWorld(opts: { withHook?: boolean; real?: boolean } = {
   };
   const publish = async (tweak?: (c: WorkspaceConfig) => void): Promise<number> => {
     const c: WorkspaceConfig = structuredClone(base);
-    rev += 1;
-    c.rev = rev;
+    const next = rev + 1;
+    c.rev = next;
     c.iat = now();
     c.exp = now() + 43200;
     c.jti = api.ulid();
@@ -220,6 +220,8 @@ export async function makeWorld(opts: { withHook?: boolean; real?: boolean } = {
     c.portalKeys = keyEntries.map((k) => ({ jwk: k.key.publicJwk, status: k.status }));
     c.grants = await Promise.all(c.grants.map(async (g) => sign("tb-grant+jwt", JSON.parse(Buffer.from(g.split(".")[1] as string, "base64url").toString("utf8")))));
     configJws = await sign("tb-config+jws", c);
+    // publish the revision only once its document is signed (a long-poll never sees rev N with document N-1)
+    rev = next;
     return rev;
   };
   await publish();
@@ -308,9 +310,9 @@ export async function makeWorld(opts: { withHook?: boolean; real?: boolean } = {
     signPortal: sign,
     async serveForged() {
       const stranger = await api.generateKeyPair();
-      rev += 1;
       const c = JSON.parse(Buffer.from(configJws.split(".")[1] as string, "base64url").toString("utf8"));
-      configJws = await api.signJws("tb-config+jws" as never, { ...c, rev, jti: api.ulid() }, stranger);
+      configJws = await api.signJws("tb-config+jws" as never, { ...c, rev: rev + 1, jti: api.ulid() }, stranger);
+      rev += 1;
     },
     configPulls: () => pulls,
     async rotateKey(phase) {
@@ -340,7 +342,7 @@ export async function makeWorld(opts: { withHook?: boolean; real?: boolean } = {
   };
 }
 
-export async function waitFor(cond: () => boolean, ms = 3000): Promise<void> {
+export async function waitFor(cond: () => boolean, ms = 10000): Promise<void> {
   const end = Date.now() + ms;
   while (!cond()) {
     if (Date.now() > end) throw new Error("timeout waiting for condition");

@@ -330,10 +330,12 @@ export async function runConfigLoop(ctx: BridgeContext, signal: AbortSignal): Pr
         const jws = (await res.text()).trim();
         ctx.lastPull = nowS();
         backoff = 15_000;
+        const sameRev = peekRev(jws) === ctx.table?.rev;
         const applied = await applyConfig(ctx, jws);
         // A refused document would be served again at once (`after` is unchanged): wait before the next pull
         // instead of re-pulling it in a tight loop. Pause/revoke in the next valid revision is still picked up ≤ ~6 s.
-        if (!applied) await sleep(jitter(REFUSED_PULL_DELAY_MS), signal);
+        // A document with the revision we already run is a no-op, not a refusal: only a short pause.
+        if (!applied) await sleep(sameRev ? 1_000 : jitter(REFUSED_PULL_DELAY_MS), signal);
         continue;
       }
       await res.body?.cancel().catch(() => undefined);
