@@ -46,6 +46,9 @@ export const OPTIONS = {
   "dry-run": { type: "boolean" },
   undo: { type: "boolean" },
   purge: { type: "boolean" },
+  inbox: { type: "string" },
+  "keep-existing": { type: "boolean" },
+  start: { type: "boolean" },
   /** agent serve: restart after a crash with backoff (own pidfile) */
   supervise: { type: "boolean" },
   /** internal: the process a supervisor started */

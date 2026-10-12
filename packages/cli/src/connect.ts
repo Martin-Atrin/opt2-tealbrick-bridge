@@ -89,7 +89,7 @@ function homeDir(ctx: Ctx): string {
   return h && h.length > 0 ? h : homedir();
 }
 
-function desktopConfigPath(ctx: Ctx): string {
+export function desktopConfigPath(ctx: Ctx): string {
   const home = homeDir(ctx);
   switch (ctx.platform()) {
     case "darwin":

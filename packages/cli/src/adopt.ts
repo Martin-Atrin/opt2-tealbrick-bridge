@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { chmod, copyFile, lstat, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
-import { confirm, mergeJsonConfig, mergeTomlConfig, planConnect, readExisting, writeAtomic } from "./connect.ts";
+import { confirm, desktopConfigPath, mergeJsonConfig, mergeTomlConfig, planConnect, readExisting, writeAtomic } from "./connect.ts";
 import type { Ctx, Handler } from "./ctx.ts";
 import { CliError, EXIT, usageError } from "./io.ts";
 import { agentLogin, probeAgent } from "./lead.ts";
@@ -22,13 +22,74 @@ import { heartbeatPath, pidPath, readHeartbeat, readPid } from "./supervise.ts";
 export const ADOPT_HARNESSES = ["claude-sdk", "claude-code", "claude-desktop", "codex", "command"] as const;
 export type AdoptHarness = (typeof ADOPT_HARNESSES)[number];
 
-/** credential-like by NAME (§2, F3): never opened, never copied, only listed */
+/**
+ * credential-like by NAME (§2, F3): never opened, never copied, only listed.
+ * F29 — the ONLY files adopt opens inside a v1 `.tealbrick/` folder are {@link V1_READ_ALLOWLIST}: the serve config
+ * (paths and settings, no secret values) and the agent's own pid files (an integer, existence check only). Every other
+ * entry of `.tealbrick/`, `traces/` and `sessions/` is listed by name and never opened.
+ */
+export const V1_READ_ALLOWLIST = [".tealbrick/native-serve.json", ".tealbrick/native-serve.pid", ".tealbrick/serve.pid", ".tealbrick/agent.pid"] as const;
 const CREDENTIAL_NAME = [/\.key$/i, /credentials/i, /-url\.txt$/i, /^portal-grants\.json$/i, /\.pem$/i, /^\.env/i, /token/i, /secret/i];
 const CREDENTIAL_DIR = new Set([".tealbrick", "traces", "sessions"]);
 /** v1 built-ins that a Teal Brick agent must not get by default (shell, sub-agents) (§6, F8) */
 const DROPPED_BUILTINS = new Set(["Bash", "BashOutput", "KillShell", "KillBash", "Agent", "Task", "NotebookEdit"]);
-/** §6: known v1 → opt2 tool names (extend as the mapping is confirmed; unknown references go to the review list) */
-export const TOOL_REWRITES: Readonly<Record<string, string>> = {};
+/**
+ * §6 v1 → opt2 tool names (from a real v1 recipe + persona, onboarding lead). Applied ONLY to whole identifiers inside a
+ * code span (`name`) or after `mcp__<server>__`, never inside words or prose; every rewrite is listed for review.
+ */
+export const TOOL_REWRITES: Readonly<Record<string, string>> = {
+  list_collections: "knowledge__collections_list",
+  create_collection: "knowledge__collection_create",
+  create_document: "knowledge__document_create",
+  get_document: "knowledge__document_get",
+  update_document: "knowledge__document_update",
+  search: "knowledge__documents_search",
+  memory_recall: "knowledge__recall",
+  memory_native_query: "knowledge__recall",
+  buzz_send_message: "connect__buzz_post",
+  buzz_read_messages: "connect__buzz_read",
+};
+/** v1 names with no opt2 agent tool, or a different contract: listed for review, never rewritten */
+export const TOOL_REVIEW_NOTES: Readonly<Record<string, string>> = {
+  delete_document: "no opt2 agent tool",
+  buzz_list_members: "no opt2 tool (connect__buzz_channels lists channels only)",
+  memory_native_query: "rewritten to knowledge__recall; engine-native query is knowledge__gb_query",
+  buzz_send_message: "rewritten to connect__buzz_post; opt2 mentions go in the text (nostr:npub…)",
+  buzz_read_messages: "rewritten to connect__buzz_read; it needs a channel",
+};
+
+/** effects of one v1 MCP server: `tools` as an array or an object keyed by tool name; `effects` as a string or a list */
+export function serverEffects(server: unknown): string[] {
+  const out: string[] = [];
+  const add = (e: unknown) => {
+    if (typeof e === "string") out.push(e);
+    else if (Array.isArray(e)) for (const x of e) if (typeof x === "string") out.push(x);
+  };
+  if (!server || typeof server !== "object") return out;
+  const sv = server as { effects?: unknown; tools?: unknown };
+  add(sv.effects);
+  const tools = sv.tools;
+  const list = Array.isArray(tools) ? tools : tools && typeof tools === "object" ? Object.values(tools as Record<string, unknown>) : [];
+  for (const t of list) if (t && typeof t === "object") add((t as { effects?: unknown }).effects);
+  return out;
+}
+
+const escapeRe = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+
+/** One line rewritten per the rule above; returns the new line and the rewrites made. */
+export function rewriteLine(line: string): { line: string; rewrites: string[] } {
+  const rewrites: string[] = [];
+  let out = line;
+  for (const [from, to] of Object.entries(TOOL_REWRITES)) {
+    const span = new RegExp(`\`${escapeRe(from)}\``, "g");
+    const mcp = new RegExp(`\\bmcp__[A-Za-z0-9_-]+__${escapeRe(from)}\\b`, "g");
+    if (span.test(out) || mcp.test(out)) {
+      out = out.replace(new RegExp(`\`${escapeRe(from)}\``, "g"), `\`${to}\``).replace(new RegExp(`\\bmcp__[A-Za-z0-9_-]+__${escapeRe(from)}\\b`, "g"), to);
+      rewrites.push(`${from} → ${to}${TOOL_REVIEW_NOTES[from] ? ` (${TOOL_REVIEW_NOTES[from]})` : ""}`);
+    }
+  }
+  return { line: out, rewrites };
+}
 const REVIEW_LINE = /\bmcp__[a-z0-9_]+|\b(publish|send|post|email|tweet)\b|\bnpub1[0-9a-z]{20,}|\bsk-[A-Za-z0-9]/i;
 
 export interface Detection {
@@ -83,7 +144,7 @@ async function credentialNames(dir: string): Promise<{ path: string; reason: str
       if (e.name === "node_modules" || e.name === ".git") continue;
       const p = join(d, e.name);
       if (e.isDirectory()) {
-        if (CREDENTIAL_DIR.has(e.name)) out.push({ path: p, reason: "credential/session folder (by name)" });
+        if (CREDENTIAL_DIR.has(e.name)) out.push({ path: p, reason: e.name === ".tealbrick" ? "v1 identity/credential folder: only the serve config and pid files are read (F29)" : "credential/session folder (by name)" });
         else await walk(p, depth + 1);
       } else if (CREDENTIAL_NAME.some((r) => r.test(e.name))) out.push({ path: p, reason: "credential-like file (by name)" });
     }
@@ -136,20 +197,36 @@ export async function detect(env: Record<string, string | undefined>, cwd: strin
         }
       } else d.settings.unknown.push("recipe (missing or outside $HOME)");
     }
+    // never crash on an unknown recipe shape (F28): each field is read on its own; a field that cannot be read is
+    // reported ("could not read recipe: <field>") and adopt continues
+    const field = (name: string, read: () => void) => {
+      try {
+        read();
+      } catch {
+        d.settings.unknown.push(`could not read recipe: ${name}`);
+      }
+    };
     d.settings.model = str(s.model);
     d.settings.effort = str(s.effort);
     d.settings.maxTurns = num(s.maxTurns);
     d.settings.maxBudgetUsd = num(s.maxBudgetUsd);
     d.settings.timeoutSeconds = num(s.timeoutSeconds);
     for (const k of Object.keys(s)) if (["tealbrickSdkConfig", "tealbrickCalls", "standingGrants", "contracts", "requireSubscription", "workspace"].includes(k)) d.settings.unknown.push(`${k} (v1-only; not carried over)`);
-    const tools = Array.isArray(s.defaultTools) ? s.defaultTools.filter((t): t is string => typeof t === "string") : [];
-    d.builtinTools.proposed = tools.filter((t) => !DROPPED_BUILTINS.has(t));
-    d.builtinTools.dropped = tools.filter((t) => DROPPED_BUILTINS.has(t));
-    for (const name of Object.keys((s.mcpServers as Record<string, unknown>) ?? {})) {
-      const t = (s.mcpServers as Record<string, { tools?: { effects?: string[] }[]; effects?: string[] }>)[name];
-      const effects = [...(t?.effects ?? []), ...(t?.tools ?? []).flatMap((x) => x.effects ?? [])];
+    field("defaultTools", () => {
+      const tools = Array.isArray(s.defaultTools) ? s.defaultTools.filter((t): t is string => typeof t === "string") : [];
+      d.builtinTools.proposed = tools.filter((t) => !DROPPED_BUILTINS.has(t));
+      d.builtinTools.dropped = tools.filter((t) => DROPPED_BUILTINS.has(t));
+    });
+    const servers = s.mcpServers && typeof s.mcpServers === "object" && !Array.isArray(s.mcpServers) ? (s.mcpServers as Record<string, unknown>) : {};
+    if (s.mcpServers !== undefined && servers !== s.mcpServers) d.settings.unknown.push("could not read recipe: mcpServers");
+    for (const name of Object.keys(servers)) {
+      let effects: string[] = [];
+      field(`mcpServers.${name}`, () => {
+        effects = serverEffects(servers[name]);
+      });
       const outward = effects.some((e) => e === "outward" || e === "money");
-      d.mcpServers.push({ name, reason: outward ? "has outward/money tools: use Teal Brick apps (grants, holds, Rules) instead" : "not carried over: agent serve wires only Teal Brick" });
+      const writes = effects.some((e) => e === "write" || e === "writes");
+      d.mcpServers.push({ name, reason: outward ? "has outward/money tools: use Teal Brick apps (grants, holds, Rules) instead" : `not carried over (${writes ? "writes" : "read-only"}): agent serve wires only Teal Brick` });
     }
     const instr = str(c.instructionsFile);
     if (instr) {
@@ -206,6 +283,8 @@ export interface AdoptPlan {
   detection: Detection;
   serve: boolean;
   wake: "mentions" | "all";
+  /** F30: Buzz channel ids to listen on (connect__buzz_read) */
+  buzzChannels: string[];
 }
 
 /** §3: the one-screen plan (names and paths only). */
@@ -224,7 +303,7 @@ export function planText(p: AdoptPlan, files: string[]): string {
     ...(d.builtinTools.proposed.length || d.builtinTools.dropped.length ? [`  built-in tools ${d.builtinTools.proposed.join(", ") || "none"}${d.builtinTools.dropped.length ? ` (dropped: ${d.builtinTools.dropped.join(", ")})` : ""}`] : []),
     ...d.mcpServers.map((m) => `  MCP not wired  ${m.name}: ${m.reason}`),
     `  connection     one owner approval in Portal (device flow); card "${p.name}"`,
-    `  inbox          ${p.serve ? `Connect channel inbox, wake: ${p.wake}` : "none (this harness runs itself)"}`,
+    `  inbox          ${p.serve ? `Connect channel inbox${p.buzzChannels.length ? ` + Buzz ${p.buzzChannels.join(", ")}` : " (bots only; add --inbox buzz:<channel> for Buzz)"}, wake: ${p.wake}` : "none (this harness runs itself)"}`,
     `  files to write ${files.join(", ") || "none"} (each existing file is backed up first)`,
     ...d.notCopied.slice(0, 20).map((x) => `  not copied     ${x.path} (${x.reason})`),
     ...(d.notCopied.length > 20 ? [`  not copied     … ${d.notCopied.length - 20} more`] : []),
@@ -280,13 +359,19 @@ async function writePrivate(path: string, text: string): Promise<void> {
 export async function buildPersona(files: string[], plan: Pick<AdoptPlan, "name" | "wake">): Promise<{ text: string; review: string[] }> {
   const parts: string[] = [];
   const review: string[] = [];
+  const reviewOnly = Object.keys(TOOL_REVIEW_NOTES).filter((k) => !(k in TOOL_REWRITES));
   for (const f of files) {
-    let t = await readFile(f, "utf8");
-    for (const [from, to] of Object.entries(TOOL_REWRITES)) t = t.split(from).join(to);
-    t.split("\n").forEach((line, i) => {
-      if (REVIEW_LINE.test(line)) review.push(`${basename(f)}:${i + 1}: ${line.trim().slice(0, 160)}`);
+    const lines = (await readFile(f, "utf8")).split("\n");
+    const outLines = lines.map((line, i) => {
+      const r = rewriteLine(line);
+      const where = `${basename(f)}:${i + 1}`;
+      for (const w of r.rewrites) review.push(`${where}: rewrote ${w}`);
+      const missing = reviewOnly.filter((k) => new RegExp(`\\b${k}\\b`).test(r.line));
+      if (missing.length) review.push(`${where}: ${missing.map((k) => `${k} (${TOOL_REVIEW_NOTES[k]})`).join("; ")}: ${r.line.trim().slice(0, 120)}`);
+      else if (!r.rewrites.length && REVIEW_LINE.test(r.line)) review.push(`${where}: ${r.line.trim().slice(0, 160)}`);
+      return r.line;
     });
-    parts.push(t.trim());
+    parts.push(outLines.join("\n").trim());
   }
   const header = [
     `<!-- adopted by tealbrick adopt for "${plan.name}" -->`,
@@ -304,13 +389,43 @@ async function writeIfChanged(ctx: Ctx, path: string, text: string): Promise<{ c
   return { changed: true, backup, created: old === null };
 }
 
+/**
+ * F32: Teal Brick entries that already exist in the harness config (entry NAMES only). A run that would add a second
+ * entry for a new card is refused unless --keep-existing says the owner wants both.
+ */
+export async function existingTealbrickEntries(harness: AdoptHarness, target: string): Promise<string[]> {
+  const text = await readExisting(target);
+  if (text === null) return [];
+  const names = new Set<string>();
+  if (harness === "codex") {
+    for (const m of text.matchAll(/^\s*\[mcp_servers\.("?)([^\]"]+)\1\]\s*$/gm)) {
+      const name = m[2] as string;
+      const start = (m.index ?? 0) + m[0].length;
+      const next = text.slice(start).search(/^\s*\[/m);
+      const body = text.slice(start, next < 0 ? undefined : start + next);
+      if (/tealbrick/i.test(name) || /tealbrick|\/mcp\b.*bridge|bridge.*\/mcp\b/i.test(body)) names.add(name);
+    }
+  } else {
+    try {
+      const servers = (JSON.parse(text) as { mcpServers?: Record<string, { command?: unknown; args?: unknown; url?: unknown }> }).mcpServers ?? {};
+      for (const [name, v] of Object.entries(servers)) if (/tealbrick/i.test(name) || /tealbrick/i.test(JSON.stringify([v?.command, v?.args, v?.url]))) names.add(name);
+    } catch {
+      /* not JSON: the wiring step reports it */
+    }
+  }
+  return [...names];
+}
+
 /** `tealbrick adopt` */
 export const adopt: Handler = async (ctx) => {
   if (ctx.v.undo === true) return adoptUndo(ctx);
   const home = ctx.io.env.HOME ?? "";
   if (!home) throw usageError("HOME is not set");
   const d = await detect(ctx.io.env, ctx.cwd(), { ...(ctx.v.harness ? { harness: String(ctx.v.harness) } : {}), ...(ctx.v["from-v1"] ? { fromV1: resolve(ctx.cwd(), String(ctx.v["from-v1"])) } : {}), ...(ctx.v.persona ? { persona: String(ctx.v.persona) } : {}) });
-  if (!d.harness.chosen) throw usageError(`${d.harness.reason}${d.harness.candidates.length ? ` (${d.harness.candidates.join(", ")})` : ""}`);
+  if (!d.harness.chosen) {
+    const why: Record<string, string> = { codex: "~/.codex/config.toml found", "claude-desktop": "Claude Desktop config found", "claude-code": "`claude` on PATH" };
+    throw usageError([d.harness.reason, ...d.harness.candidates.map((c) => `  --harness ${c.padEnd(14)} ${why[c] ?? ""}`), "  --harness claude-sdk      a Claude Agent SDK agent (tealbrick agent serve)"].join("\n"));
+  }
   const harness = d.harness.chosen;
   const name = String(ctx.v.name ?? d.v1?.agentName ?? "").trim();
   if (!name) throw usageError("pass --name <card name> (no v1 agent name found)");
@@ -319,17 +434,31 @@ export const adopt: Handler = async (ctx) => {
   const serveDefault = harness === "claude-sdk";
   const serve = ctx.v["no-serve"] === true ? false : ctx.v.serve === true ? true : serveDefault;
   if (serve && harness !== "claude-sdk") throw usageError("--serve (agent serve config) is for the claude-sdk harness in phase 1; other harnesses run themselves");
-  const plan: AdoptPlan = { name, purpose: ctx.v.purpose ? String(ctx.v.purpose) : null, harness, detection: d, serve, wake };
+  // F30: Buzz inboxes in addition to (or instead of) Connect's bot channel inbox
+  const buzzChannels = String(ctx.v.inbox ?? "")
+    .split(",")
+    .map((x) => x.trim())
+    .filter(Boolean)
+    .map((x) => {
+      const m = /^buzz:([A-Za-z0-9_-]{1,128})$/.exec(x);
+      if (!m) throw usageError(`--inbox takes buzz:<channel id> (comma-separated): ${x}`);
+      return m[1] as string;
+    });
+  const plan: AdoptPlan = { name, purpose: ctx.v.purpose ? String(ctx.v.purpose) : null, harness, detection: d, serve, wake, buzzChannels };
   const prior = await findState(ctx, name, harness);
+  // F32: the target config and the Teal Brick entries it already has
+  const target = harness === "codex" ? join(home, ".codex", "config.toml") : harness === "claude-desktop" ? desktopConfigPath(ctx) : null;
+  const existing = target ? (await existingTealbrickEntries(harness, target)).filter((n) => !(prior && n === "tealbrick")) : [];
   const dirFor = (agt: string) => join(adoptRoot(ctx), agt);
-  const planned = [...(serve ? ["<adopt>/serve.json"] : []), ...(d.persona.files.length ? ["<adopt>/persona/persona.md"] : []), ...(harness === "claude-code" || harness === "claude-desktop" || harness === "codex" ? [`${harness} MCP config (entry "tealbrick")`] : [])];
-  const text = planText(plan, planned);
+  const planned = [...(serve ? ["<adopt>/serve.json"] : []), ...(d.persona.files.length ? ["<adopt>/persona/persona.md"] : []), ...(harness === "claude-code" || harness === "claude-desktop" || harness === "codex" ? [`${target ?? `${harness} MCP config`} (entry "tealbrick")`] : [])];
+  const text = [planText(plan, planned), ...existing.map((n) => `  EXISTING       ${target}: Teal Brick entry "${n}" — a real run adds a SECOND entry and a new card (pass --keep-existing to allow, or remove it first)`)].join("\n");
 
   if (ctx.v["dry-run"] === true) {
-    ctx.emit({ dryRun: true, plan: { ...plan, files: planned }, existing: prior ? { agent: prior.state.agt, connection: prior.state.con } : null }, `${text}\n\n--dry-run: nothing was written.`);
+    ctx.emit({ dryRun: true, plan: { ...plan, files: planned }, existing: prior ? { agent: prior.state.agt, connection: prior.state.con } : null, existingEntries: existing, target }, `${text}\n\n--dry-run: nothing was written.`);
     return;
   }
   ctx.say(text);
+  if (existing.length && ctx.v["keep-existing"] !== true) throw new CliError(EXIT.validation, "existing_entry", `${target} already has a Teal Brick entry (${existing.join(", ")}); remove it first or pass --keep-existing`);
   if (ctx.v.yes !== true && !(await confirm(ctx, "Go ahead? This asks the owner for ONE approval in Portal."))) throw new CliError(EXIT.usage, "cancelled", "adopt cancelled; nothing was written");
 
   // §10 / §4: re-use a valid connection; otherwise ONE device flow for the card (same card id on a re-run)
@@ -390,7 +519,11 @@ export const adopt: Handler = async (ctx) => {
       ...(d.settings.timeoutSeconds && d.settings.timeoutSeconds >= 10 ? { turnTimeoutSeconds: Math.min(d.settings.timeoutSeconds, 86_400) } : {}),
       ...(d.builtinTools.proposed.length ? { builtinTools: d.builtinTools.proposed } : {}),
     };
-    const cfg = { format: "tealbrick.agent-serve/1", harness: harnessCfg, pollSeconds: 30, holds: true, inboxes: [{ tool: "connect__channel_inbox", cursor: { param: "sinceSeq", from: "nextSeq" }, id: "seq", wake }] };
+    const inboxes = [
+      { tool: "connect__channel_inbox", cursor: { param: "sinceSeq", from: "nextSeq" }, id: "seq", wake },
+      ...plan.buzzChannels.map((channel) => ({ tool: "connect__buzz_read", args: { channel }, cursor: { param: "since", from: "max:createdAt" }, items: "messages", id: "id", skipIf: { fromSelf: true }, wake })),
+    ];
+    const cfg = { format: "tealbrick.agent-serve/1", harness: harnessCfg, pollSeconds: 30, holds: true, inboxes };
     const text2 = `${JSON.stringify(cfg, null, 2)}\n`;
     const path = join(adir, "serve.json");
     if (state.serve?.digest !== digestOf(text2) || !existsSync(path)) {
@@ -400,8 +533,41 @@ export const adopt: Handler = async (ctx) => {
     state.serve = { path, digest: digestOf(text2) };
   }
 
-  state.updatedAt = new Date(ctx.now()).toISOString();
-  await writePrivate(join(adir, "adopt.json"), `${JSON.stringify(state, null, 2)}\n`);
+  // a no-op re-run writes nothing (not even a new timestamp)
+  const statePath = join(adir, "adopt.json");
+  const before = await readExisting(statePath);
+  const { updatedAt: _u, ...stable } = state;
+  const prevStable = before ? (({ updatedAt: _p, ...rest }) => rest)(JSON.parse(before) as AdoptState) : null;
+  if (!prevStable || JSON.stringify(prevStable) !== JSON.stringify(stable)) {
+    state.updatedAt = new Date(ctx.now()).toISOString();
+    await writePrivate(statePath, `${JSON.stringify(state, null, 2)}\n`);
+    if (before !== null) changes.push(statePath);
+  }
+
+  // F33: --start runs `agent serve --supervise` in the background (log next to the config); the connection's pidfile
+  // keeps it to one loop
+  let started: { pid: number | null; log: string } | null = null;
+  if (ctx.v.start === true && state.serve) {
+    const held = await readPid(pidPath(ctx.configDir(), state.con));
+    let running = false;
+    if (held) {
+      try {
+        process.kill(held.pid, 0);
+        running = true;
+      } catch (e) {
+        running = (e as NodeJS.ErrnoException).code === "EPERM";
+      }
+    }
+    if (!running) {
+      const { openSync } = await import("node:fs");
+      const { spawn } = await import("node:child_process");
+      const log = join(adir, "serve.log");
+      const fd = openSync(log, "a", 0o600);
+      const child = spawn(process.execPath, [process.argv[1] ?? "tealbrick", "agent", "serve", "--file", state.serve.path, "--agent", item.agt, "--supervise"], { detached: true, stdio: ["ignore", fd, fd], env: ctx.io.env as NodeJS.ProcessEnv });
+      child.unref();
+      started = { pid: child.pid ?? null, log };
+    }
+  }
 
   // §9 verify (reads only; writes need the owner's write grant)
   const probe = await probeAgent(ctx, item);
@@ -416,6 +582,7 @@ export const adopt: Handler = async (ctx) => {
     backups: state.wired.filter((x) => x.backup).map((x) => x.backup),
     personaReview,
     serve: serveCmd,
+    started,
     notCopied: d.notCopied.map((x) => x.path),
   };
   ctx.emit(
@@ -426,7 +593,7 @@ export const adopt: Handler = async (ctx) => {
       changes.length ? `changed: ${changes.join(", ")}` : "nothing changed (already adopted)",
       ...(report.backups.length ? [`backups: ${report.backups.join(", ")}`] : []),
       ...(personaReview.length ? ["review these persona lines (tool or channel references):", ...personaReview.map((l) => `  ${l}`)] : []),
-      ...(serveCmd ? [`run: ${serveCmd}`] : []),
+      ...(started ? [`started agent serve (supervisor pid ${started.pid ?? "?"}), log ${started.log}`] : serveCmd ? [`run: ${serveCmd}  (or re-run adopt with --start)`] : []),
       "test: ask the owner to send the agent a message in the Teal Brick inbox; writes need the owner's write grant.",
     ].join("\n"),
   );
