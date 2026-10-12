@@ -171,7 +171,19 @@ export class RateLimiter {
   }
 }
 
+/**
+ * Client address for per-client rate-limit buckets. Behind the provider's edge proxy every request comes from
+ * the proxy, so the socket address would put all clients in one bucket (one client could exhaust it for
+ * everyone). The edge APPENDS the client address to X-Forwarded-For, so the rightmost entry is the one the
+ * trusted proxy saw; entries to its left are client-supplied and ignored. Set TB_TRUST_PROXY=0 when the
+ * bridge is reached directly (own infrastructure without a proxy).
+ */
 export function clientIp(req: IncomingMessage): string {
+  if (process.env.TB_TRUST_PROXY !== "0") {
+    const xff = headerValue(req, "x-forwarded-for");
+    const last = xff?.split(",").map((s) => s.trim()).filter(Boolean).at(-1);
+    if (last && last.length <= 64) return last;
+  }
   return req.socket.remoteAddress ?? "unknown";
 }
 

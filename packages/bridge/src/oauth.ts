@@ -60,6 +60,10 @@ export class OAuthServer {
   private readonly dcrLimit = new RateLimiter(30);
   private readonly authorizeLimit = new RateLimiter(20);
   private readonly tokenLimit = new RateLimiter(60);
+  /** unverified token requests, per client address (so a forged `con` cannot drain a victim's bucket) */
+  private readonly tokenIpLimit = new RateLimiter(120);
+  /** pairing-code attempts per pending authorize request */
+  private readonly redeemLimit = new RateLimiter(5, 600_000);
   private readonly kek: { id: string; key: Uint8Array };
 
   constructor(ctx: BridgeContext, kek: { id: string; key: Uint8Array }) {
@@ -158,6 +162,7 @@ export class OAuthServer {
     const p = this.pending.get(rid);
     if (!p || p.exp <= nowS()) return htmlPage(res, 400, "Request expired", "<p>This sign-in request expired. Start again from your app.</p>");
     if (form.action === "portal") return this.toPortal(res, p);
+    if (!this.redeemLimit.take(rid)) return htmlPage(res, 429, "Too many attempts", "<p>Too many codes were tried for this request. Start again from your app.</p>");
     if (form.action === "paste") {
       const code = typeof form.code === "string" ? form.code.trim() : "";
       return this.redeem(res, code, p, false);
@@ -173,7 +178,13 @@ export class OAuthServer {
     if (!client || !redirectMatches(client.redirect_uris, redirectUri)) {
       return htmlPage(res, 400, "Unknown client", "<p>The app that sent you here is not registered with this bridge. Remove the connector and add it again.</p>");
     }
-    const fail = (error: string) => redirectWith(res, redirectUri, { error, ...(q.get("state") ? { state: q.get("state") as string } : {}), iss: this.issuer });
+    // Nothing redirects before the owner has completed a verified pairing: a request that fails a check gets an
+    // error page here, so the authorize endpoint can never be used to bounce a browser to a registered URL
+    // (DCR is open, so any https URL can be "registered"). The one redirect is the code after a verified flow.
+    const fail = (error: string) => {
+      this.ctx.log.warn("bridge.oauth.authorize_refused", { code: error });
+      htmlPage(res, 400, "Request not valid", `<p>This sign-in request is not valid (${esc(error)}). Start again from your app.</p>`);
+    };
     const state = q.get("state") ?? "";
     const challenge = q.get("code_challenge") ?? "";
     if (q.get("response_type") !== "code") return fail("unsupported_response_type");
@@ -290,6 +301,7 @@ export class OAuthServer {
 
   // ── token endpoint ──
   async token(req: IncomingMessage, res: ServerResponse): Promise<void> {
+    if (!this.tokenIpLimit.take(clientIp(req))) return oauthError(res, 429, "slow_down", "rate limited");
     const form = parseBody(await readBody(req, 16 * 1024), req.headers["content-type"]);
     const gt = form.grant_type;
     try {
@@ -342,7 +354,6 @@ export class OAuthServer {
     const peek = peekPayload<AgentAssertionClaims>(assertion);
     const con = peek?.con;
     if (!con) throw new BridgeError("invalid_grant");
-    if (!this.tokenLimit.take(con)) throw new BridgeError("rate_limited");
     const entry = t.connections.get(con);
     if (!entry) throw new BridgeError("connection_unknown");
     if (entry.method !== "key" || !entry.publicKey || entry.status !== "active") throw new BridgeError("invalid_grant");
@@ -360,6 +371,8 @@ export class OAuthServer {
     if (isRefusal(v) || v.claims.sub !== `tb:agt:${entry.agt}` || v.claims.con !== con) throw new BridgeError("invalid_grant");
     if (!t.agents.has(entry.agt)) throw new BridgeError("invalid_grant");
     if (this.assertionJtis.has(v.claims.jti)) throw new BridgeError("invalid_grant");
+    // per-connection bucket counts only VERIFIED assertions (an attacker cannot spend another agent's budget)
+    if (!this.tokenLimit.take(con)) throw new BridgeError("rate_limited");
     this.assertionJtis.set(v.claims.jti, v.claims.exp + 30);
     const out: TokenResponse = { access_token: await issueAccess(this.ctx, entry.agt, con, entry.gen), token_type: "Bearer", expires_in: 900 };
     sendJson(res, 200, out, { pragma: "no-cache" });
@@ -459,14 +472,14 @@ input{font:inherit;padding:.4rem;border:1px solid #9bb;border-radius:2px;width:1
 .warn{color:#7a1f3d;font-size:.85em;border:1px solid #7a1f3d;border-radius:2px;padding:0 .3rem}
 @media (prefers-color-scheme:dark){body{background:#0e1817;color:#dce9e7}h1{color:#5fc4bb}input{background:#14201f;color:#dce9e7}}`;
 
-export function htmlPage(res: ServerResponse, status: number, title: string, body: string, extraHeaders: Record<string, string> = {}, nonce?: string): void {
+export function htmlPage(res: ServerResponse, status: number, title: string, body: string, extraHeaders: Record<string, string> = {}, nonce?: string, formAction = "'self'"): void {
   const script = nonce ? ` 'nonce-${nonce}'` : "";
   res.writeHead(status, {
     "content-type": "text/html; charset=utf-8",
     "cache-control": "no-store",
     "x-frame-options": "DENY",
     "referrer-policy": "no-referrer",
-    "content-security-policy": `default-src 'none'; style-src 'unsafe-inline'; script-src${script || " 'none'"}; form-action *; frame-ancestors 'none'; base-uri 'none'`,
+    "content-security-policy": `default-src 'none'; style-src 'unsafe-inline'; script-src${script || " 'none'"}; form-action ${formAction}; frame-ancestors 'none'; base-uri 'none'`,
     ...extraHeaders,
   });
   res.end(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><style>${STYLE}</style></head><body><h1>${esc(title)}</h1>${body}</body></html>`);
@@ -483,5 +496,6 @@ export function autoPost(res: ServerResponse, action: string, fields: Record<str
     `<form id="f" method="post" action="${esc(action)}">${inputs}<noscript><button type="submit">Continue</button></noscript></form><script nonce="${nonce}">document.getElementById("f").submit()</script>`,
     {},
     nonce,
+    new URL(action).origin,
   );
 }

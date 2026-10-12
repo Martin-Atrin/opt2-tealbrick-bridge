@@ -13,7 +13,7 @@ import { isRefusal } from "./api.ts";
 import type { BridgeContext } from "./context.ts";
 import { esc, htmlPage } from "./oauth.ts";
 import type { AppRuntime } from "./table.ts";
-import { BridgeError, envelope, headerValue, nowS, RateLimiter, readBody, sendJson } from "./util.ts";
+import { BridgeError, clientIp, envelope, headerValue, nowS, RateLimiter, readBody, sendJson } from "./util.ts";
 
 const MAX_UI_BODY = 10 * 1024 * 1024;
 const MAX_PUBLIC_BODY = 1024 * 1024;
@@ -91,7 +91,8 @@ export class PersonSurfaces {
     if (!app || !route) return sendJson(res, 404, envelope("not_found", "not found", requestId));
     const method = route.purpose === "oauth_callback" ? "GET" : "POST";
     if (req.method !== method) return sendJson(res, 405, envelope("method_not_allowed", `${method} only`, requestId));
-    if (!this.publicLimit.take(`${app.entry.product}|${path}`)) return sendJson(res, 429, envelope("rate_limited", "rate limited", requestId));
+    // per route AND client: one sender cannot use up a webhook/callback route for everyone
+    if (!this.publicLimit.take(`${app.entry.product}|${path}|${clientIp(req)}`)) return sendJson(res, 429, envelope("rate_limited", "rate limited", requestId));
     const body = method === "POST" ? await readBody(req, MAX_PUBLIC_BODY) : undefined;
     return this.proxy(req, res, app, `/p/${app.entry.product}${path}${url.search}`, body, MAX_PUBLIC_BODY, false);
   }
@@ -175,7 +176,7 @@ export class PersonSurfaces {
     const cookieName = "tb_keys";
     const sid = parseCookies(headerValue(req, "cookie"))[cookieName];
     const session = sid ? this.keySessions.get(sid) : undefined;
-    const secure = this.ctx.publicUrl.startsWith("https:");
+    const secure = (this.ctx.keysUrl ?? this.ctx.publicUrl).startsWith("https:");
     if (req.method === "POST") {
       const form = new URLSearchParams((await readBody(req, 20 * 1024)).toString("utf8"));
       const ticket = form.get("ticket");

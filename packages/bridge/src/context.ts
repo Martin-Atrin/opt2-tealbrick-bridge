@@ -13,7 +13,7 @@ import type { Rejection, Table } from "./table.ts";
 import type { Logger } from "./util.ts";
 import { nowS } from "./util.ts";
 
-export const BRIDGE_VERSION = "0.1.10";
+export const BRIDGE_VERSION = "0.1.11";
 export const SDK_MAJORS = [1];
 
 /** The SDK major this bridge is built for; `sdkMajorServed` (manifest, C44) also serves the one before. */
@@ -26,6 +26,8 @@ export interface BridgeOptions {
   logger: Logger;
   portalUrl: string;
   publicUrl: string;
+  /** separate origin that serves ONLY the key page (C59): app UIs on the main origin can never script it */
+  keysUrl?: string | undefined;
   /** internal listener origin as apps reach it (e.g. http://bridge.railway.internal:8788) */
   internalUrl: string;
   form: "deployed" | "own_infra";
@@ -43,6 +45,7 @@ export class BridgeContext extends EventEmitter {
   readonly log: Logger;
   readonly portalUrl: string;
   readonly publicUrl: string;
+  readonly keysUrl: string | undefined;
   readonly internalUrl: string;
   readonly form: "deployed" | "own_infra";
   readonly fetch: typeof fetch;
@@ -65,6 +68,7 @@ export class BridgeContext extends EventEmitter {
     this.log = o.logger;
     this.portalUrl = o.portalUrl;
     this.publicUrl = o.publicUrl;
+    this.keysUrl = o.keysUrl;
     this.internalUrl = o.internalUrl;
     this.form = o.form;
     this.fetch = o.fetch ?? fetch;

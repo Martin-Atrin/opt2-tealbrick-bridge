@@ -152,7 +152,7 @@ export class StandaloneAdmin {
         const ref = this.ctx.bridgeRef;
         if (body.pur === "keys") {
           const ticket = await this.ctx.api.signJws(TYP.personTicket, { iss: ref, sub: iss, aud: ref, iat: now, exp: now + LIFETIME_S.ticketKeys, jti: this.ctx.api.ulid(), ws: t.ws, pur: "keys" }, id.key);
-          const out: AdminTicketResult = { ticket, url: `${this.ctx.publicUrl}/keys` };
+          const out: AdminTicketResult = { ticket, url: `${this.ctx.keysUrl ?? this.ctx.publicUrl}/keys` };
           return sendJson(res, 200, out);
         }
         if (body.pur === "launch" && typeof body.product === "string") {

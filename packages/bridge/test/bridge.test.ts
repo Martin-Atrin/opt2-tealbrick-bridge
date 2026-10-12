@@ -155,7 +155,7 @@ describe(`deployed bridge (${real ? "real manifest crypto" : "test double"})`, (
     // Browser rule: the ticket arrives by a CROSS-SITE form POST (Portal → bridge). A SameSite=Strict cookie set
     // on that response is NOT sent on a redirected follow-up GET of the same navigation. So the bridge must render
     // the form in the POST response itself; the cookie is only needed for the later same-site form posts.
-    const open = await fetch(`${w.publicUrl}/keys`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ ticket }), redirect: "manual" });
+    const open = await fetch(`${w.keysUrl}/keys`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ ticket }), redirect: "manual" });
     assert.equal(open.status, 200, "no redirect: the follow-up GET would arrive without the Strict cookie");
     const setCookie = String(open.headers.get("set-cookie"));
     assert.match(setCookie, /HttpOnly/);
@@ -165,11 +165,11 @@ describe(`deployed bridge (${real ? "real manifest crypto" : "test double"})`, (
     const csrf = /name="csrf" value="([^"]+)"/.exec(page)?.[1] as string;
     assert.ok(csrf, "the key form (with CSRF token) is in the ticket POST response");
     const cookie = setCookie.split(";")[0] as string;
-    const cookieless = await fetch(`${w.publicUrl}/keys`);
+    const cookieless = await fetch(`${w.keysUrl}/keys`);
     assert.equal(cookieless.status, 401, "a GET without the cookie (what the browser would send after a cross-site redirect) has no session");
-    const set = await fetch(`${w.publicUrl}/keys`, { method: "POST", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf, name: "NOTES_API_KEY", value: "sk-test-123" }), redirect: "manual" });
+    const set = await fetch(`${w.keysUrl}/keys`, { method: "POST", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf, name: "NOTES_API_KEY", value: "sk-test-123" }), redirect: "manual" });
     assert.equal(set.status, 303);
-    const replay = await fetch(`${w.publicUrl}/keys`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ ticket }), redirect: "manual" });
+    const replay = await fetch(`${w.keysUrl}/keys`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ ticket }), redirect: "manual" });
     assert.equal(replay.status, 401, "keys ticket is one-time");
     // key fetch with an instance assertion (pending claim key)
     const assertFor = async (path: string) => api.signAssertion("tb-instance-assert+jwt", { iss: `tb:ins:${INS}`, sub: `tb:ins:${INS}`, aud: `tb:brg:${BRG}`, iat: now(), exp: now() + 60, jti: api.ulid() }, appKey, { method: "GET", pathAndQuery: path });
@@ -318,6 +318,39 @@ describe(`deployed bridge (${real ? "real manifest crypto" : "test double"})`, (
     assert.ok(w.configPulls() - before <= 2, `pulls in 1.5 s: ${w.configPulls() - before}`);
     await w.publish();
     await waitFor(() => (w.bridge.ctx.table?.rev ?? 0) === w.rev(), 10000);
+  });
+
+  test("C59: /keys only on the keys origin; the keys origin serves nothing else", async () => {
+    assert.equal((await fetch(`${w.publicUrl}/keys`)).status, 404, "main origin (shared with app UIs) never serves the key page");
+    assert.equal((await fetch(`${w.keysUrl}/a/notes/`)).status, 404, "keys origin serves no app UI");
+    assert.equal((await fetch(`${w.keysUrl}/mcp`, { method: "POST", body: "{}" })).status, 404);
+    assert.equal((await fetch(`${w.keysUrl}/oauth/authorize`)).status, 404);
+  });
+
+  test("C59: a failing authorize request gets an error page, never a redirect (no open redirect)", async () => {
+    const reg = await (await fetch(`${w.publicUrl}/oauth/register`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ redirect_uris: ["https://example.com/cb"], client_name: "x" }) })).json();
+    const q = new URLSearchParams({ response_type: "code", client_id: reg.client_id, redirect_uri: "https://example.com/cb", code_challenge_method: "plain", state: "s", resource: "http://127.0.0.1/mcp" });
+    const r = await fetch(`${w.publicUrl}/oauth/authorize?${q}`, { redirect: "manual" });
+    assert.equal(r.status, 400);
+    assert.equal(r.headers.get("location"), null);
+    const unregistered = await fetch(`${w.publicUrl}/oauth/authorize?${new URLSearchParams({ client_id: reg.client_id, redirect_uri: "https://evil.example/cb" })}`, { redirect: "manual" });
+    assert.equal(unregistered.status, 400);
+    assert.equal(unregistered.headers.get("location"), null);
+  });
+
+  test("C59: rate-limit buckets are per client address (X-Forwarded-For from the edge), not shared", async () => {
+    const reg = (ip: string) => fetch(`${w.publicUrl}/oauth/register`, { method: "POST", headers: { "content-type": "application/json", "x-forwarded-for": `198.51.100.7, ${ip}` }, body: JSON.stringify({ redirect_uris: ["http://127.0.0.1:1/cb"] }) });
+    let last = 201;
+    for (let i = 0; i < 31; i++) last = (await reg("203.0.113.10")).status;
+    assert.equal(last, 429, "one client is limited");
+    assert.equal((await reg("203.0.113.11")).status, 201, "another client is not affected");
+  });
+
+  test("C59: a forged assertion naming another agent's connection cannot spend that connection's token budget", async () => {
+    for (let i = 0; i < 70; i++) {
+      await fetch(`${w.publicUrl}/oauth/token`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded", "x-forwarded-for": `203.0.113.${50 + (i % 5)}` }, body: new URLSearchParams({ grant_type: "urn:ietf:params:oauth:grant-type:jwt-bearer", assertion: `x.${Buffer.from(JSON.stringify({ con: CON })).toString("base64url")}.y` }) });
+    }
+    assert.ok(await w.agentToken(), "the real agent still gets a token");
   });
 
   test("Portal down: calls keep working on the last good config (C9)", async () => {

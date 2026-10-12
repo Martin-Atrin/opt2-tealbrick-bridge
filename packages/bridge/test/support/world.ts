@@ -80,6 +80,8 @@ export interface AppLog {
 export interface World {
   bridge: RunningBridge;
   publicUrl: string;
+  /** key page origin (different host name, same port) */
+  keysUrl: string;
   internalUrl: string;
   portalKid: string;
   api: ManifestApi;
@@ -278,9 +280,10 @@ export async function makeWorld(opts: { withHook?: boolean; real?: boolean; mani
     api,
     logger: silentLogger,
     ports: { public: 0, internal: 0 },
-    env: { TB_DATA_DIR: dir, TB_PORTAL_URL: portal.url, TB_PUBLIC_URL: "http://127.0.0.1", TB_ENROL_CODE: ENROL, TB_KEK: "11".repeat(32) },
+    env: { TB_DATA_DIR: dir, TB_PORTAL_URL: portal.url, TB_PUBLIC_URL: "http://127.0.0.1", TB_KEYS_PUBLIC_URL: "http://localhost", TB_ENROL_CODE: ENROL, TB_KEK: "11".repeat(32) },
   });
   const publicUrl = `http://127.0.0.1:${(bridge.publicServer.address() as AddressInfo).port}`;
+  const keysUrl = `http://localhost:${(bridge.publicServer.address() as AddressInfo).port}`;
   const internalUrl = `http://127.0.0.1:${(bridge.internalServer.address() as AddressInfo).port}`;
   // wait for the first config
   for (let i = 0; i < 100 && !bridge.ctx.table; i++) await new Promise((r) => setTimeout(r, 20));
@@ -303,6 +306,7 @@ export async function makeWorld(opts: { withHook?: boolean; real?: boolean; mani
   return {
     bridge,
     publicUrl,
+    keysUrl,
     internalUrl,
     portalKid: portalKey.kid,
     api,

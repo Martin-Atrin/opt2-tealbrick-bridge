@@ -12,12 +12,12 @@ import { CallRouter } from "./calls.ts";
 import { BridgeContext } from "./context.ts";
 import { InternalApi } from "./internal.ts";
 import { McpServer } from "./mcp.ts";
-import { OAuthServer } from "./oauth.ts";
+import { htmlPage, OAuthServer } from "./oauth.ts";
 import { PersonSurfaces } from "./person.ts";
 import { applyConfig, ensureEnrolled, runConfigLoop, startManifestRetry, startStatusLoop } from "./portal.ts";
 import { remintStandalone, StandaloneAdmin, startStandaloneLoop } from "./standalone.ts";
 import { BridgeState, keksFromEnv } from "./state.ts";
-import { assertOrigin, envelope, jsonLogger, type Logger, sendError, sendJson } from "./util.ts";
+import { assertOrigin, envelope, headerValue, jsonLogger, type Logger, sendError, sendJson } from "./util.ts";
 
 export interface BridgeServerOptions {
   api: ManifestApi;
@@ -84,6 +84,8 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
   if (!dataDir) throw new Error("TB_DATA_DIR is required");
   const portalUrl = assertOrigin(env.TB_PORTAL_URL ?? "", "TB_PORTAL_URL");
   const publicUrl = assertOrigin(env.TB_PUBLIC_URL ?? "", "TB_PUBLIC_URL");
+  const keysUrl = env.TB_KEYS_PUBLIC_URL ? assertOrigin(env.TB_KEYS_PUBLIC_URL, "TB_KEYS_PUBLIC_URL") : undefined;
+  if (keysUrl && new URL(keysUrl).hostname === new URL(publicUrl).hostname) throw new Error("TB_KEYS_PUBLIC_URL must use a different host name from TB_PUBLIC_URL");
   const internalPort = o.ports?.internal ?? Number(env.TB_INTERNAL_PORT ?? 8788);
   const publicPort = o.ports?.public ?? Number(env.PORT ?? 8080);
   const keks = keksFromEnv(env, o.api);
@@ -96,6 +98,7 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
     logger,
     portalUrl,
     publicUrl,
+    keysUrl,
     internalUrl: `http://${privateHost}:${internalPort}`,
     form: o.form ?? "deployed",
     ...(o.fetch ? { fetch: o.fetch } : {}),
@@ -127,6 +130,18 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
     try {
       if (path === "/healthz") return sendJson(res, 200, { status: "ok" });
       if (path === "/readyz") return ctx.identity && ctx.table ? sendJson(res, 200, { status: "ready" }) : sendJson(res, 503, { status: "starting" });
+      // C59: the key page lives ONLY on its own origin; that origin serves nothing else, and the main origin
+      // (app UIs under /a/<product>/) never serves /keys.
+      const host = (headerValue(req, "host") ?? "").replace(/:\d+$/, "").toLowerCase();
+      const onKeysOrigin = !!ctx.keysUrl && host === new URL(ctx.keysUrl).hostname;
+      if (onKeysOrigin) {
+        if (path === "/keys" && (req.method === "GET" || req.method === "POST")) return await person.keys(req, res);
+        return sendJson(res, 404, envelope("not_found", "not found", requestId));
+      }
+      if (path === "/keys") {
+        if (!ctx.keysUrl) return htmlPage(res, 503, "Key page not configured", "<p>This workspace bridge has no separate key-page address yet (TB_KEYS_PUBLIC_URL). Ask the workspace owner to redeploy the bridge from Portal.</p>");
+        return sendJson(res, 404, envelope("not_found", "the key page is served on its own address", requestId));
+      }
       if (path === "/mcp") return await mcp.handle(req, res, requestId);
       if (path === "/.well-known/oauth-protected-resource" || path === "/.well-known/oauth-protected-resource/mcp") return oauth.protectedResource(res);
       if (path === "/.well-known/oauth-authorization-server") return oauth.authorizationServer(res);
@@ -137,7 +152,6 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
       if (path === "/oauth/revoke" && req.method === "POST") return await oauth.revoke(req, res);
       if (path.startsWith("/a/")) return await person.app(req, res, requestId);
       if (path.startsWith("/p/")) return await person.publicRoute(req, res, requestId);
-      if (path === "/keys" && (req.method === "GET" || req.method === "POST")) return await person.keys(req, res);
       if (path.startsWith("/admin/v1/")) return await admin.handle(req, res, requestId);
       sendJson(res, 404, envelope("not_found", "not found", requestId));
     } catch (e) {
