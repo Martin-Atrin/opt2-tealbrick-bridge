@@ -1,0 +1,12 @@
+{
+  "note": "C45 waivers: each entry names ONE check id, why it is waived, and when it is removed. Nothing else is waived.",
+  "waivers": [
+    {
+      "target": "bridge",
+      "id": "C5.portal_key_rotation",
+      "status": "fail",
+      "reason": "Suite fixture bug: bridge-world publish() freezes portalKeys into configExtra and rotateKey() mints revisions that still list only the old key, so the announced key never reaches the bridge (see coordination/specs/REQUESTS.md 'bridge → specs/conformance'). With the fixture fixed locally the unchanged bridge passes; the bridge's own e2e suite tests rotation.",
+      "removeWhen": "@opt2-tealbrick/conformance ships the rotation fixture fix (expected 0.1.4)"
+    }
+  ]
+}
