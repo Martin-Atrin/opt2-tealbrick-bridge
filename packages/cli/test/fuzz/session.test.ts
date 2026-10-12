@@ -39,7 +39,6 @@ describe("classifyCredential properties (C62)", () => {
 
   test(
     "never throws on a credential whose token is an object with its own toString (nested keys unrestricted)",
-    { skip: "BUG: classifyCredential throws TypeError (String(parsed.token)) for {\"kind\":\"person\",\"token\":{\"toString\":null}} (session.ts:34)" },
     () => {
       check(
         "cli.classifyCredential.all",

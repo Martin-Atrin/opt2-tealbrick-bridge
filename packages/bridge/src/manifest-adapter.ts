@@ -62,3 +62,9 @@ export function manifestApi(): ManifestApi {
 export async function loadManifestApi(): Promise<ManifestApi> {
   return manifestApi();
 }
+
+/**
+ * BSD-04: the SDK's one privilege-drop implementation (manifest `dropPrivileges`), re-exported so the deployed
+ * entry drops root before it loads state or listens. Never a second copy here.
+ */
+export { dropPrivileges, PrivilegeDropError, RUN_GID, RUN_UID } from "@opt2-tealbrick/manifest";

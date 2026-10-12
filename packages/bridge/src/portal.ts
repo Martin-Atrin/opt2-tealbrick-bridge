@@ -6,7 +6,7 @@
 import type { AppEntry, EnrolRequest, EnrolResponse, StatusReport, WorkspaceConfig } from "@opt2-tealbrick/spec/bridge";
 import { LIFETIME_S, TYP } from "@opt2-tealbrick/spec/credentials";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
-import { isRefusal } from "./api.ts";
+import { isRefusal, type Json } from "./api.ts";
 import { BRIDGE_VERSION, type BridgeContext, MCP_VERSIONS, SDK_MAJORS } from "./context.ts";
 import { remintStandalone } from "./standalone.ts";
 import { buildTable, internalUrlAllowed, portalKeySet, type Table } from "./table.ts";
@@ -285,12 +285,22 @@ function reconcileConnections(ctx: BridgeContext, table: Table): void {
 const reportedAtS = new Map<string, number>();
 
 /** BRIDGE §5.6. */
-export function buildStatusReport(ctx: BridgeContext): StatusReport {
+/**
+ * C62 BSD-08/BSD-15 (Core REQUESTS): two additive fields Core reads when present. Not yet in spec 0.1.2's
+ * StatusReport type (requested from Specs); remove this extension when the spec carries them.
+ */
+export type StatusReportV12 = Omit<StatusReport, "apps"> & {
+  /** JCS digest of the portalKeys array the bridge trusts after applying `rev` */
+  portalKeysDigest: string;
+  apps: (StatusReport["apps"][number] & { sliceRevision?: number })[];
+};
+
+export function buildStatusReport(ctx: BridgeContext): StatusReportV12 {
   const t = ctx.table;
   const id = ctx.identity;
   if (!id) throw new Error("not enrolled");
   const now = nowS();
-  const apps: StatusReport["apps"] = (t ? [...t.apps.values()] : []).map((a) => {
+  const apps: StatusReportV12["apps"] = (t ? [...t.apps.values()] : []).map((a) => {
     const h = ctx.health.get(a.entry.ins);
     const claimed = !!t?.instanceKeys.has(`${a.entry.ins}|`);
     const stale = !h || now - h.lastSeen > 150;
@@ -313,6 +323,8 @@ export function buildStatusReport(ctx: BridgeContext): StatusReport {
       manifestDigest: a.manifest ? a.entry.manifestDigest : null,
       lastSeen: h ? new Date(h.lastSeen * 1000).toISOString() : null,
       pendingHolds: h?.status.pendingHolds ?? 0,
+      // the slice revision the app last reported it holds (AppStatus.sliceRevision); omitted before its first report
+      ...(typeof h?.status.sliceRevision === "number" ? { sliceRevision: h.status.sliceRevision } : {}),
     };
   });
   const keys = (t?.config.keyRequirements ?? [])
@@ -329,6 +341,7 @@ export function buildStatusReport(ctx: BridgeContext): StatusReport {
     appliedAt: new Date().toISOString(),
     bridge: { id: id.bridgeId, version: BRIDGE_VERSION, form: ctx.form, boot: ctx.boot, sdkMajors: SDK_MAJORS, mcpVersions: MCP_VERSIONS },
     portalReachable: ctx.portalReachable(now),
+    portalKeysDigest: ctx.api.digest(id.portalKeys as unknown as Json),
     apps,
     keys,
     scopeSummaries: [...ctx.scopeSummaries.values()],

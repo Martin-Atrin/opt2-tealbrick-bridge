@@ -17,5 +17,5 @@ export { jsonLogger, type Logger, silentLogger } from "./util.ts";
 
 /** Two forms of the same package (DECISION-LOG C5). */
 export type BridgeForm = "deployed" | "relay";
-export { loadManifestApi, manifestApi } from "./manifest-adapter.ts";
+export { dropPrivileges, loadManifestApi, manifestApi, PrivilegeDropError, RUN_GID, RUN_UID } from "./manifest-adapter.ts";
 export { connectMcp, type HeldResult, heldOf, type McpClient, type McpTool, type McpToolResult, pollHold, type StdioTarget } from "./mcp-client.ts";

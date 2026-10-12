@@ -31,7 +31,9 @@ export function classifyCredential(raw: string): "person" | "agent" | "unknown" 
   if (!isRecord(parsed)) return "unknown";
   if (parsed.kind === "agent") return "agent";
   if (parsed.kind === "person") {
-    return typeof parsed.token === "string" && parsed.token.startsWith("tbo_") ? "person" : NON_OWNER_TOKEN.test(String(parsed.token ?? "")) ? "agent" : "unknown";
+    // only a string token is inspected: String() on an object with a non-callable toString throws (C62 fuzz)
+    if (typeof parsed.token !== "string") return "unknown";
+    return parsed.token.startsWith("tbo_") ? "person" : NON_OWNER_TOKEN.test(parsed.token) ? "agent" : "unknown";
   }
   if (AGENT_KEYS.some((k) => k in parsed)) return "agent";
   const token = parsed.token ?? parsed.access_token;

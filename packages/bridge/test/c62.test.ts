@@ -47,6 +47,7 @@ describe("C62: bridge state, channel and proof hardening (real manifest crypto)"
     const st = new BridgeState(w.dataDir, w.api, keksFromEnv({ TB_KEK: "11".repeat(32) }, w.api));
     assert.throws(() => st.load(), /plaintext state is not accepted/);
   });
+
 });
 
 describe("C62: proofs, oracle, revocation reporting", () => {
@@ -56,6 +57,25 @@ describe("C62: proofs, oracle, revocation reporting", () => {
   });
   after(async () => {
     await w.close();
+  });
+
+  test("BSD-08/15: status reports carry portalKeysDigest and apps[].sliceRevision", async () => {
+    const { buildStatusReport } = await import("../src/portal.ts");
+    const last = buildStatusReport(w.bridge.ctx);
+    const id = w.bridge.ctx.identity;
+    assert.ok(id);
+    assert.equal(last.portalKeysDigest, w.api.digest(id.portalKeys as never), "digest of the trusted portalKeys");
+    assert.match(last.portalKeysDigest ?? "", /^sha256:/);
+    await waitFor(() => buildStatusReport(w.bridge.ctx).apps.length > 0, 15000);
+    const before = buildStatusReport(w.bridge.ctx);
+    assert.ok(before.apps.some((a) => a.ins === INS), JSON.stringify(before.apps));
+    for (const a of before.apps) if (!w.bridge.ctx.health.get(a.ins)) assert.ok(!("sliceRevision" in a), "omitted before the app reports");
+    const prev = w.bridge.ctx.health.get(INS);
+    w.bridge.ctx.health.set(INS, { status: { ...(prev?.status ?? {}), sliceRevision: 7 } as never, lastSeen: Math.floor(Date.now() / 1000) });
+    const r = buildStatusReport(w.bridge.ctx);
+    assert.equal(r.apps.find((a) => a.ins === INS)?.sliceRevision, 7);
+    if (prev) w.bridge.ctx.health.set(INS, prev);
+    else w.bridge.ctx.health.delete(INS);
   });
 
   test("H-3: unknown connection and wrong-key assertion for a real connection answer identically", async () => {
