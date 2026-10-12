@@ -18,7 +18,7 @@ import { PersonSurfaces } from "./person.ts";
 import { applyConfig, ensureEnrolled, runConfigLoop, startManifestRetry, startStatusLoop } from "./portal.ts";
 import { remintStandalone, StandaloneAdmin, startStandaloneLoop } from "./standalone.ts";
 import { BridgeState, keksFromEnv } from "./state.ts";
-import { assertOrigin, clientIp, envelope, headerValue, jsonLogger, type Logger, OpenCounter, sendError, sendJson } from "./util.ts";
+import { assertOrigin, clientIp, envelope, headerValue, jsonLogger, type Logger, OpenCounter, proxyTrusted, sendError, sendJson, setProxyTrust } from "./util.ts";
 
 export interface BridgeServerOptions {
   api: ManifestApi;
@@ -143,10 +143,11 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
   startManifestRetry(ctx, abort.signal);
   startStandaloneLoop(ctx, abort.signal);
 
+  setProxyTrust(ctx.form, env);
   const limits: ListenerLimits = { ...DEFAULT_LIMITS, ...o.limits };
   const hsts = publicUrl.startsWith("https:");
   // Behind the edge proxy every socket comes from the proxy, so the per-client cap counts open requests per
-  // client address (X-Forwarded-For, rightmost); reached directly (TB_TRUST_PROXY=0) it counts sockets.
+  // client address (X-Forwarded-For, rightmost); reached directly (own_infra, or TB_TRUST_PROXY=0) it counts sockets (H-2).
   const openRequests = new OpenCounter(limits.perClient);
   const openSockets = new OpenCounter(limits.perClient);
 
@@ -202,7 +203,7 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
   const publicServer = createServer(listenerOptions, (req, res) => void publicHandler(req, res));
   publicServer.maxConnections = limits.maxConnections;
   publicServer.on("connection", (socket: Socket) => {
-    if (process.env.TB_TRUST_PROXY !== "0") return;
+    if (proxyTrusted()) return;
     const release = openSockets.acquire(socket.remoteAddress ?? "unknown");
     if (!release) {
       socket.destroy();

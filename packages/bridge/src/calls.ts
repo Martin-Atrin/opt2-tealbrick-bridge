@@ -16,6 +16,7 @@ import { BRIDGE_OP_PATH, type BridgeOp, type CallId, type InstanceId, LIFETIME_S
 import { type CrudAction, type DynamicCatalogEntry, type DynamicResolution, EFFECTS, type Effect, type HoldFamily } from "@opt2-tealbrick/spec/manifest";
 import type { Json, OperationView } from "./api.ts";
 import type { BridgeContext } from "./context.ts";
+import { tooDeep } from "./json-limits.ts";
 import { type AppRuntime, grantKey, insRef, pauseFor, type Table, trustFor } from "./table.ts";
 import { BridgeError, isRecord, nowS, readCapped, readCappedJson } from "./util.ts";
 
@@ -58,6 +59,7 @@ const BRIDGE_VERDICTS: ReadonlySet<string> = new Set([
   "grant_revoked",
   "grant_invalid",
   "grant_expired",
+  "grant_stale",
   "no_grant",
   "unauthenticated",
   "config_expired",
@@ -79,6 +81,7 @@ const METRIC_CODES: ReadonlySet<string> = new Set([
   "no_grant",
   "grant_invalid",
   "grant_expired",
+  "grant_stale",
   "grant_revoked",
   "crud_exceeds_grant",
   "audience_not_agent",
@@ -240,6 +243,10 @@ export class CallRouter {
     if (caller.type === "app") {
       const v = this.ctx.api.verifyGrant(grant, trustFor(t, target.app.entry.ins, now));
       if (!("claims" in v) || v.claims.sub !== insRef(caller.ins)) throw new BridgeError("grant_invalid", 403);
+      // C70: a valid grant that is not in the caller's CURRENT slice was minted under an older revision → the SDK
+      // re-reads its slice once and retries (grant_expired stays the code for exp)
+      const current = sliceGrants(t.apps.get(caller.ins));
+      if (current && !current.includes(grant)) throw new BridgeError("grant_stale", 403, "the grant is from an older slice revision; re-read the slice");
     }
   }
 
@@ -254,7 +261,8 @@ export class CallRouter {
 
   private async callHook<R>(t: Table, h: HookEntry, call: CallId, request: Record<string, unknown>, callerRef: string, input: Json | undefined): Promise<R> {
     const app = t.apps.get(h.ins);
-    if (!app || t.pausedInstances.has(h.ins)) throw new BridgeError("hook_failed", 503);
+    // a hook app that is down (or refused by BSD-07) fails closed without a request
+    if (!app || app.down || app.refused || t.pausedInstances.has(h.ins)) throw new BridgeError("hook_failed", 503);
     const id = this.ctx.identity;
     if (!id) throw new BridgeError("hook_failed", 503);
     const now = nowS();
@@ -479,6 +487,8 @@ export class CallRouter {
     } catch {
       throw new BridgeError("app_error", 502, "app answered non-JSON");
     }
+    // after-hooks digest and redact the output recursively: refuse absurd nesting before they see it (C62)
+    if (tooDeep(parsed)) throw new BridgeError("app_error", 502, "app answer nested too deep");
     if (res.status === 200 && isRecord(parsed) && parsed.status === "ok") return parsed as CallOutcome;
     if (res.status === 202 && isRecord(parsed) && parsed.status === "held" && typeof parsed.holdId === "string") return parsed as CallOutcome;
     if (isRecord(parsed) && isRecord(parsed.error) && typeof parsed.error.code === "string") {
@@ -539,4 +549,16 @@ export function redact(value: JsonValue, pointers: readonly unknown[]): JsonValu
     } else if (isRecord(node) && Object.hasOwn(node, last)) delete node[last];
   }
   return copy;
+}
+
+/** Companion grants in an instance's current slice (K9 `grants`); undefined when the bridge holds no readable slice. */
+export function sliceGrants(app: AppRuntime | undefined): string[] | undefined {
+  const payload = app?.entry.slice?.split(".")[1];
+  if (!payload) return undefined;
+  try {
+    const p = JSON.parse(Buffer.from(payload, "base64url").toString("utf8")) as { grants?: unknown };
+    return Array.isArray(p.grants) ? p.grants.filter((g): g is string => typeof g === "string") : undefined;
+  } catch {
+    return undefined;
+  }
 }

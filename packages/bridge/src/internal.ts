@@ -6,7 +6,7 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { AppStatus, AppStatusResponse, CallEnvelope, ClaimRequest, ClaimResponse, KeyFetchResponse } from "@opt2-tealbrick/spec/bridge";
 import { type InstanceAssertionClaims, type InstanceId, LIFETIME_S, TYP } from "@opt2-tealbrick/spec/credentials";
-import type { KeyRequirement, Manifest } from "@opt2-tealbrick/spec/manifest";
+import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import { isRefusal, type Json, type KeySet } from "./api.ts";
 import type { CallRouter } from "./calls.ts";
 import { type BridgeContext, SDK_CURRENT_MAJOR } from "./context.ts";
@@ -147,7 +147,7 @@ export class InternalApi {
       }
       if (!manifest) throw new BridgeError("app_unavailable", 503, "the app manifest is not available yet; retry");
       out.app = { publicKey: appKey };
-      out.serviceKeys = activeKeys(t, entry.ins, manifest, service).map((k) => ({ name: k.name, env: k.name }));
+      out.serviceKeys = serviceKeyNames(t, entry.ins, service).map((name) => ({ name, env: name }));
     }
     ctx.state.claims.push({
       kind: entry.kind,
@@ -242,9 +242,14 @@ export class InternalApi {
     const t = this.ctx.table;
     if (!t) throw new BridgeError("app_unavailable", 503);
     if (this.paused(caller.ins)) throw new BridgeError("paused", 403);
+    // C69: decide from the SIGNED config only (Core is the one `when` evaluator, C48), never from the app's live
+    // manifest: a manifest fetch_failed during an update must not cut companions off their declared keys.
     const app = t.apps.get(caller.ins);
+    if (!app) throw new BridgeError("app_unavailable", 503, "no verified config entry for this instance yet; retry");
     const user = caller.svc ?? "app";
-    const declared = activeKeys(t, caller.ins, app?.manifest, user).find((k) => k.name === name && k.source === "account_default");
+    const declared = t.config.keyRequirements.some((r) => r.ins === caller.ins && r.name === name && r.source === "account_default" && r.usedBy.includes(user));
+    // mid-deploy (app down or its manifest not loaded): a key the next revision adds may not be listed yet → transient
+    if (!declared && (app.down || !app.manifest)) throw new BridgeError("app_unavailable", 503, "the app is updating; retry");
     if (!declared) throw new BridgeError("key_not_declared", 403);
     const value = this.ctx.state.keyStore.values[name];
     if (value === undefined) throw new BridgeError("key_not_set", 404);
@@ -306,20 +311,12 @@ export class InternalApi {
 }
 
 /**
- * Active key requirements of one instance for one user (`app` or a service id). The ONE `when`
- * evaluation is Core's (`activeKeyRequirements` + `resolveSettings` against the instance settings),
- * delivered as config `keyRequirements[]`; the bridge never sees settings (S6), so it does not
- * re-evaluate `when`. A requirement counts only if the verified manifest also declares it.
+ * Key names one instance's user (`app` or a service id) may fetch. The ONE `when` evaluation is Core's
+ * (`activeKeyRequirements` + `resolveSettings`), delivered as SIGNED config `keyRequirements[]`; the bridge never
+ * sees settings (S6) and never re-derives this from the app's live manifest (C69).
  */
-export function activeKeys(t: Table, ins: InstanceId, manifest: Manifest | undefined, user: string): KeyRequirement[] {
-  const declared = new Map((manifest?.settings?.keys ?? []).map((k) => [k.name, k]));
-  const out: KeyRequirement[] = [];
-  for (const r of t.config.keyRequirements) {
-    if (r.ins !== ins || !r.usedBy.includes(user)) continue;
-    const k = declared.get(r.name);
-    if (k?.usedBy.includes(user) && k.source === r.source) out.push(k);
-  }
-  return out;
+export function serviceKeyNames(t: Table, ins: InstanceId, user: string): string[] {
+  return t.config.keyRequirements.filter((r) => r.ins === ins && r.usedBy.includes(user)).map((r) => r.name);
 }
 
 /** Slice `rev` (from the slice payload) is the revision apps compare. */

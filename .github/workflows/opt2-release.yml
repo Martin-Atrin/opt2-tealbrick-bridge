@@ -1,0 +1,72 @@
+# opt2 release publishing (template ci-v9, C72). GENERATED from Martin-Atrin/opt2-tealbrick-platform: ci/github/opt2-release.yml.
+# Do not edit in a repo: Woodpecker setup fails on drift. Woodpecker runs every other CI stage.
+# Images go to ghcr.io/martin-atrin/<name> with the built-in GITHUB_TOKEN (no personal token). Two jobs:
+#   build   — runs repo code (docker build, tb-gen kit, npm pack) with a READ-ONLY token
+#   publish — runs NO repo code: loads the built artifacts, pushes images, attaches kit/package tarballs
+# The platform signer never trusts this workflow's output: it resolves digests in ghcr and checks the image labels.
+name: opt2 release
+on:
+  push:
+    tags: ["v*", "*-v*"]
+permissions: {}
+concurrency:
+  group: opt2-release-${{ github.ref }}
+  cancel-in-progress: false
+env:
+  TB_CI_REF: ci-v9
+  TB_CI_SHA256: "52d0c9d12035234040e6b30f13adc2585a51ce1864566d87aab9dbf857a31fb7"
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.11.1"
+      - name: fetch the hash-checked runner
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/Martin-Atrin/opt2-tealbrick-platform/$TB_CI_REF/ci/tb-ci.ts" -o "$RUNNER_TEMP/tb-ci.ts"
+          echo "$TB_CI_SHA256  $RUNNER_TEMP/tb-ci.ts" | sha256sum -c -
+      - name: build (no write token)
+        env:
+          CI_WORKSPACE: ${{ github.workspace }}
+          CI_REPO_NAME: ${{ github.event.repository.name }}
+          CI_COMMIT_TAG: ${{ github.ref_name }}
+          CI_COMMIT_SHA: ${{ github.sha }}
+        run: node "$RUNNER_TEMP/tb-ci.ts" gh-build
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: opt2-release
+          path: .tb-ci/out/
+          retention-days: 1
+  publish:
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+      packages: write
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: opt2-release
+          path: out
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: "24.11.1"
+      - name: fetch the hash-checked runner
+        run: |
+          curl -fsSL "https://raw.githubusercontent.com/Martin-Atrin/opt2-tealbrick-platform/$TB_CI_REF/ci/tb-ci.ts" -o "$RUNNER_TEMP/tb-ci.ts"
+          echo "$TB_CI_SHA256  $RUNNER_TEMP/tb-ci.ts" | sha256sum -c -
+      - name: publish (no repo code)
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+          TB_OUT: out
+          CI_REPO_NAME: ${{ github.event.repository.name }}
+          CI_COMMIT_TAG: ${{ github.ref_name }}
+          CI_COMMIT_SHA: ${{ github.sha }}
+          GH_ACTOR: ${{ github.actor }}
+        run: node "$RUNNER_TEMP/tb-ci.ts" gh-publish

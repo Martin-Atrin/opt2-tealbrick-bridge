@@ -1,5 +1,5 @@
 {
-  "$schema": "https://raw.githubusercontent.com/Martin-Atrin/opt2-tealbrick-platform/ci-v8/ci/tealbrick-ci.schema.json",
+  "$schema": "https://raw.githubusercontent.com/Martin-Atrin/opt2-tealbrick-platform/ci-v9/ci/tealbrick-ci.schema.json",
   "kind": "bridge",
   "paths": [
     "."

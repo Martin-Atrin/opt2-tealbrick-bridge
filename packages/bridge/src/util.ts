@@ -1,5 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { BridgeErrorCode, ErrorEnvelope } from "@opt2-tealbrick/spec/bridge";
+import { tooDeep } from "./json-limits.ts";
 
 /** A refusal or failure that maps to the one error envelope (CORE §8). */
 export class BridgeError extends Error {
@@ -28,6 +29,7 @@ export function statusFor(code: string): number {
     case "no_grant":
     case "grant_invalid":
     case "grant_expired":
+    case "grant_stale":
     case "grant_revoked":
     case "crud_exceeds_grant":
     case "audience_not_agent":
@@ -177,11 +179,14 @@ export async function readCapped(res: Response, maxBytes: number): Promise<Buffe
 /** Parses a capped app answer as JSON (`app_error` when it is not JSON). */
 export async function readCappedJson<T>(res: Response, maxBytes: number): Promise<T> {
   const buf = await readCapped(res, maxBytes);
+  let v: unknown;
   try {
-    return JSON.parse(buf.toString("utf8")) as T;
+    v = JSON.parse(buf.toString("utf8"));
   } catch {
     throw new BridgeError("app_error", 502, "app answered non-JSON");
   }
+  if (tooDeep(v)) throw new BridgeError("app_error", 502, "app answer nested too deep");
+  return v as T;
 }
 
 export function parseJson(body: Buffer): unknown {
@@ -241,7 +246,13 @@ export class RateLimiter {
     const now = Date.now();
     const w = this.windows.get(key);
     if (!w || now - w.start >= this.windowMs) {
-      if (this.windows.size > 10_000) this.windows.clear();
+      // H-2: evict oldest-first instead of clearing every bucket (a flood of fresh keys must not reset busy ones)
+      if (w) this.windows.delete(key);
+      while (this.windows.size >= 10_000) {
+        const oldest = this.windows.keys().next().value;
+        if (oldest === undefined) break;
+        this.windows.delete(oldest);
+      }
       this.windows.set(key, { start: now, count: 1 });
       return true;
     }
@@ -308,11 +319,26 @@ export class OpenCounter {
  * Client address for per-client rate-limit buckets. Behind the provider's edge proxy every request comes from
  * the proxy, so the socket address would put all clients in one bucket (one client could exhaust it for
  * everyone). The edge APPENDS the client address to X-Forwarded-For, so the rightmost entry is the one the
- * trusted proxy saw; entries to its left are client-supplied and ignored. Set TB_TRUST_PROXY=0 when the
- * bridge is reached directly (own infrastructure without a proxy).
+ * trusted proxy saw; entries to its left are client-supplied and ignored. Trusted only per {@link setProxyTrust}.
  */
+let proxyTrust = process.env.TB_TRUST_PROXY !== "0";
+
+/**
+ * H-2: X-Forwarded-For is trusted only behind the provider edge (deployed form) or with TB_TRUST_PROXY=1;
+ * an own-infrastructure bridge counts the socket address unless told it sits behind a proxy. Set once at start.
+ */
+export function setProxyTrust(form: "deployed" | "own_infra", env: NodeJS.ProcessEnv): boolean {
+  const v = env.TB_TRUST_PROXY ?? process.env.TB_TRUST_PROXY;
+  proxyTrust = v === "1" || (v !== "0" && form === "deployed");
+  return proxyTrust;
+}
+
+export function proxyTrusted(): boolean {
+  return proxyTrust;
+}
+
 export function clientIp(req: IncomingMessage): string {
-  if (process.env.TB_TRUST_PROXY !== "0") {
+  if (proxyTrust) {
     const xff = headerValue(req, "x-forwarded-for");
     const last = xff?.split(",").map((s) => s.trim()).filter(Boolean).at(-1);
     if (last && last.length <= 64) return last;

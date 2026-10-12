@@ -273,7 +273,9 @@ export class OAuthServer {
     if (!agt || c.ws !== t.ws || !t.agents.has(agt)) return fail("agent_unknown");
     if (t.pausedWorkspace || t.pausedAgents.has(agt)) return fail("paused");
     if (pathA !== (c.rid !== undefined) || (pathA && c.rid !== p.rid)) return fail("rid_mismatch");
-    if (now - ctx.lastPull > LIFETIME_S.pairingRedeemMaxConfigAge) return fail("config_stale");
+    // revocations are known as of the last answered pull, or as of the signed config's iat (a restarted bridge runs a
+    // verified boot copy while its first long-poll is still open)
+    if (now - Math.max(ctx.lastPull, t.config.iat) > LIFETIME_S.pairingRedeemMaxConfigAge) return fail("config_stale");
     if (t.revokedJtis.has(c.jti)) return fail("grant_revoked");
     if (!ctx.state.useJti(c.jti, c.exp)) return fail("code_used");
     const con = `con_${ctx.api.ulid()}` as ConnectionId;

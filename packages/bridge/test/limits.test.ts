@@ -9,6 +9,7 @@ import assert from "node:assert/strict";
 import type { ServerResponse } from "node:http";
 import { connect as netConnect, type Socket } from "node:net";
 import { after, before, describe, test } from "node:test";
+import { clientIp, RateLimiter, setProxyTrust } from "../src/util.ts";
 import { AGT, APP_CODE, BRG, CON, INS, makeWorld, type World, waitFor } from "./support/world.ts";
 
 const now = () => Math.floor(Date.now() / 1000);
@@ -360,10 +361,10 @@ describe("bridge limits: per-client open requests and connections", () => {
     await later.arrayBuffer();
   });
 
-  test("BSD-01: reached directly (TB_TRUST_PROXY=0), open connections per address are capped and the public listener has maxConnections", async () => {
+  test("BSD-01: reached directly (own_infra / TB_TRUST_PROXY=0), open connections per address are capped and the public listener has maxConnections", async () => {
     assert.equal(w.bridge.publicServer.maxConnections, 2000);
     const port = portOf(w.publicUrl);
-    process.env.TB_TRUST_PROXY = "0";
+    setProxyTrust("own_infra", {});
     const socks: Socket[] = [];
     try {
       for (let i = 0; i < 3; i++) {
@@ -379,7 +380,30 @@ describe("bridge limits: per-client open requests and connections", () => {
       assert.equal(text, "", "the over-cap socket is closed without an answer");
     } finally {
       for (const s of socks) s.destroy();
-      delete process.env.TB_TRUST_PROXY;
+      setProxyTrust("deployed", {});
     }
+  });
+
+  test("H-2: X-Forwarded-For is trusted only for the deployed form or TB_TRUST_PROXY=1", () => {
+    const req = (xff?: string) => ({ headers: xff ? { "x-forwarded-for": xff } : {}, socket: { remoteAddress: "10.0.0.9" } }) as never;
+    try {
+      assert.equal(setProxyTrust("deployed", {}), true);
+      assert.equal(clientIp(req("1.2.3.4, 5.6.7.8")), "5.6.7.8", "rightmost entry (the edge appends)");
+      assert.equal(setProxyTrust("own_infra", {}), false);
+      assert.equal(clientIp(req("1.2.3.4")), "10.0.0.9", "own-infra default: the socket address, XFF ignored");
+      assert.equal(setProxyTrust("own_infra", { TB_TRUST_PROXY: "1" }), true);
+      assert.equal(setProxyTrust("deployed", { TB_TRUST_PROXY: "0" }), false);
+    } finally {
+      setProxyTrust("deployed", {});
+    }
+  });
+
+  test("H-2: RateLimiter evicts oldest-first instead of clearing every bucket", () => {
+    const l = new RateLimiter(1);
+    assert.equal(l.take("busy"), true);
+    assert.equal(l.take("busy"), false);
+    for (let i = 0; i < 10_050; i++) l.take(`fresh-${i}`);
+    l.take("busy-2");
+    assert.equal(l.take("fresh-10049"), false, "recent buckets survive the eviction");
   });
 });
