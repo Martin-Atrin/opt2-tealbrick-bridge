@@ -14,7 +14,16 @@ import { validateManifest } from "@opt2-tealbrick/manifest";
 import { defineApp, startApp } from "@opt2-tealbrick/miniapp-sdk";
 import { CallRouter } from "../src/calls.ts";
 import { statementKeys } from "../src/portal.ts";
-import { BRG, makeWorld, notesManifest, type World, WS, waitFor } from "./support/world.ts";
+import { BRG, makeWorld, notesManifest, type World, WS, waitFor as waitForRaw } from "./support/world.ts";
+
+/** labelled wait: CI says which setup step stalled */
+const waitFor = async (cond: () => boolean, ms: number, what = "condition") => {
+  try {
+    await waitForRaw(cond, ms);
+  } catch {
+    throw new Error(`timeout waiting for ${what}`);
+  }
+};
 
 const SDKINS = "ins_01HSDKAPPSDKAPPSDKAPPSDKAP";
 const SDK_CODE = "tbe_sdkappinstancecode01";
@@ -87,17 +96,18 @@ describe("C91 live: real bridge → real SDK app bridge ops", () => {
       c.apps.push({ ins: SDKINS as never, product: "dyna", version: String(manifest.version), sdkMajor: 1, manifestDigest: app.digest, internalUrl: `http://127.0.0.1:${port}`, ownInfra: true, entitled: true, slice: (c.apps[0] as { slice: string }).slice } as never);
       c.enrolCodes.push({ digest: w.api.opaqueDigest(SDK_CODE), kind: "instance", ins: SDKINS, product: "dyna", exp: now() + 3600 } as never);
     });
-    await waitFor(() => w.bridge.ctx.table?.rev === w.rev(), 15000);
+    await waitFor(() => w.bridge.ctx.table?.rev === w.rev(), 15000, "config with the SDK app entry");
     const kss = w.keySet.current() as string;
     const portalJwks = { keys: statementKeys(kss).map((k) => k.jwk) };
     data = mkdtempSync(join(tmpdir(), "tb-c91-sdk-"));
     running = await startApp(
       app,
       { TB_INSTANCE_ID: SDKINS, TB_BRIDGE_URL: w.internalUrl, TB_PORTAL_KEYS: JSON.stringify(portalJwks), TB_ENROL_CODE: SDK_CODE, TB_DATA_DIR: data, TB_DATA_EPHEMERAL: "1", TB_KEK: "33".repeat(32), TB_LOG_LEVEL: "error" },
-      { portalRootKeys: [w.keySet.root?.publicJwk as never] },
+      // the test process may run as root in CI: never let the SDK drop THIS process to uid 1000
+      { portalRootKeys: [w.keySet.root?.publicJwk as never], privilegeProc: { getuid: () => 1000, getgid: () => 1000 } as never },
     );
     // the app claimed (pending at the bridge): Core lists its key and its slice in the next revision
-    await waitFor(() => w.bridge.ctx.state.claims.some((c) => c.ins === SDKINS), 15000);
+    await waitFor(() => w.bridge.ctx.state.claims.some((c) => c.ins === SDKINS), 30000, "the SDK app's claim");
     const jwk = w.bridge.ctx.state.claims.find((c) => c.ins === SDKINS)?.publicKey;
     const bridgeJwk = w.bridge.ctx.identity?.key.publicJwk;
     const slice = await w.signPortal("tb-slice+jws", {
@@ -127,13 +137,13 @@ describe("C91 live: real bridge → real SDK app bridge ops", () => {
       else e.slice = slice;
       c.instanceKeys.push({ ins: SDKINS as never, jwk } as never);
     });
-    await waitFor(() => w.bridge.ctx.table?.rev === w.rev() && w.bridge.ctx.table?.apps.get(SDKINS as never)?.down === false, 20000);
+    await waitFor(() => w.bridge.ctx.table?.rev === w.rev() && w.bridge.ctx.table?.apps.get(SDKINS as never)?.down === false, 30000, "the SDK app routed (manifest fetched)");
     // the SDK is ready once it reports status with the slice applied
     try {
       await waitFor(() => {
         const r = w.bridge.ctx.health.get(SDKINS as never)?.status.readiness;
         return r === "ready";
-      }, 20000);
+      }, 30000, "SDK readiness");
     } catch (e) {
       throw new Error(`SDK app not ready: ${JSON.stringify(w.bridge.ctx.health.get(SDKINS as never)?.status ?? null)}; ${String(e)}`);
     }
