@@ -1,0 +1,13 @@
+{
+  "format": "tealbrick.agent-serve/1",
+  "harness": {
+    "kind": "command",
+    "command": ["node", "./my-eve-agent.ts", "--relay", "{mcpCommand}"],
+    "passthroughEnv": ["OPENAI_API_KEY"]
+  },
+  "pollSeconds": 20,
+  "inboxes": [
+    { "tool": "connect__channel_inbox", "cursor": { "param": "sinceSeq", "from": "nextSeq" }, "items": "messages", "id": "seq" }
+  ],
+  "holds": false
+}
