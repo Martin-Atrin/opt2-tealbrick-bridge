@@ -1,4 +1,40 @@
 {
   "note": "C45 waivers: each entry names ONE check id (+ status, optional assertedMatch), why it is waived, and when it is removed. Empty = none.",
-  "waivers": []
+  "waivers": [
+    {
+      "target": "bridge",
+      "id": "B7.dynamic_list",
+      "status": "fail",
+      "reason": "conformance 0.1.8 fake app binds pre-C91; live real-app test passes (packages/bridge/test/c91-live.test.ts, run in CI). Decision C91a.",
+      "removeWhen": "@opt2-tealbrick/conformance 0.1.9 lands"
+    },
+    {
+      "target": "bridge",
+      "id": "B16.catalog_omitted_reported",
+      "status": "fail",
+      "reason": "conformance 0.1.8 fake app binds pre-C91; live real-app test passes (packages/bridge/test/c91-live.test.ts, run in CI). Decision C91a.",
+      "removeWhen": "@opt2-tealbrick/conformance 0.1.9 lands"
+    },
+    {
+      "target": "bridge",
+      "id": "B16.search_uses_catalog",
+      "status": "fail",
+      "reason": "conformance 0.1.8 fake app binds pre-C91; live real-app test passes (packages/bridge/test/c91-live.test.ts, run in CI). Decision C91a.",
+      "removeWhen": "@opt2-tealbrick/conformance 0.1.9 lands"
+    },
+    {
+      "target": "bridge",
+      "id": "B16.dynamic_entry_call",
+      "status": "fail",
+      "reason": "conformance 0.1.8 fake app binds pre-C91; live real-app test passes (packages/bridge/test/c91-live.test.ts, run in CI). Decision C91a.",
+      "removeWhen": "@opt2-tealbrick/conformance 0.1.9 lands"
+    },
+    {
+      "target": "bridge",
+      "id": "B13.scope_summary",
+      "status": "fail",
+      "reason": "conformance 0.1.8 fake app binds pre-C91; live real-app test passes (packages/bridge/test/c91-live.test.ts, run in CI). Decision C91a.",
+      "removeWhen": "@opt2-tealbrick/conformance 0.1.9 lands"
+    }
+  ]
 }
