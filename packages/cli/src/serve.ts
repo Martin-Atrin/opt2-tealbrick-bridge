@@ -8,11 +8,17 @@
  *
  * Behaviour harvested from v1 `native serve` / Buzz ACP (not structure): one turn at a time per agent, never
  * answer your own messages (loop breaker), bounded prompt size, no history replay on first start, backoff.
+ *
+ * C83 G10 poll mode (`routines`, STEP-B-DESIGN §2): poll a read op for due jobs, claim each one with a write op,
+ * run ONE turn per claimed job and report it. At-most-once (v1 avm routines model): the local state records an
+ * occurrence BEFORE it is claimed and BEFORE its turn starts, so a lost answer or a restart never repeats a claim or
+ * a turn; the server marks ambiguous runs `uncertain`. Due times and cron live on the server, not here.
  */
 import { spawn } from "node:child_process";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
 import { dirname } from "node:path";
 import type { HeldResult, McpClient, McpToolResult } from "@opt2-tealbrick/bridge";
+import { TOOL_NAME_RULE } from "@opt2-tealbrick/spec/bridge";
 
 export interface InboxSpec {
   /** MCP tool name, e.g. `<product>__<op>` */
@@ -28,6 +34,32 @@ export interface InboxSpec {
   skipIf?: Record<string, unknown>;
 }
 
+/** C83 G10: one scheduled-work source (e.g. Evolution `routines_due` / `routine_claim` / `routine_report`). */
+export interface RoutineSpec {
+  /** read op listing the caller's due jobs (no state change) */
+  due: string;
+  /** write op `{occurrence}` → `{claimed: true, job} | {claimed: false, reason}` */
+  claim: string;
+  /** write op `{occurrence, status, summary?}` */
+  report: string;
+  args?: Record<string, unknown>;
+  /** field of the `due` result holding the job array (default "jobs") */
+  items?: string;
+  /** job field that identifies an occurrence (default "occurrence") */
+  id?: string;
+}
+
+/** Local at-most-once record of one occurrence (written BEFORE the step it names). */
+export type RoutineRunState = "claiming" | "not_claimed" | "started" | "reported";
+
+export interface PendingReport {
+  tool: string;
+  args: Record<string, unknown>;
+  key: string;
+  attempts: number;
+  next: number;
+}
+
 export type HarnessSpec =
   | { kind: "claude"; cwd?: string; model?: string; modelKeyEnv?: string; appendSystemPrompt?: string; sdkModule?: string; passthroughEnv?: string[]; maxTurns?: number }
   /** any harness CLI: the prompt arrives on stdin; `{mcpCommand}` in an argument is replaced by the relay command */
@@ -36,7 +68,10 @@ export type HarnessSpec =
 export interface ServeConfig {
   format: "tealbrick.agent-serve/1";
   harness: HarnessSpec;
+  /** may be empty when `routines` is set */
   inboxes: InboxSpec[];
+  /** C83 G10 poll mode */
+  routines?: RoutineSpec[];
   /** seconds between polls (default 20, minimum 5) */
   pollSeconds?: number;
   /** follow held calls and start a turn when the owner decides (default true; claude harness only) */
@@ -49,13 +84,18 @@ export interface TurnEvents {
   onHeld(h: HeldResult & { tool: string }): void;
 }
 
-/** Runs one turn in the agent's harness. Resolves when the turn ends (success or failure). */
-export type HarnessRunner = (prompt: string, events: TurnEvents) => Promise<{ ok: boolean }>;
+/** Runs one turn in the agent's harness. Resolves when the turn ends (success or failure). `summary`: the last
+ * assistant text (claude) or the exit code (command), used for routine reports. */
+export type HarnessRunner = (prompt: string, events: TurnEvents) => Promise<{ ok: boolean; summary?: string }>;
 
 export interface ServeState {
   cursors: Record<string, unknown>;
   seen: Record<string, string[]>;
   primed: Record<string, boolean>;
+  /** C83: occurrence → local state, insertion order, last MAX_SEEN kept */
+  routineRuns?: Record<string, { s: RoutineRunState; reason?: string; report?: string }>;
+  /** C83: reports that failed; re-sent with the same idempotency key, never with a new turn */
+  pendingReports?: PendingReport[];
 }
 
 export interface ServeDeps {
@@ -75,10 +115,16 @@ const MAX_BACKOFF_MS = 300_000;
 export function validateServeConfig(raw: unknown): ServeConfig {
   const c = raw as ServeConfig;
   if (c?.format !== "tealbrick.agent-serve/1") throw new Error("config is not tealbrick.agent-serve/1");
-  if (!Array.isArray(c.inboxes) || c.inboxes.length === 0 || c.inboxes.length > 16) throw new Error("inboxes: 1..16 entries");
+  c.inboxes ??= [];
+  if (!Array.isArray(c.inboxes) || c.inboxes.length > 16) throw new Error("inboxes: 0..16 entries");
+  if (c.routines !== undefined && (!Array.isArray(c.routines) || c.routines.length > 8)) throw new Error("routines: 0..8 entries");
+  if (c.inboxes.length === 0 && (c.routines ?? []).length === 0) throw new Error("set at least one of inboxes and routines");
   for (const i of c.inboxes) {
-    if (typeof i.tool !== "string" || !/^[a-z0-9_-]{3,64}$/.test(i.tool) || !i.tool.includes("__")) throw new Error(`inbox tool must be a <product>__<op> name: ${String(i.tool)}`);
+    if (!isToolName(i.tool)) throw new Error(`inbox tool must be a <product>__<op> name: ${String(i.tool)}`);
     if (i.cursor && (typeof i.cursor.param !== "string" || typeof i.cursor.from !== "string")) throw new Error(`inbox ${i.tool}: cursor {param, from}`);
+  }
+  for (const r of c.routines ?? []) {
+    for (const f of ["due", "claim", "report"] as const) if (!isToolName(r?.[f])) throw new Error(`routine ${f} must be a <product>__<op> name: ${String(r?.[f])}`);
   }
   const h = c.harness as HarnessSpec | undefined;
   if (!h || (h.kind !== "claude" && h.kind !== "command")) throw new Error("harness.kind must be claude or command");
@@ -86,7 +132,13 @@ export function validateServeConfig(raw: unknown): ServeConfig {
   return c;
 }
 
+const isToolName = (t: unknown): t is string => typeof t === "string" && /^[a-z0-9_-]{3,64}$/.test(t) && t.includes("__");
+
 const inboxKey = (i: InboxSpec) => `${i.tool}|${JSON.stringify(i.args ?? {})}`;
+
+function errCode(r: McpToolResult): string {
+  return String((structured(r)?.error as { code?: string } | undefined)?.code ?? "error").slice(0, 40);
+}
 
 function structured(r: McpToolResult): Record<string, unknown> | undefined {
   if (r.structuredContent && typeof r.structuredContent === "object") return r.structuredContent;
@@ -107,6 +159,34 @@ export function promptFor(tool: string, items: unknown[]): string {
   return head + body;
 }
 
+const MAX_SUMMARY = 500;
+const MAX_REPORT_ATTEMPTS = 50;
+
+/** Report summary: bounded, single paragraph, credential-looking values masked (summaries go to an app). */
+export function reportSummary(text: string | undefined, held: number): string {
+  let t = (text ?? "").replace(/\s+/g, " ").trim();
+  t = t.replace(/\b(tb[a-z]{1,3}_[A-Za-z0-9_-]{8,}|sk-[A-Za-z0-9_-]{8,}|eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]+\.[A-Za-z0-9_-]+)/g, "[redacted]");
+  if (held) t = `${t ? `${t} ` : ""}(held: ${held})`;
+  return t.length > MAX_SUMMARY ? `${t.slice(0, MAX_SUMMARY - 1)}…` : t;
+}
+
+/** Turn input for a claimed job: the owner-reviewed workflow, bounded (STEP-B-DESIGN §2.2 e). */
+export function routinePrompt(spec: RoutineSpec, job: Record<string, unknown>, title: string | undefined): string {
+  const product = spec.claim.split("__")[0];
+  const wf = String(job.workflowId ?? "");
+  const head = [
+    `Scheduled run of workflow ${title ? `"${title}" ` : ""}${wf} version ${String(job.version ?? "?")} (occurrence ${String(job.occurrence ?? "")}${job.deadline ? `, finish before ${String(job.deadline)}` : ""}).`,
+    `Read ${product}__workflow_get {"id": "${wf}"} first. You may call only the allowed operations below; the bridge blocks every other one.`,
+    // Evolution 0.2 opens ONE Kanban issue per claimed run and returns its id; null (Kanban down/absent) → no Kanban text
+    ...(typeof job.kanbanIssueId === "string" && job.kanbanIssueId ? [`This run already has Kanban issue ${job.kanbanIssueId} assigned to you; add comments there; do not create another issue.`] : []),
+    "When the steps are done, stop. Do not start another run of this workflow yourself.",
+    "",
+  ].join("\n");
+  let body = JSON.stringify({ instruction: job.instruction, steps: job.steps, allowed: job.allowed }, null, 2);
+  if (head.length + body.length > MAX_PROMPT_CHARS) body = `${body.slice(0, MAX_PROMPT_CHARS - head.length - 40)}\n… (truncated)`;
+  return head + body;
+}
+
 export function holdPrompt(h: { tool: string; holdId: string }, status: "approved" | "denied" | "expired"): string {
   if (status === "approved") return `The owner APPROVED your held call ${h.tool} (hold ${h.holdId}). Repeat exactly the same call once now.`;
   return `Your held call ${h.tool} (hold ${h.holdId}) was ${status === "denied" ? "DENIED by the owner" : "not decided in time and EXPIRED"}. Do not repeat it; tell whoever asked, if appropriate.`;
@@ -123,17 +203,132 @@ export async function serveLoop(cfg: ServeConfig, deps: ServeDeps, signal: Abort
   const followHolds = cfg.holds !== false;
   let backoff = 0;
 
-  const turn = async (prompt: string) => {
+  const runOne = async (prompt: string): Promise<{ ok: boolean; summary?: string; held: number }> => {
+    let held = 0;
     const r = await deps.runTurn(prompt, {
       onHeld: (h) => {
+        held += 1;
         if (followHolds) holds.set(h.holdId, { ...h, next: deps.now() + 10_000 });
       },
     });
+    return { ...r, held };
+  };
+  const turn = async (prompt: string) => {
+    const r = await runOne(prompt);
     if (!r.ok) throw new Error("turn_failed");
+  };
+
+  // ── C83 routines: at-most-once bookkeeping ──
+  state.routineRuns ??= {};
+  state.pendingReports ??= [];
+  const runs = state.routineRuns;
+  const pending = state.pendingReports;
+  const setRun = async (occ: string, v: { s: RoutineRunState; reason?: string; report?: string }) => {
+    delete runs[occ];
+    runs[occ] = v;
+    const keys = Object.keys(runs);
+    for (const k of keys.slice(0, Math.max(0, keys.length - MAX_SEEN))) delete runs[k];
+    await deps.saveState(state);
+  };
+  const idem = (key: string) => ({ [TOOL_NAME_RULE.idempotencyMetaKey]: key });
+  /** sends a report once; a failure queues it (same key) for later polls — never a new turn */
+  const report = async (tool: string, occ: string, status: "dispatched" | "completed" | "failed" | "uncertain", summary?: string) => {
+    const args = { occurrence: occ, status, ...(summary ? { summary } : {}) };
+    const key = `report:${occ}:${status}`;
+    try {
+      const r = await deps.mcp.callTool(tool, args, idem(key));
+      if (!r.isError) return;
+      deps.log("serve.routine.report_refused", { status, code: errCode(r) });
+    } catch {
+      deps.log("serve.routine.report_failed", { status });
+    }
+    pending.push({ tool, args, key, attempts: 1, next: deps.now() + 15_000 });
+    await deps.saveState(state);
+  };
+  const flushReports = async () => {
+    for (const p of [...pending]) {
+      if (signal.aborted || deps.now() < p.next) continue;
+      let ok = false;
+      try {
+        const r = await deps.mcp.callTool(p.tool, p.args, idem(p.key));
+        ok = !r.isError;
+      } catch {
+        ok = false;
+      }
+      if (ok || p.attempts + 1 >= MAX_REPORT_ATTEMPTS) {
+        pending.splice(pending.indexOf(p), 1);
+        if (!ok) deps.log("serve.routine.report_dropped", { status: String(p.args.status) });
+      } else {
+        p.attempts += 1;
+        p.next = deps.now() + Math.min(15_000 * 2 ** p.attempts, MAX_BACKOFF_MS);
+      }
+      await deps.saveState(state);
+    }
+  };
+  // restart rule (§2.2 step 3): a turn that started but was never reported is reported `uncertain` once, never re-run
+  for (const [occ, v] of Object.entries(runs)) {
+    if (v.s !== "started" || !v.report) continue;
+    deps.log("serve.routine.uncertain", { occurrence: occ });
+    await setRun(occ, { s: "reported", report: v.report });
+    await report(v.report, occ, "uncertain", "runner restarted during the turn");
+  }
+
+  const pollRoutine = async (spec: RoutineSpec) => {
+    const res = await deps.mcp.callTool(spec.due, spec.args ?? {});
+    if (res.isError) {
+      deps.log("serve.routine.refused", { tool: spec.due, code: errCode(res) });
+      throw new Error(`routine_refused:${errCode(res)}`);
+    }
+    const out = structured(res) ?? {};
+    const field = spec.items ?? "jobs";
+    const idField = spec.id ?? "occurrence";
+    const jobs = (Array.isArray(out[field]) ? (out[field] as Record<string, unknown>[]) : []).slice().sort((a, b) => String(a.dueAt ?? "").localeCompare(String(b.dueAt ?? "")));
+    for (const j of jobs) {
+      if (signal.aborted) return;
+      const occ = String(j[idField] ?? "");
+      if (!/^[A-Za-z0-9_-]{8,120}$/.test(occ) || runs[occ]) continue; // (a) known in any state → never again
+      await setRun(occ, { s: "claiming", report: spec.report }); // (b) before the claim
+      let claimed: Record<string, unknown> | undefined;
+      try {
+        const c = await deps.mcp.callTool(spec.claim, { occurrence: occ }, idem(`claim:${occ}`));
+        if (c.isError) {
+          deps.log("serve.routine.claim_refused", { code: errCode(c) });
+          continue; // left `claiming`: never claimed again; the server sweeps it
+        }
+        claimed = structured(c);
+      } catch {
+        deps.log("serve.routine.claim_failed", {});
+        continue; // (c) a lost answer: at-most-once beats at-least-once
+      }
+      if (claimed?.claimed !== true || !claimed.job || typeof claimed.job !== "object") {
+        const reason = String(claimed?.reason ?? "unknown").slice(0, 40);
+        deps.log("serve.routine.not_claimed", { reason });
+        await setRun(occ, { s: "not_claimed", reason });
+        continue;
+      }
+      const job = { ...(claimed.job as Record<string, unknown>), occurrence: occ };
+      await report(spec.report, occ, "dispatched"); // (d)
+      await setRun(occ, { s: "started", report: spec.report }); // saved BEFORE the turn
+      deps.log("serve.routine.turn.start", { occurrence: occ });
+      let r: { ok: boolean; summary?: string; held: number };
+      try {
+        r = await runOne(routinePrompt(spec, job, typeof j.title === "string" ? j.title : undefined));
+      } catch {
+        r = { ok: false, held: 0 };
+      }
+      deps.log("serve.routine.turn.done", { occurrence: occ, ok: r.ok, held: r.held });
+      await setRun(occ, { s: "reported", report: spec.report });
+      await report(spec.report, occ, r.ok ? "completed" : "failed", reportSummary(r.summary, r.held)); // (f)
+    }
   };
 
   while (!signal.aborted) {
     try {
+      await flushReports();
+      for (const spec of cfg.routines ?? []) {
+        if (signal.aborted) break;
+        await pollRoutine(spec);
+      }
       for (const inbox of cfg.inboxes) {
         if (signal.aborted) break;
         const key = inboxKey(inbox);
@@ -208,7 +403,7 @@ export function fileState(path: string): Pick<ServeDeps, "loadState" | "saveStat
       try {
         return JSON.parse(await readFile(path, "utf8")) as ServeState;
       } catch {
-        return { cursors: {}, seen: {}, primed: {} };
+        return { cursors: {}, seen: {}, primed: {}, routineRuns: {}, pendingReports: [] };
       }
     },
     async saveState(s) {
@@ -233,6 +428,7 @@ export async function claudeRunner(h: Extract<HarnessSpec, { kind: "claude" }>, 
   }
   return async (prompt, events) => {
     let ok = false;
+    let summary: string | undefined;
     await runTurn(
       sdk,
       prompt,
@@ -247,10 +443,14 @@ export async function claudeRunner(h: Extract<HarnessSpec, { kind: "claude" }>, 
       },
       (e) => {
         if (e.type === "held") events.onHeld({ status: "held", holdId: e.holdId, expiresAt: e.expiresAt, checkWith: e.checkWith, tool: e.tool });
-        if (e.type === "result") ok = e.ok;
+        if (e.type === "text") summary = e.text;
+        if (e.type === "result") {
+          ok = e.ok;
+          if (e.text) summary = e.text;
+        }
       },
     );
-    return { ok };
+    return { ok, ...(summary ? { summary } : {}) };
   };
 }
 
@@ -261,8 +461,9 @@ export async function commandRunner(h: Extract<HarnessSpec, { kind: "command" }>
     new Promise((resolve) => {
       const [cmd, ...args] = h.command.map((a) => a.replaceAll("{mcpCommand}", relayCommand));
       const child = spawn(cmd as string, args, { cwd: h.cwd ?? process.cwd(), env: sessionEnv(process.env, { ...(h.passthroughEnv ? { passthrough: h.passthroughEnv } : {}) }), stdio: ["pipe", "inherit", "inherit"] });
-      child.on("error", () => resolve({ ok: false }));
-      child.on("exit", (code) => resolve({ ok: code === 0 }));
+      child.on("error", () => resolve({ ok: false, summary: "harness did not start" }));
+      // command harnesses: the exit code only (their output is not parsed, STEP-B-DESIGN §2.2 f)
+      child.on("exit", (code) => resolve({ ok: code === 0, summary: `exit code ${code ?? "none"}` }));
       child.stdin.end(prompt);
     });
 }

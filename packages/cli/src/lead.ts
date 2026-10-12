@@ -268,7 +268,7 @@ async function agentServe(ctx: Ctx): Promise<void> {
   const { join } = await import("node:path");
   const abort = new AbortController();
   for (const sig of ["SIGINT", "SIGTERM"] as const) process.once(sig, () => abort.abort());
-  ctx.say(`serving agent ${item.agt}: ${cfg.inboxes.length} inbox(es), harness ${cfg.harness.kind}; Ctrl-C to stop`);
+  ctx.say(`serving agent ${item.agt}: ${cfg.inboxes.length} inbox(es), ${(cfg.routines ?? []).length} routine source(s), harness ${cfg.harness.kind}; Ctrl-C to stop`);
   await serve.serveLoop(
     cfg,
     {
