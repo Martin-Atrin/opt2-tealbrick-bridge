@@ -44,6 +44,9 @@ importers:
       '@opt2-tealbrick/bridge':
         specifier: workspace:*
         version: link:../bridge
+      '@opt2-tealbrick/harness-claude':
+        specifier: workspace:*
+        version: link:../harness-claude
       '@opt2-tealbrick/spec':
         specifier: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.2/opt2-tealbrick-spec-0.1.2.tgz
         version: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.2/opt2-tealbrick-spec-0.1.2.tgz

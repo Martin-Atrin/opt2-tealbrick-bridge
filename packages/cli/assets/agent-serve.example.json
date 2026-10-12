@@ -1,0 +1,14 @@
+{
+  "format": "tealbrick.agent-serve/1",
+  "harness": {
+    "kind": "claude",
+    "modelKeyEnv": "ANTHROPIC_API_KEY",
+    "appendSystemPrompt": "You answer messages that reach you through Teal Brick. Reply with the matching send/reply tool. Keep replies short."
+  },
+  "pollSeconds": 20,
+  "inboxes": [
+    { "tool": "connect__channel_inbox", "cursor": { "param": "sinceSeq", "from": "nextSeq" }, "items": "messages", "id": "seq" },
+    { "tool": "connect__buzz_read", "args": { "channel": "<buzz channel id from connect__buzz_channels>" }, "cursor": { "param": "since", "from": "max:createdAt" }, "items": "messages", "id": "id", "skipIf": { "fromSelf": true } }
+  ],
+  "holds": true
+}

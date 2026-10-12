@@ -228,8 +228,73 @@ async function agentLogout(ctx: Ctx): Promise<void> {
   ctx.emit({ deleted: item.con, agent: item.agt });
 }
 
+/** `tealbrick agent serve --file <agent-serve.json> [--agent <agt>]` (C58): see serve.ts. */
+async function agentServe(ctx: Ctx): Promise<void> {
+  if (!ctx.v.file) throw usageError("agent serve needs --file <agent-serve.json> (format tealbrick.agent-serve/1)");
+  const { readFile } = await import("node:fs/promises");
+  const { PassThrough } = await import("node:stream");
+  const { connectMcp, startRelay } = await import("@opt2-tealbrick/bridge");
+  const serve = await import("./serve.ts");
+  let cfg: ReturnType<typeof serve.validateServeConfig>;
+  try {
+    cfg = serve.validateServeConfig(JSON.parse(await readFile(ctx.v.file, "utf8")));
+  } catch (e) {
+    throw new CliError(EXIT.validation, "input_invalid", e instanceof Error ? e.message : "invalid config");
+  }
+  const item = await pickAgent(ctx);
+  const key = await keyOf(item);
+  // in-process relay: the watcher's MCP connection to the deployed bridge, as this agent
+  const toRelay = new PassThrough();
+  const fromRelay = new PassThrough();
+  const relay = startRelay({
+    api: api(),
+    bridgeUrl: item.bridgeUrl,
+    connection: { con: item.con, agt: item.agt, bridgeId: item.bridgeId },
+    signer: {
+      sign: async (input) => Buffer.from(await crypto.subtle.sign("Ed25519", key.privateKey, new TextEncoder().encode(input))).toString("base64url"),
+      publicJwk: () => item.publicJwk,
+    },
+    onStatus: (s) => ctx.say(JSON.stringify({ event: "serve.relay", status: s })),
+    stdin: toRelay,
+    stdout: fromRelay,
+  });
+  const mcp = connectMcp({ streams: { input: fromRelay, output: toRelay } });
+  await mcp.initialize("tealbrick-agent-serve");
+  const relayCmd = { command: process.execPath, args: [process.argv[1] ?? "tealbrick", "bridge", "serve", "--stdio", "--agent", item.agt] };
+  const runTurn =
+    cfg.harness.kind === "claude"
+      ? await serve.claudeRunner(cfg.harness, item.agt, relayCmd)
+      : await serve.commandRunner(cfg.harness, [relayCmd.command, ...relayCmd.args].map((a) => (/\s/.test(a) ? JSON.stringify(a) : a)).join(" "));
+  const { join } = await import("node:path");
+  const abort = new AbortController();
+  for (const sig of ["SIGINT", "SIGTERM"] as const) process.once(sig, () => abort.abort());
+  ctx.say(`serving agent ${item.agt}: ${cfg.inboxes.length} inbox(es), harness ${cfg.harness.kind}; Ctrl-C to stop`);
+  await serve.serveLoop(
+    cfg,
+    {
+      mcp,
+      runTurn,
+      ...serve.fileState(join(ctx.configDir(), `agent-serve-${item.con}.json`)),
+      log: (event, fields = {}) => ctx.io.stderr.write(`${JSON.stringify({ ts: new Date().toISOString(), event, agent: item.agt, ...fields })}\n`),
+      sleep: (ms, signal) =>
+        new Promise<void>((r) => {
+          const t = setTimeout(r, ms);
+          signal.addEventListener("abort", () => {
+            clearTimeout(t);
+            r();
+          }, { once: true });
+        }),
+      now: () => Date.now(),
+    },
+    abort.signal,
+  );
+  mcp.close();
+  relay.stop();
+}
+
 export const agent: Handler = async (ctx) => {
-  const cmd = requirePos(ctx, 1, "agent command (login|status|logout|list)");
+  const cmd = requirePos(ctx, 1, "agent command (login|status|serve|logout|list)");
+  if (cmd === "serve") return agentServe(ctx);
   if (cmd === "login") return agentLogin(ctx);
   if (cmd === "status") return agentStatus(ctx);
   if (cmd === "logout") return agentLogout(ctx);
