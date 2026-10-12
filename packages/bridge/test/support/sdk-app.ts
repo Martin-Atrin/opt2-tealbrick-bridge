@@ -15,14 +15,22 @@ import { AGT, BRG, notesManifest, type World, WS, waitFor as waitForRaw } from "
 
 const now = () => Math.floor(Date.now() / 1000);
 
+/**
+ * A free port for an app that listens LATER (its port is part of the manifest and the config entry). Picked outside
+ * the OS ephemeral ranges (Linux 32768–60999, macOS 49152–65535): a port-0 pick could be handed to another
+ * parallel test's ephemeral socket before the app binds it (CI flake: EADDRINUSE, tag pipeline #96).
+ */
 export async function freePort(): Promise<number> {
-  return new Promise((resolve) => {
-    const s = createServer();
-    s.listen(0, "127.0.0.1", () => {
-      const p = (s.address() as { port: number }).port;
-      s.close(() => resolve(p));
+  for (let i = 0; i < 50; i++) {
+    const port = 20_000 + Math.floor(Math.random() * 12_000);
+    const ok = await new Promise<boolean>((resolve) => {
+      const s = createServer();
+      s.once("error", () => resolve(false));
+      s.listen(port, "127.0.0.1", () => s.close(() => resolve(true)));
     });
-  });
+    if (ok) return port;
+  }
+  throw new Error("no free port in 20000-31999");
 }
 
 /** labelled wait: CI says which setup step stalled */
