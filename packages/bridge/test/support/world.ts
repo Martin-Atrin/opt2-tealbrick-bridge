@@ -143,7 +143,8 @@ export interface WorldOptions {
   limits?: Partial<ListenerLimits> & { mcp?: Partial<McpLimits> };
   /** extra key connections of the first agent */
   extraConnections?: string[];
-  /** BSD-08: a test root signs key-set statements; the bridge pins it (start option) and Portal sends them */
+  /** BSD-08: a test root signs key-set statements; the bridge pins it (start option) and Portal sends them.
+   * Default: on for real-crypto worlds (spec 0.1.12 strict rule), off for the test double. */
   keySet?: boolean;
   /** the first enrolment response carries no statement */
   enrolWithoutKeySet?: boolean;
@@ -187,8 +188,11 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
   let signingKey = portalKey;
   let keyEntries: { key: Ed25519KeyPair; status: "pending" | "active" | "retired" }[] = [{ key: portalKey, status: "active" }];
   const sign = (typ: string, claims: object) => api.signJws(typ as never, claims, signingKey);
-  if (opts.keySet && !real) throw new Error("keySet worlds need real crypto");
-  const root = opts.keySet ? await api.generateKeyPair() : undefined;
+  // spec 0.1.12: a real bridge refuses an enrolment without a root-signed statement, so real worlds run with a test
+  // root by default (keySet: false only for a world that must have none). The test double has no key-set crypto.
+  const keySetOn = opts.keySet ?? real;
+  if (keySetOn && !real) throw new Error("keySet worlds need real crypto");
+  const root = keySetOn ? await api.generateKeyPair() : undefined;
   let kssSeq = 0;
   let kss: string | undefined;
   let enrolKss: "current" | "none" | { jws: string } = opts.enrolWithoutKeySet ? "none" : "current";

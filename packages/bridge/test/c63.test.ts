@@ -179,19 +179,9 @@ describe("BSD-08 C63a: re-enrolment needs a valid statement once one is pinned",
   });
 });
 
-describe("BSD-08 transition (spec 0.1.11): no statement and nothing pinned → legacy portalKeys", () => {
-  let w: World;
-  before(async () => {
-    w = await makeWorld({ real: true });
-    await applied(w);
-  });
-  after(async () => {
-    await w.close();
-  });
-
-  test("a world without statements runs on portalKeys and pins nothing", () => {
-    assert.equal(w.bridge.ctx.identity?.pinnedKeySet, undefined);
-    assert.ok((w.bridge.ctx.identity?.portalKeys.length ?? 0) > 0);
+describe("BSD-08 spec 0.1.12: the build refuses a first enrolment without a statement", () => {
+  test("a real bridge with the build's strict rule and no statement on the wire does not enrol", async () => {
+    await assert.rejects(makeWorld({ real: true, keySet: true, enrolWithoutKeySet: true }), /enrolment refused: keyset_missing|enrol_failed/);
   });
 });
 

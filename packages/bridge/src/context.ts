@@ -13,7 +13,7 @@ import type { Rejection, Table } from "./table.ts";
 import type { Logger } from "./util.ts";
 import { nowS } from "./util.ts";
 
-export const BRIDGE_VERSION = "0.1.13";
+export const BRIDGE_VERSION = "0.1.14";
 export const SDK_MAJORS = [1];
 
 /**
@@ -22,8 +22,8 @@ export const SDK_MAJORS = [1];
  */
 export const PORTAL_ROOT_CHANNEL: "dev" | "prod" = "dev";
 
-/** spec 0.1.12 removes the no-statement fallback (C63a); true then = refuse a first enrolment without a statement */
-export const KEYSET_REQUIRED = false;
+/** spec 0.1.12 (C63a): the no-statement fallback is gone; a first enrolment without a valid statement is refused */
+export const KEYSET_REQUIRED = true;
 
 /** The SDK major this bridge is built for; `sdkMajorServed` (manifest, C44) also serves the one before. */
 export const SDK_CURRENT_MAJOR = 1;
