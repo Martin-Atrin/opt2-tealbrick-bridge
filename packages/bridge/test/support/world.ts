@@ -24,6 +24,7 @@ export const INS = "ins_01HNNNNNNNNNNNNNNNNNNNNNNN";
 export const HOOKINS = "ins_01HHHHHHHHHHHHHHHHHHHHHHHH";
 export const ENROL = "tbe_testenrolmentcode";
 export const APP_CODE = "tbe_appinstancecode";
+export const SVC_CODE = "tbe_servicecodeforengine";
 
 const now = () => Math.floor(Date.now() / 1000);
 
@@ -196,7 +197,10 @@ export async function makeWorld(opts: { withHook?: boolean; real?: boolean } = {
     hooks: opts.withHook ? [{ id: "guard.check", ins: HOOKINS, product: "guard", hookId: "check", phase: "before", order: 1, timeoutMs: 1000, match: { products: ["notes"] } }] : [],
     skills: { digest: "sha256:00", files: [{ product: "notes", id: "use-notes", title: "Using notes", content: "Hello {{agent.name}}" }] },
     keyRequirements: [{ name: "NOTES_API_KEY", label: "Notes key", ins: INS, product: "notes", required: true, source: "account_default", usedBy: ["app"] }],
-    enrolCodes: [{ digest: api.opaqueDigest(APP_CODE), kind: "instance", ins: INS, product: "notes", exp: now() + 3600 }],
+    enrolCodes: [
+      { digest: api.opaqueDigest(APP_CODE), kind: "instance", ins: INS, product: "notes", exp: now() + 3600 },
+      { digest: api.opaqueDigest(SVC_CODE), kind: "service", ins: INS, service: "engine", product: "notes", exp: now() + 3600 },
+    ],
   };
   const publish = async (tweak?: (c: WorkspaceConfig) => void): Promise<number> => {
     const c: WorkspaceConfig = structuredClone(base);

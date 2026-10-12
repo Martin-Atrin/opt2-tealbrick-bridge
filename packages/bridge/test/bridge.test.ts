@@ -2,7 +2,7 @@ import assert from "node:assert/strict";
 import { PassThrough } from "node:stream";
 import { after, before, describe, test } from "node:test";
 import { startRelay } from "../src/relay.ts";
-import { AGT, AGT2, APP_CODE, BRG, CON, INS, makeWorld, type World, WS, waitFor } from "./support/world.ts";
+import { AGT, AGT2, APP_CODE, BRG, CON, INS, makeWorld, SVC_CODE, type World, WS, waitFor } from "./support/world.ts";
 
 const now = () => Math.floor(Date.now() / 1000);
 
@@ -110,6 +110,20 @@ describe(`deployed bridge (${real ? "real manifest crypto" : "test double"})`, (
   test("claim, key page and key fetch: only declared keys, values never in status", async () => {
     const api = w.api;
     const appKey = await api.generateKeyPair();
+    // a companion service that starts before its app: retryable refusal, code NOT consumed
+    const svcKey = await api.generateKeyPair();
+    const svcClaim = () =>
+      fetch(`${w.internalUrl}/tb/v1/claim`, {
+        method: "POST",
+        headers: { "content-type": "application/json" },
+        body: JSON.stringify({ code: SVC_CODE, instancePublicKey: svcKey.publicJwk, manifestDigest: w.bridge.ctx.table?.config.apps[0]?.manifestDigest, version: "1.0.0", sdkVersion: "0.1.2", service: "engine" }),
+      });
+    const early = await svcClaim();
+    assert.equal(early.status, 503);
+    assert.equal(early.headers.get("retry-after"), "5");
+    assert.equal((await early.json()).error.code, "app_not_claimed");
+    const early2 = await svcClaim();
+    assert.equal(early2.status, 503, "the service code was not consumed by the early attempt");
     const tooNew = await fetch(`${w.internalUrl}/tb/v1/claim`, {
       method: "POST",
       headers: { "content-type": "application/json" },
@@ -127,6 +141,13 @@ describe(`deployed bridge (${real ? "real manifest crypto" : "test double"})`, (
     const cr = await claim.json();
     assert.equal(cr.ins, INS);
     assert.equal(cr.slice, undefined, "no slice until Core lists the key");
+    // after the app claimed (pending at this bridge), the service claim completes with the app key
+    const late = await svcClaim();
+    assert.equal(late.status, 200);
+    const lr = await late.json();
+    assert.deepEqual(lr.app.publicKey, appKey.publicJwk);
+    assert.ok(Array.isArray(lr.serviceKeys));
+    assert.equal((await svcClaim()).status, 403, "a completed service claim consumes its code");
     const reuse = await fetch(`${w.internalUrl}/tb/v1/claim`, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ code: APP_CODE, instancePublicKey: appKey.publicJwk, manifestDigest: w.bridge.ctx.table?.config.apps[0]?.manifestDigest, version: "1.0.0", sdkVersion: "1.0.0" }) });
     assert.equal(reuse.status, 403);
     // key page via a keys ticket

@@ -92,7 +92,8 @@ export class InternalApi {
       sendJson(res, 404, envelope("not_found", "not found", requestId));
     } catch (e) {
       if (e instanceof BridgeError && e.status === 400 && statusFor(e.code) !== 400) return sendError(res, new BridgeError(e.code, statusFor(e.code), e.message), requestId);
-      sendError(res, e, requestId);
+      const retry: Record<string, string> = e instanceof BridgeError && e.status === 503 ? { "retry-after": "5" } : {};
+      sendError(res, e, requestId, retry);
     }
   }
 
@@ -129,6 +130,23 @@ export class InternalApi {
     } else if (!app || app.entry.manifestDigest !== r.manifestDigest) {
       throw new BridgeError("manifest_mismatch", 409);
     }
+    // Build the COMPLETE answer first; record the claim and consume the one-time code only when it is complete.
+    const out: ClaimResponse = { ins: entry.ins, bridge: { id: id.bridgeId, publicKey: id.key.publicJwk, internalUrl: ctx.internalUrl } };
+    const keyListed = t.instanceKeys.has(`${entry.ins}|${service ?? ""}`);
+    if (keyListed && app && !service) out.slice = app.entry.slice;
+    if (service) {
+      // the app's key: listed by Core, or the app's own claim pending at this bridge (S5)
+      const appKey =
+        t.config.instanceKeys.find((k) => k.ins === entry.ins && !k.svc)?.jwk ??
+        ctx.state.claims.find((c) => c.ins === entry.ins && c.service === undefined)?.publicKey;
+      if (!appKey) {
+        // companions may start before their app (startOrder): retryable, code NOT consumed
+        throw new BridgeError("app_not_claimed", 503, "the app instance has not claimed yet; retry");
+      }
+      if (!manifest) throw new BridgeError("app_unavailable", 503, "the app manifest is not available yet; retry");
+      out.app = { publicKey: appKey };
+      out.serviceKeys = activeKeys(t, entry.ins, manifest, service).map((k) => ({ name: k.name, env: k.name }));
+    }
     ctx.state.claims.push({
       kind: entry.kind,
       ins: entry.ins,
@@ -144,14 +162,6 @@ export class InternalApi {
     ctx.state.saveClaims();
     ctx.emit("claim");
     ctx.log.info("bridge.claim", { ins: entry.ins, kind: entry.kind, ...(service ? { svc: service } : {}) });
-    const out: ClaimResponse = { ins: entry.ins, bridge: { id: id.bridgeId, publicKey: id.key.publicJwk, internalUrl: ctx.internalUrl } };
-    const keyListed = t.instanceKeys.has(`${entry.ins}|${service ?? ""}`);
-    if (keyListed && app && !service) out.slice = app.entry.slice;
-    if (service) {
-      const appKey = t.config.instanceKeys.find((k) => k.ins === entry.ins && !k.svc);
-      if (appKey) out.app = { publicKey: appKey.jwk };
-      out.serviceKeys = activeKeys(t, entry.ins, manifest, service).map((k) => ({ name: k.name, env: k.name }));
-    }
     sendJson(res, 200, out);
   }
 
