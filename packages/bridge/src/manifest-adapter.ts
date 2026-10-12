@@ -65,6 +65,8 @@ export function manifestApi(): ManifestApi {
     holdVerdictClaim: (r) => m.holdVerdictClaim(r as never),
     onBehalfOfFromMeta: (v) => m.onBehalfOfFromMeta(v) as never,
     isValidLaunchPath: (p) => m.isValidLaunchPath(p),
+    requiredBridgeVersion: (mf) => m.requiredBridgeVersion(mf as never),
+    compareSemver: (a, b) => m.compareSemver(a, b),
   };
 }
 

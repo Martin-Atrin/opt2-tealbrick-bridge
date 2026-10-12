@@ -110,6 +110,8 @@ export interface World {
   setAckFails(on: boolean): void;
   /** the app is updated: serves a new manifest (new digest) and fails its next `failures` manifest fetches */
   updateApp(failures: number): string;
+  /** the app is updated to exactly this manifest (validity not checked); returns the digest the config lists */
+  updateAppTo(manifest: Record<string, unknown>): string;
   rotateKey(phase: "announce" | "activate" | "retire"): Promise<void>;
   /** BSD-08 worlds (`keySet: true`): the test root, the current statement and its controls */
   keySet: {
@@ -481,6 +483,18 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
     },
     setEnv(k, v) {
       envOverrides[k] = v;
+    },
+    updateAppTo(manifest) {
+      servedManifest = manifest;
+      manifestFailures = 0;
+      let d: string;
+      try {
+        d = api.manifestDigest(manifest as never);
+      } catch {
+        d = `sha256:${"0".repeat(64)}`;
+      }
+      base.apps[0] = { ...(base.apps[0] as WorkspaceConfig["apps"][number]), version: String(manifest.version ?? "9.9.9"), manifestDigest: d as never };
+      return d;
     },
     updateApp(failures) {
       servedManifest = { ...notesManifest, version: "1.0.1" };

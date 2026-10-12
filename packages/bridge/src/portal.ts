@@ -170,6 +170,9 @@ export class ManifestError extends Error {
 /** One line per app + reason per minute: fetch failure vs digest mismatch (with both digests — public values). */
 export function logManifestFailure(ctx: BridgeContext, app: AppEntry, e: unknown): void {
   const mismatch = e instanceof ManifestError && e.message === "manifest_mismatch";
+  // v0.1.18 (spec 0.1.17, L3, C104): a manifest the bridge REFUSED is reported (Core shows the reason instead of "starting");
+  // a transient fetch failure (HTTP status, network) is not a refusal
+  if (e instanceof ManifestError && !e.message.startsWith("fetch_")) ctx.reject({ kind: "manifest", code: e.message, detail: `${app.product} ${app.ins}` });
   ctx.log.warn("bridge.manifest.unavailable", {
     ins: app.ins,
     product: app.product,
@@ -183,7 +186,11 @@ async function fetchManifestFrom(ctx: BridgeContext, app: AppEntry): Promise<Man
   const res = await ctx.fetch(new URL("/tb/v1/manifest", app.internalUrl), { redirect: "error", signal: AbortSignal.timeout(10_000) });
   if (!res.ok) throw new ManifestError(`fetch_http_${res.status}`);
   const v = ctx.api.validateManifest(await res.json());
-  if (!v.ok) throw new ManifestError("manifest_invalid");
+  // the validator's own code (e.g. dynamic_invalid), so Core can say why (L3)
+  if (!v.ok) throw new ManifestError(v.errors[0]?.code ?? "manifest_invalid");
+  // C104: an app that needs a newer bridge is refused here, never routed half-working
+  const need = ctx.api.requiredBridgeVersion(v.manifest).bridge;
+  if (need && ctx.api.compareSemver(need, BRIDGE_VERSION) > 0) throw new ManifestError("bridge_too_old");
   return v.manifest;
 }
 

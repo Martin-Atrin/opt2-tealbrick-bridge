@@ -379,7 +379,7 @@ export class McpServer {
     } catch (e) {
       const code = e instanceof BridgeError ? e.code : "app_error";
       const message = e instanceof BridgeError ? e.message : "internal error";
-      return toolError(code, message, requestId);
+      return toolError(code, message, requestId, e instanceof BridgeError ? e.details : undefined);
     } finally {
       this.callsInFlight -= 1;
       const left = (this.callsByCon.get(p.con) ?? 1) - 1;
@@ -453,7 +453,7 @@ function toolOk(output: Json): unknown {
   return { content: [{ type: "text", text: JSON.stringify(output) }], structuredContent: structured };
 }
 
-function toolError(code: string, message: string, requestId: string): unknown {
-  const env = envelope(code, message, requestId);
+function toolError(code: string, message: string, requestId: string, details?: Record<string, unknown>): unknown {
+  const env = envelope(code, message, requestId, details);
   return { content: [{ type: "text", text: JSON.stringify(env) }], structuredContent: env, isError: true };
 }

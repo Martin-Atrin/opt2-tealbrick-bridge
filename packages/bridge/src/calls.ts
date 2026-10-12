@@ -242,6 +242,11 @@ export class CallRouter {
     if (!isRecord(value) || !Array.isArray(value.crud) || !(EFFECTS as readonly string[]).includes(value.effect as string)) {
       throw new BridgeError("dynamic_resolve_failed", 503);
     }
+    // C107 (BRIDGE v0.1.17 rule, shipped 0.1.18): an outward or money resolution must name its hold family, or the
+    // held/gate decision would silently skip it. Refused, not retried; not cached.
+    if ((value.effect === "outward" || value.effect === "money") && !(typeof value.holdFamily === "string" && value.holdFamily)) {
+      throw new BridgeError("dynamic_resolve_failed", 403, "the app resolved an outward or money tool without a hold family", { reason: "family_missing" });
+    }
     if (this.resolveCache.size > 5000) this.resolveCache.clear();
     this.resolveCache.set(key, { at: Date.now(), value });
     return value;

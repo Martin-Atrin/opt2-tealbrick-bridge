@@ -103,6 +103,9 @@ export interface ManifestApi {
   onBehalfOfFromMeta(value: unknown): Json | null;
   /** C86 launch path rule */
   isValidLaunchPath(path: string): boolean;
+  /** C104 (spec 0.1.17): minimum bridge version a manifest needs (declared requires.bridge + BRIDGE_FEATURES) */
+  requiredBridgeVersion(m: Manifest): { bridge: string | null; reasons: string[] };
+  compareSemver(a: string, b: string): number;
 }
 
 export interface HoldVerdict {

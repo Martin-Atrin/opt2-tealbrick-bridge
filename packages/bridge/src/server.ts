@@ -193,6 +193,7 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
       if (path === "/oauth/pair/callback" && req.method === "POST") return await oauth.pairCallback(req, res);
       if (path === "/oauth/token" && req.method === "POST") return await oauth.token(req, res);
       if (path === "/oauth/revoke" && req.method === "POST") return await oauth.revoke(req, res);
+      if (path === "/agent/connection/revoke" && req.method === "POST") return await oauth.revokeOwnConnection(req, res, requestId);
       if (path.startsWith("/a/")) return await person.app(req, res, requestId);
       if (path.startsWith("/p/")) return await person.publicRoute(req, res, requestId);
       if (path.startsWith("/admin/v1/")) return await admin.handle(req, res, requestId);

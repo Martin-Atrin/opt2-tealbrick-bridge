@@ -21,7 +21,7 @@ import {
 import { isRefusal } from "./api.ts";
 import type { BridgeContext } from "./context.ts";
 import { connectionState, issueAccess, revokeLocal, rotateRefresh } from "./identity.ts";
-import { BridgeError, clientIp, isRecord, nowS, RateLimiter, readBody, sendJson } from "./util.ts";
+import { BridgeError, clientIp, envelope, isRecord, nowS, RateLimiter, readBody, sendJson } from "./util.ts";
 
 interface ClientReg {
   redirect_uris: string[];
@@ -352,16 +352,16 @@ export class OAuthServer {
     sendJson(res, 200, out, { pragma: "no-cache" });
   }
 
-  /** Key connections (TBD, CLI agent mode, kits): RFC 7523 agent assertion signed by K4. */
-  private async tokenFromAssertion(res: ServerResponse, f: Record<string, unknown>): Promise<void> {
+  /**
+   * Verifies an RFC 7523 agent assertion signed by the connection's own key (K4). H-3: until the signature proves the
+   * caller holds the connection key, every failure answers the SAME way (`connection_unknown`, which a waiting client
+   * retries): no oracle on whether a connection id exists or is active. Marks the jti used (one use, any route).
+   */
+  private verifyKeyAssertion(assertion: string): { con: ConnectionId; agt: AgentId; gen: number; exp: number } {
     const t = this.ctx.table;
     if (!t) throw new BridgeError("temporarily_unavailable");
-    const assertion = typeof f.assertion === "string" ? f.assertion : "";
     const peek = peekPayload<AgentAssertionClaims>(assertion);
     const con = typeof peek?.con === "string" ? peek.con : undefined;
-    // H-3: until the signature proves the caller holds the connection key, every failure answers the SAME way
-    // (`connection_unknown`, which a waiting client retries): no oracle on whether a connection id exists or is
-    // active. Only a verified key holder learns that its connection is revoked or paused (`invalid_grant`).
     const notYet = () => new BridgeError("connection_unknown");
     const entry = con ? t.connections.get(con as never) : undefined;
     if (!con || !entry || entry.method !== "key" || !entry.publicKey) throw notYet();
@@ -377,12 +377,22 @@ export class OAuthServer {
     if (isRefusal(v) || v.claims.sub !== `tb:agt:${entry.agt}` || v.claims.con !== con) throw notYet();
     const replayKey = `${v.header.kid}|${v.claims.jti}`;
     if (this.assertionJtis.has(replayKey) || this.ctx.proofBeforeBoot(v.claims.iat, now)) throw notYet();
+    this.assertionJtis.set(replayKey, v.claims.exp + 30);
+    return { con: con as ConnectionId, agt: entry.agt, gen: entry.gen, exp: v.claims.exp };
+  }
+
+  /** Key connections (TBD, CLI agent mode, kits): RFC 7523 agent assertion signed by K4. */
+  private async tokenFromAssertion(res: ServerResponse, f: Record<string, unknown>): Promise<void> {
+    const t = this.ctx.table;
+    if (!t) throw new BridgeError("temporarily_unavailable");
+    const { con } = this.verifyKeyAssertion(typeof f.assertion === "string" ? f.assertion : "");
+    const entry = t.connections.get(con);
+    if (!entry) throw new BridgeError("connection_unknown");
     // verified key holder from here on
     const st = connectionState(this.ctx, con as never);
     if (entry.status !== "active" || !st?.active || !t.agents.has(entry.agt)) throw new BridgeError("invalid_grant");
     // per-connection bucket counts only VERIFIED assertions (an attacker cannot spend another agent's budget)
     if (!this.tokenLimit.take(con)) throw new BridgeError("rate_limited");
-    this.assertionJtis.set(replayKey, v.claims.exp + 30);
     const out: TokenResponse = { access_token: await issueAccess(this.ctx, entry.agt, con, entry.gen), token_type: "Bearer", expires_in: 900 };
     sendJson(res, 200, out, { pragma: "no-cache" });
   }
@@ -401,6 +411,25 @@ export class OAuthServer {
       }
     }
     res.writeHead(200, { "cache-control": "no-store" }).end();
+  }
+  /**
+   * F39 (bridge 0.1.18): an agent revokes its OWN key connection (`tealbrick adopt --undo`). Authenticated by an
+   * agent assertion signed by THAT connection's key; nothing else is revocable this way. Refused locally at once and
+   * reported to Portal as connectionsRevoked {reason client_revoke}; Core lists it revoked in the next config.
+   * Idempotent for the key holder. Failures before the signature is verified all answer `connection_unknown` (H-3).
+   */
+  async revokeOwnConnection(req: IncomingMessage, res: ServerResponse, requestId: string): Promise<void> {
+    if (!this.revokeLimit.take(clientIp(req))) return sendJson(res, 429, envelope("rate_limited", "rate limited", requestId), { "retry-after": "60" });
+    const body = parseBody(await readBody(req, 16 * 1024), req.headers["content-type"]);
+    try {
+      const { con } = this.verifyKeyAssertion(typeof body.assertion === "string" ? body.assertion : "");
+      const already = !connectionState(this.ctx, con)?.active;
+      if (!already) revokeLocal(this.ctx, con, "client_revoke");
+      sendJson(res, 200, { con, status: "revoked", ...(already ? { already: true } : {}) }, { "cache-control": "no-store" });
+    } catch (e) {
+      if (e instanceof BridgeError && e.code === "temporarily_unavailable") return sendJson(res, 503, envelope("temporarily_unavailable", "bridge not ready", requestId), { "retry-after": "5" });
+      sendJson(res, 400, envelope("connection_unknown", "connection_unknown", requestId));
+    }
   }
 }
 

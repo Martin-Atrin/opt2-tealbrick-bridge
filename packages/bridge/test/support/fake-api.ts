@@ -141,6 +141,8 @@ export function fakeApi(): ManifestApi {
     holdVerdictClaim: (r) => realManifest.holdVerdictClaim(r as never),
     onBehalfOfFromMeta: (v) => realManifest.onBehalfOfFromMeta(v) as never,
     isValidLaunchPath: (p) => realManifest.isValidLaunchPath(p),
+    requiredBridgeVersion: (mf) => realManifest.requiredBridgeVersion(mf as never),
+    compareSemver: (a, b) => realManifest.compareSemver(a, b),
   };
   return api;
 }

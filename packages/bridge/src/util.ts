@@ -6,17 +6,20 @@ import { tooDeep } from "./json-limits.ts";
 export class BridgeError extends Error {
   readonly code: BridgeErrorCode | (string & {});
   readonly status: number;
-  constructor(code: BridgeErrorCode | (string & {}), status = 400, message?: string) {
+  /** optional machine-readable refusal details (routes ErrorEnvelope `error.details`) */
+  readonly details?: Record<string, unknown>;
+  constructor(code: BridgeErrorCode | (string & {}), status = 400, message?: string, details?: Record<string, unknown>) {
     super(message ?? code);
     this.code = code;
     this.status = status;
+    if (details) this.details = details;
   }
 }
 
 export const nowS = (): number => Math.floor(Date.now() / 1000);
 
-export function envelope(code: string, message: string, requestId: string): ErrorEnvelope {
-  return { error: { code, message, requestId } };
+export function envelope(code: string, message: string, requestId: string, details?: Record<string, unknown>): ErrorEnvelope {
+  return { error: { code, message, requestId, ...(details ? { details } : {}) } } as ErrorEnvelope;
 }
 
 /** Default HTTP status per refuse code. */
