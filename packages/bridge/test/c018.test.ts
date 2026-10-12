@@ -114,3 +114,44 @@ describe("0.1.18: C108 tolerant held reader (manifest 0.1.11 verifyGrant)", () =
     assert.notEqual(r.json.result?.isError, true, JSON.stringify(r.json.result?.structuredContent));
   });
 });
+
+/** C111a (manifest 0.1.12 gate, bridge 0.1.19): a FREE grant whose `wf` is non-empty is limited to those ops. */
+describe("0.1.19: C111a wf limits ops in any mode", () => {
+  let w: World;
+  before(async () => {
+    w = await makeWorld({ real: true });
+  });
+  after(async () => {
+    await w.close();
+  });
+
+  test("free + wf [notes_list]: only notes_list is listed; notes_create is refused not_in_workflow; empty wf = verb level", async () => {
+    const now = () => Math.floor(Date.now() / 1000);
+    const setGrant = async (wf: string[]) => {
+      const grant = await w.signPortal("tb-grant+jwt", { iss: "tb:portal", sub: `tb:agt:${AGT}`, aud: `tb:ins:${INS}`, iat: now(), exp: now() + 3600, jti: w.api.ulid(), ws: WS, cnf: { brg: BRG }, crud: ["read", "create"], mode: "free", held: [], caps: {}, wf, polrev: 1 });
+      await w.amend((c) => {
+        c.grants = c.grants.filter((g) => {
+          const p = JSON.parse(Buffer.from(g.split(".")[1] as string, "base64url").toString("utf8")) as { sub: string; aud: string };
+          return !(p.sub === `tb:agt:${AGT}` && p.aud === `tb:ins:${INS}`);
+        });
+        c.grants.push(grant);
+      });
+      await waitFor(() => w.bridge.ctx.table?.rev === w.rev(), 15000);
+    };
+    const session = async () => {
+      const token = await w.agentToken();
+      const init = await w.mcp(token, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } } });
+      return { token, sid: init.session as string };
+    };
+    const names = async (s: { token: string; sid: string }) => ((await w.mcp(s.token, { jsonrpc: "2.0", id: 2, method: "tools/list" }, s.sid)).json.result.tools as { name: string }[]).map((t) => t.name).filter((n) => n.startsWith("notes__notes_"));
+    await setGrant(["notes_list"]);
+    const s = await session();
+    assert.deepEqual(await names(s), ["notes__notes_list"]);
+    const r = await w.mcp(s.token, { jsonrpc: "2.0", id: 3, method: "tools/call", params: { name: "notes__notes_create", arguments: { title: "x" } } }, s.sid);
+    assert.equal(r.json.result?.isError, true);
+    assert.ok(["not_in_workflow", "unknown_tool"].includes(r.json.result?.structuredContent?.error?.code), JSON.stringify(r.json.result?.structuredContent));
+    await setGrant([]);
+    const s2 = await session();
+    assert.deepEqual((await names(s2)).sort(), ["notes__notes_create", "notes__notes_list", "notes__notes_send"]);
+  });
+});

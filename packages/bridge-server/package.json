@@ -1,6 +1,6 @@
 {
   "name": "@opt2-tealbrick/bridge-server",
-  "version": "0.1.18",
+  "version": "0.1.19",
   "private": true,
   "type": "module",
   "description": "Deployed bridge entry for the workspace private network.",
@@ -10,5 +10,5 @@
   "files": ["dist"],
   "bin": { "tealbrick-bridge-server": "./dist/server.js" },
   "scripts": { "build": "tsc -p tsconfig.build.json" },
-  "dependencies": { "@opt2-tealbrick/spec": "https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.17/opt2-tealbrick-spec-0.1.17.tgz", "@opt2-tealbrick/bridge": "workspace:*" }
+  "dependencies": { "@opt2-tealbrick/spec": "https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.20/opt2-tealbrick-spec-0.1.20.tgz", "@opt2-tealbrick/bridge": "workspace:*" }
 }

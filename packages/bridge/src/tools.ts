@@ -66,7 +66,9 @@ export function visibleOps(app: AppRuntime, grant: GrantClaims): OperationView[]
     if (op.standard) continue; // tb.hold_status is added per product separately
     if (!subset(op.crud, grant.crud)) continue;
     if (op.scopeType && !app.scopeTypes.includes(op.scopeType)) continue;
-    if (grant.mode === "bound" && !grant.wf.includes(op.id)) continue;
+    // listing mirror of gate() step (4) (manifest 0.1.12, C111a): `wf` limits ops when the grant is Bound OR its `wf`
+    // is non-empty (any mode). gate() enforces it per call; REQUESTS.md asks for a shared helper so this is not local.
+    if ((grant.mode === "bound" || grant.wf.length > 0) && !grant.wf.includes(op.id)) continue;
     out.push(op);
   }
   return out;
