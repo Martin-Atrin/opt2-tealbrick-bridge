@@ -92,6 +92,13 @@ export type HarnessSpec =
       /** C96/F14: the persona read from a file (path relative to the config file); appended after appendSystemPrompt */
       appendSystemPromptFile?: string;
       sdkModule?: string;
+      /**
+       * F48: serve turns never persist an SDK session under ~/.claude/projects/ (default false). Set true only to
+       * get the SDK's own transcripts back (they are written OUTSIDE the agent folder).
+       */
+      persistSession?: boolean;
+      /** F48: a folder (relative to the config file) that gets one JSONL line per turn event; 0700 folder, 0600 files */
+      transcripts?: string;
       passthroughEnv?: string[];
       maxTurns?: number;
       /** C96/F8: Claude built-in tools the agent may use (default none, e.g. ["Read","Grep","WebSearch"]) */
@@ -629,6 +636,8 @@ export async function claudeRunner(h: Extract<HarnessSpec, { kind: "claude" }>, 
     let ok = false;
     let summary: string | undefined;
     const relayArgs = turnOpts?.onBehalfOf ? [...relay.args, "--on-behalf-of", encodeOnBehalfOf(turnOpts.onBehalfOf)] : relay.args;
+    const transcript: Record<string, unknown>[] | null = h.transcripts ? [{ at: new Date().toISOString(), type: "prompt", text: prompt, ...(turnOpts?.onBehalfOf ? { onBehalfOf: turnOpts.onBehalfOf } : {}) }] : null;
+    try {
     await runTurn(
       sdk,
       prompt,
@@ -645,8 +654,10 @@ export async function claudeRunner(h: Extract<HarnessSpec, { kind: "claude" }>, 
         ...(h.effort ? { effort: h.effort } : {}),
         ...(h.maxBudgetUsd ? { maxBudgetUsd: h.maxBudgetUsd } : {}),
         ...(h.turnTimeoutSeconds ? { turnTimeoutMs: h.turnTimeoutSeconds * 1000 } : {}),
+        persistSession: h.persistSession === true,
       },
       (e) => {
+        if (transcript) transcript.push({ at: new Date().toISOString(), ...e });
         if (e.type === "held") events.onHeld({ status: "held", holdId: e.holdId, expiresAt: e.expiresAt, checkWith: e.checkWith, tool: e.tool });
         if (e.type === "text") summary = e.text;
         if (e.type === "result") {
@@ -655,8 +666,20 @@ export async function claudeRunner(h: Extract<HarnessSpec, { kind: "claude" }>, 
         }
       },
     );
+    } finally {
+      if (transcript && h.transcripts) await writeTranscript(resolvePath(configDir, h.transcripts), transcript).catch(() => undefined);
+    }
     return { ok, ...(summary ? { summary } : {}) };
   };
+}
+
+/** F48: append one turn to <dir>/<YYYY-MM-DD>.jsonl (folder 0700, file 0600). */
+export async function writeTranscript(dir: string, lines: Record<string, unknown>[]): Promise<void> {
+  const { appendFile, chmod, mkdir } = await import("node:fs/promises");
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  await chmod(dir, 0o700);
+  const file = `${dir}/${new Date().toISOString().slice(0, 10)}.jsonl`;
+  await appendFile(file, `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, { mode: 0o600 });
 }
 
 /** Any harness CLI (e.g. Eve's): prompt on stdin, allow-listed env, `{mcpCommand}` placeholder for the relay. */

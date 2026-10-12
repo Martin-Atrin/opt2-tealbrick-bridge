@@ -77,6 +77,11 @@ export interface SessionOptions {
   maxBudgetUsd?: number;
   /** a turn is aborted after this many ms (runTurn passes an AbortController to the SDK) */
   turnTimeoutMs?: number;
+  /**
+   * F48: false = the SDK writes no session transcript to ~/.claude/projects/ (the session cannot be resumed). The
+   * model login (~/.claude credentials or the API key) is not touched. Default: the SDK default (persisted).
+   */
+  persistSession?: boolean;
 }
 
 /** Text shown to the model next to a held result. */
@@ -113,6 +118,7 @@ export function buildOptions(o: SessionOptions): Record<string, unknown> {
     ...(o.maxTurns ? { maxTurns: o.maxTurns } : {}),
     ...(o.effort ? { effort: o.effort } : {}),
     ...(o.maxBudgetUsd && o.maxBudgetUsd > 0 ? { maxBudgetUsd: o.maxBudgetUsd } : {}),
+    ...(o.persistSession === false ? { persistSession: false } : {}),
     hooks: {
       PostToolUse: [
         {

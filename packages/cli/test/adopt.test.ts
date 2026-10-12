@@ -131,7 +131,8 @@ describe("tealbrick adopt (C96 phase 1)", () => {
     assert.ok(sugg, "C106a: the device request carries the adopt suggestion");
     assert.equal(sugg?.wake, "serve");
     assert.deepEqual(sugg?.channel, { kind: "buzz_channel" }, "F35: the owner picks the Buzz channel at approval");
-    assert.deepEqual(sugg?.grants.find((g) => g.product === "knowledge"), { product: "knowledge", crud: ["read"], operations: ["document_create"] }, "read + the write op the persona needs");
+    assert.deepEqual(sugg?.grants.find((g) => g.product === "knowledge"), { product: "knowledge", crud: ["read"] }, "F46: read only; the owner ticks writes in Portal");
+    assert.ok(!sugg?.grants.some((g) => g.operations), "F46: no invented write ops");
     assert.ok(sugg?.grants.some((g) => g.product === "connect"));
     assert.equal(r.json.toolsReady, true);
     assert.equal(r.json.probe.tools, 2);
@@ -256,16 +257,16 @@ describe("tealbrick adopt (C96 phase 1)", () => {
     assert.ok(!nc.some((x: string) => x.includes("kit.credentials.json")), "its files are not listed piecemeal");
   });
 
-  test("F46: with an owner session the suggestion offers read for every DEPLOYED app and drops personas' others", async () => {
-    await h.signIn();
-    h.portal.on("GET", "/me", () => ({ body: { currentWorkspaceId: WS } }));
-    h.portal.on("GET", "/workspaces/{ws}/instances", () => ({ body: { items: [{ product: "connect", state: "running" }, { product: "kanban", state: "running" }, { product: "knowledge", state: "running" }] } }));
-    const r = await h.run(["adopt", "--from-v1", v1(), "--dry-run", "--json"]);
+  test("F46: products from any identifier form or the product name in prose; no owner session; never a phantom", async () => {
+    const persona = join(h.home, "personas", "heinz.md");
+    await writeFile(persona, "Plan work on the Kanban board.\nUse mcp__tealbrick__evolution__routines_due and `knowledge__recall`.\nSend with mcp__mail__send.\n");
+    const r = await h.run(["adopt", "--harness", "claude-sdk", "--name", "Heinz", "--persona", persona, "--dry-run", "--json"]);
     assert.equal(r.code, 0, r.err);
-    const products = r.json.suggestion.grants.map((g: { product: string }) => g.product).sort();
-    assert.deepEqual(products, ["connect", "kanban", "knowledge"]);
-    assert.deepEqual(r.json.suggestion.grants.find((g: { product: string }) => g.product === "knowledge").operations, ["document_create"]);
-    await h.store.delete("tealbrick.person");
+    assert.deepEqual(
+      r.json.suggestion.grants.map((g: { product: string }) => g.product),
+      ["connect", "evolution", "kanban", "knowledge"],
+    );
+    assert.ok(r.json.suggestion.grants.every((g: { crud: string[]; operations?: string[] }) => g.crud.join() === "read" && !g.operations));
   });
 
   test("F47: REUSE keeps a remote (OAuth) Codex entry unchanged; --switch-to-stdio is explicit and shown in the plan", async () => {

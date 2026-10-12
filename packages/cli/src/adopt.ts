@@ -444,66 +444,48 @@ async function askLine(ctx: Ctx, question: string): Promise<string> {
   return answer.trim();
 }
 
-/** Opt2 tools the persona refers to after the rewrites (code spans / mcp__ names), e.g. knowledge__document_create. */
-export async function referencedTools(files: string[]): Promise<string[]> {
-  const out = new Set<string>();
-  for (const f of files) {
-    for (const line of (await readFile(f, "utf8")).split("\n")) {
-      const r = rewriteLine(line);
-      // F46: an unrewritten v1 `mcp__<server>__<tool>` name is not an opt2 product ("mcp" was a phantom product)
-      const plain = r.line.replace(/\bmcp__[A-Za-z0-9_-]+__[A-Za-z0-9_]+/g, " ");
-      for (const m of plain.matchAll(/\b([a-z][a-z0-9-]{1,31})__([a-z][a-z0-9_]{1,63})\b/g)) if (m[1] !== "mcp") out.add(`${m[1]}__${m[2]}`);
-    }
-  }
-  return [...out];
-}
-
-/** write ops among the rewrite targets (the table's opt2 names that change data) */
-const WRITE_TOOLS = new Set(["knowledge__document_create", "knowledge__document_update", "knowledge__collection_create", "connect__buzz_post"]);
+/** F46: Teal Brick product ids and the product NAMES that mean them in prose (case-sensitive, whole words) */
+const PRODUCT_IDS = ["connect", "evolution", "fleet", "inbox", "kanban", "knowledge", "rules"];
+const PRODUCT_NAMES: Readonly<Record<string, string>> = { Knowledge: "knowledge", Kanban: "kanban", Connect: "connect", Buzz: "connect", Evolution: "evolution" };
 
 /**
- * C106a: the grant SUGGESTION sent with the device request — read for every Teal Brick product the agent uses (Connect
- * always, for its inbox) and the write ops its persona needs. Write ops are never pre-approved: the owner ticks them.
+ * F46: the Teal Brick products the persona refers to, in any form: `<product>__<op>` (after the rewrites),
+ * `mcp__<product>__…` or `mcp__tealbrick__<product>__…` (v1 names), or the product's name in prose ("Kanban").
+ * Unknown v1 servers (`mcp__mail__send`) never become a product.
  */
-export function adoptSuggestion(tools: string[], plan: Pick<AdoptPlan, "serve" | "buzzChannels">, deployed: string[] | null = null): AdoptSuggestion {
-  const products = new Map<string, Set<string>>();
-  const use = (p: string) => products.get(p) ?? products.set(p, new Set()).get(p) ?? new Set<string>();
-  // F46: with the deployed catalog known (owner session), read is suggested for EVERY deployed app and nothing else;
-  // without it, only the products the persona names (Core marks the ones not deployed)
-  const isDeployed = (p: string) => deployed === null || deployed.includes(p);
-  for (const p of deployed ?? []) use(p);
-  if (plan.serve && isDeployed("connect")) use("connect");
-  for (const t of tools) {
-    const [p, op] = t.split("__") as [string, string];
-    if (!isDeployed(p)) continue;
-    const ops = use(p);
-    if (WRITE_TOOLS.has(t)) ops.add(op);
+export async function referencedProducts(files: string[]): Promise<string[]> {
+  const out = new Set<string>();
+  for (const f of files) {
+    for (const raw of (await readFile(f, "utf8")).split("\n")) {
+      const line = rewriteLine(raw).line;
+      for (const m of line.matchAll(/\bmcp__([A-Za-z0-9_-]+)/g)) {
+        const parts = (m[1] as string).split("__");
+        const product = parts[0] === "tealbrick" ? parts[1] : parts[0];
+        if (product && PRODUCT_IDS.includes(product)) out.add(product);
+      }
+      const plain = line.replace(/\bmcp__[A-Za-z0-9_-]+/g, " ");
+      for (const m of plain.matchAll(/\b([a-z][a-z0-9-]{1,31})__[a-z][a-z0-9_]{1,63}\b/g)) out.add(m[1] as string);
+      for (const [name, product] of Object.entries(PRODUCT_NAMES)) if (new RegExp(`\\b${name}\\b`).test(plain)) out.add(product);
+    }
   }
-  const grants = [...products.entries()].slice(0, 16).map(([product, writes]) => ({ product, crud: ["read" as const], ...(writes.size ? { operations: [...writes] } : {}) }));
+  return [...out].sort();
+}
+
+/**
+ * C106a/F46: the grant SUGGESTION sent with the device request — read for every Teal Brick product the persona refers
+ * to (Connect always when serving, for its inbox). It never names write ops: Core lists every deployed app and its
+ * manifest ops on the approval page, and the owner ticks writes there.
+ */
+export function adoptSuggestion(products: string[], plan: Pick<AdoptPlan, "serve" | "buzzChannels">): AdoptSuggestion {
+  const all = new Set(products);
+  if (plan.serve) all.add("connect");
+  const grants = [...all].sort().slice(0, 16).map((product) => ({ product, crud: ["read" as const] }));
   return {
     grants,
     // F35: the owner picks (or creates) the Buzz channel in the approval form when none is named
     ...(plan.buzzChannels.length ? { channel: { kind: "buzz_channel" as const, id: plan.buzzChannels[0] as string } } : plan.serve ? { channel: { kind: "buzz_channel" as const } } : {}),
     wake: plan.serve ? "serve" : "none",
   };
-}
-
-/**
- * F46: the products deployed in the owner's workspace (owner session: instances.list), or null when no owner session
- * is on this machine (then the suggestion comes from the persona only). Never fails the adopt.
- */
-async function deployedProducts(ctx: Ctx): Promise<string[] | null> {
-  try {
-    const { requireSession, resolveWorkspace } = await import("./session.ts");
-    const { client } = await requireSession(ctx);
-    const ws = await resolveWorkspace(ctx, client);
-    const res = await client.call<{ items?: { product?: unknown; state?: unknown }[] }>("instances.list", { ws });
-    const out = new Set<string>();
-    for (const i of res.items ?? []) if (typeof i.product === "string" && i.state !== "removed") out.add(i.product);
-    return [...out].sort();
-  } catch {
-    return null;
-  }
 }
 
 /** F44: is `agent serve` running for this connection (own pidfile), and when did it last poll? */
@@ -570,13 +552,9 @@ export const adopt: Handler = async (ctx) => {
   const transport = (e: ExistingEntry) => (e.remote ? (switchToStdio ? "remote/OAuth → switched to the local stdio relay (--switch-to-stdio)" : "kept: remote OAuth (pass --switch-to-stdio to use the local relay)") : "kept: local stdio relay");
   const existingLines = existing.map((e) => `  EXISTING       ${target}: Teal Brick entry "${e.name}" (${e.remote ? "remote/OAuth" : "local relay"}${e.agt ? `, card ${e.agt}` : ""})${reuse ? ` → adopt REUSES it${reuseCard ? ` and card ${reuseCard}` : " (card unknown: pass --agent <agt_…> to keep the same card)"}; ${transport(e)}` : ""}`);
   if (existing.length > 1) existingLines.push(`  CHOOSE         several Teal Brick entries: remove the ones you do not need, or pass --keep-existing to add "tealbrick" next to them`);
-  // F46: the grant suggestion (deployed catalog when an owner session is on this machine, else the persona)
-  const deployed = await deployedProducts(ctx);
-  const suggestion = adoptSuggestion(await referencedTools(d.persona.files), plan, deployed);
-  const suggestLines = [
-    `  access asked   read: ${suggestion.grants.map((g) => g.product).join(", ") || "none"}${suggestion.grants.some((g) => g.operations?.length) ? `; write (you tick them): ${suggestion.grants.flatMap((g) => (g.operations ?? []).map((o) => `${g.product}__${o}`)).join(", ")}` : ""}`,
-    `  apps from      ${deployed ? "the apps deployed in your workspace" : "the persona only (sign in with tealbrick login first to offer every deployed app)"}`,
-  ];
+  // F46: the grant suggestion (products the persona refers to; read only — the owner ticks writes in Portal)
+  const suggestion = adoptSuggestion(await referencedProducts(d.persona.files), plan);
+  const suggestLines = [`  access asked   read: ${suggestion.grants.map((g) => g.product).join(", ") || "none"} (Portal lists every deployed app; you tick any write access there)`];
   const text = [planText(plan, planned), ...suggestLines, ...existingLines].join("\n");
 
   if (ctx.v["dry-run"] === true) {
@@ -649,6 +627,8 @@ export const adopt: Handler = async (ctx) => {
       kind: "claude",
       // F45: the harness works in <adopt dir>/work (0700), never in the shell's cwd
       cwd: "work",
+      // F48: no SDK transcript under ~/.claude/projects/; turns are logged inside the adopt dir instead
+      transcripts: "transcripts",
       modelKeyEnv: "ANTHROPIC_API_KEY",
       ...(state.persona ? { appendSystemPromptFile: relative(adir, state.persona.path) } : {}),
       ...(d.settings.model ? { model: d.settings.model } : {}),
