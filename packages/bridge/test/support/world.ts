@@ -150,6 +150,8 @@ export interface WorldOptions {
   enrolWithoutKeySet?: boolean;
   /** spec 0.1.12 strict key-set rule (harness start option) */
   keysetRequired?: boolean;
+  /** further own-infrastructure origins for TB_OWN_INFRA_ORIGINS (e.g. a real SDK app started by a test) */
+  extraOwnInfraOrigins?: string[];
 }
 
 async function listen(handler: (req: IncomingMessage, res: ServerResponse) => void): Promise<{ server: Server; url: string }> {
@@ -362,7 +364,7 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
   });
 
   const dir = mkdtempSync(join(tmpdir(), "tb-bridge-test-"));
-  const bridgeEnv = (): NodeJS.ProcessEnv => ({ TB_DATA_DIR: dir, TB_PORTAL_URL: portal.url, TB_PUBLIC_URL: "http://127.0.0.1", TB_KEYS_PUBLIC_URL: "http://localhost", TB_ENROL_CODE: ENROL, TB_KEK: "11".repeat(32), TB_OWN_INFRA_ORIGINS: [app.url, hookApp.url].join(","), ...opts.env, ...envOverrides });
+  const bridgeEnv = (): NodeJS.ProcessEnv => ({ TB_DATA_DIR: dir, TB_PORTAL_URL: portal.url, TB_PUBLIC_URL: "http://127.0.0.1", TB_KEYS_PUBLIC_URL: "http://localhost", TB_ENROL_CODE: ENROL, TB_KEK: "11".repeat(32), TB_OWN_INFRA_ORIGINS: [app.url, hookApp.url, ...(opts.extraOwnInfraOrigins ?? [])].join(","), ...opts.env, ...envOverrides });
   const rootOpt = { ...(root ? { portalRootKeys: [root.publicJwk] } : {}), ...(opts.keysetRequired ? { keysetRequired: true } : {}) };
   let bridge: RunningBridge;
   try {

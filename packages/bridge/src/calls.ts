@@ -127,6 +127,10 @@ interface Active {
   depth: number;
 }
 
+/** C91 / SDK-API §3.2: which bridge-op proofs carry `op` and `in` (the SDK binds exactly these). */
+export const BRIDGE_OP_BINDS_OP: Readonly<Record<BridgeOp, boolean>> = { catalog: true, resolve: true, mark: false, scope_summary: false };
+export const BRIDGE_OP_BINDS_IN: Readonly<Record<BridgeOp, boolean>> = { catalog: false, resolve: true, mark: true, scope_summary: false };
+
 export class CallRouter {
   private readonly ctx: BridgeContext;
   private readonly active = new Map<CallId, Active>();
@@ -146,6 +150,8 @@ export class CallRouter {
   }
 
   // ── bridge-only SDK calls (catalog, resolve, mark, scope summary; C16 B5) ──
+  // Proof claims per bop (SDK-API §3.2, C91), matched EXACTLY by the SDK's verifyBridgeOpProof:
+  //   catalog {bop, op} · resolve {bop, op, in} · mark {bop, in} · scope_summary {bop}
   async bridgeOp<T>(app: AppRuntime, bop: BridgeOp, body: Record<string, unknown>, timeoutMs = 2_000): Promise<T> {
     const id = this.ctx.identity;
     if (!id) throw new BridgeError("app_unavailable", 503);
@@ -160,8 +166,9 @@ export class CallRouter {
       jti: this.ctx.api.ulid(),
       call,
       bop,
-      ...(typeof body.op === "string" ? { op: body.op } : {}),
-      in: this.ctx.api.digest(body as Json),
+      ...(BRIDGE_OP_BINDS_OP[bop] && typeof body.op === "string" ? { op: body.op } : {}),
+      // C91: `in` only for the bridge ops whose body is input (resolve, mark); catalog and scope_summary carry none
+      ...(BRIDGE_OP_BINDS_IN[bop] ? { in: this.ctx.api.digest(body as Json) } : {}),
     };
     const proof = await this.ctx.api.signJws(TYP.callProof, claims, id.key);
     const res = await this.ctx.fetch(new URL(`/tb/v1/bridge/${BRIDGE_OP_PATH[bop]}`, app.entry.internalUrl), {
