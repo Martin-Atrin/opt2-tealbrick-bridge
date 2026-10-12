@@ -297,7 +297,14 @@ export class McpServer {
       if (t.pausedWorkspace || t.pausedAgents.has(p.agt)) throw new BridgeError("paused", 403, "paused by the owner");
       const idx = await this.index(t, p.agt);
       const route = idx.routes.get(name);
-      if (!route) throw new BridgeError("unknown_tool", 404);
+      if (!route) {
+        // a tool of an app that is temporarily unavailable (restart, update) is not "unknown" (C57)
+        const app = t.appsByProduct.get(name.split("__")[0] ?? "");
+        if (app && (app.down || !app.manifest) && t.grants.has(`tb:agt:${p.agt}|tb:ins:${app.entry.ins}`)) {
+          throw new BridgeError("app_unavailable", 503, "the app is starting; try again in a few seconds");
+        }
+        throw new BridgeError("unknown_tool", 404);
+      }
       return await this.runRoute(t, p, route, args, idem as string | undefined, requestId, signal);
     } catch (e) {
       const code = e instanceof BridgeError ? e.code : "app_error";

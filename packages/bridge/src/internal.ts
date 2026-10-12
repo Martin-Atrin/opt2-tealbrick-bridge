@@ -265,6 +265,7 @@ export class InternalApi {
     if (!isRecord(env) || typeof env.target !== "string" || typeof env.op !== "string") throw new BridgeError("input_invalid", 400);
     const app: AppRuntime | undefined = t.appsByProduct.get(env.target);
     if (!app) throw new BridgeError("unknown_tool", 404);
+    if (app.down || !app.manifest) throw new BridgeError("app_unavailable", 503, "the target app is starting; retry");
     const op = app.ops.get(env.op);
     if (!op) throw new BridgeError("unknown_tool", 404);
     try {

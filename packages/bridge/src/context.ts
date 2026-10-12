@@ -13,7 +13,7 @@ import type { Rejection, Table } from "./table.ts";
 import type { Logger } from "./util.ts";
 import { nowS } from "./util.ts";
 
-export const BRIDGE_VERSION = "0.1.9";
+export const BRIDGE_VERSION = "0.1.10";
 export const SDK_MAJORS = [1];
 
 /** The SDK major this bridge is built for; `sdkMajorServed` (manifest, C44) also serves the one before. */

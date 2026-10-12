@@ -14,7 +14,7 @@ import { InternalApi } from "./internal.ts";
 import { McpServer } from "./mcp.ts";
 import { OAuthServer } from "./oauth.ts";
 import { PersonSurfaces } from "./person.ts";
-import { applyConfig, ensureEnrolled, runConfigLoop, startStatusLoop } from "./portal.ts";
+import { applyConfig, ensureEnrolled, runConfigLoop, startManifestRetry, startStatusLoop } from "./portal.ts";
 import { remintStandalone, StandaloneAdmin, startStandaloneLoop } from "./standalone.ts";
 import { BridgeState, keksFromEnv } from "./state.ts";
 import { assertOrigin, envelope, jsonLogger, type Logger, sendError, sendJson } from "./util.ts";
@@ -118,6 +118,7 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
   const status = startStatusLoop(ctx, abort.signal);
   for (const ev of ["claim", "keys", "health", "connection-created", "connection-revoked"]) ctx.on(ev, () => status.poke());
   void runConfigLoop(ctx, abort.signal);
+  startManifestRetry(ctx, abort.signal);
   startStandaloneLoop(ctx, abort.signal);
 
   const publicHandler = async (req: IncomingMessage, res: ServerResponse) => {

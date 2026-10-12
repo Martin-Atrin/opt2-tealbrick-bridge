@@ -47,6 +47,8 @@ export class PersonSurfaces {
     const m = /^\/a\/([a-z][a-z0-9-]{1,31})(\/.*)?$/.exec(url.pathname);
     const app = m ? this.ctx.table?.appsByProduct.get(m[1] as string) : undefined;
     if (!m || !app) return sendJson(res, 404, envelope("not_found", "not found", requestId));
+    // C57: a known app that is restarting (manifest not available) is "try again", never "not found"
+    if (app.down || !app.manifest) return unavailable(res, requestId);
     const rest = m[2] ?? "/";
     if (!this.allowedUiPath(app, rest)) return sendJson(res, 404, envelope("not_found", "not found", requestId));
     let body: Buffer | undefined;
@@ -84,6 +86,7 @@ export class PersonSurfaces {
     const m = /^\/p\/([a-z][a-z0-9-]{1,31})(\/.*)$/.exec(url.pathname);
     const app = m ? this.ctx.table?.appsByProduct.get(m[1] as string) : undefined;
     const path = m?.[2] ?? "";
+    if (app && (app.down || !app.manifest)) return unavailable(res, requestId);
     const route = app?.manifest?.publicRoutes?.find((r) => r.path === path);
     if (!app || !route) return sendJson(res, 404, envelope("not_found", "not found", requestId));
     const method = route.purpose === "oauth_callback" ? "GET" : "POST";
@@ -240,6 +243,10 @@ ${set ? `<form method="post" action="/keys"><input type="hidden" name="csrf" val
       .join("");
     htmlPage(res, 200, "Workspace default keys", `<p>Keys are stored in your workspace only. Teal Brick Portal never sees them. Values are never shown again.</p>${rows || "<p>No app needs a key.</p>"}`, headers);
   }
+}
+
+function unavailable(res: ServerResponse, requestId: string): void {
+  sendJson(res, 503, envelope("app_unavailable", "the app is starting; try again in a few seconds", requestId), { "retry-after": "5" });
 }
 
 function parseCookies(header: string | undefined): Record<string, string> {

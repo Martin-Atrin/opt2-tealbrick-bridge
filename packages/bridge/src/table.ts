@@ -102,6 +102,7 @@ export interface BuildInput {
   /** previous table: manifests by digest are reused */
   previous: Table | undefined;
   fetchManifest: (app: AppEntry) => Promise<Manifest>;
+  onManifestFailure?: (app: AppEntry, e: unknown) => void;
   now: number;
   reject: (r: Rejection) => void;
 }
@@ -130,10 +131,12 @@ export async function buildTable(input: BuildInput): Promise<Table> {
     if (!manifest) {
       try {
         const m = await input.fetchManifest(entry);
-        if (api.manifestDigest(m) !== entry.manifestDigest) throw new Error("manifest_mismatch");
+        const got = api.manifestDigest(m);
+        if (got !== entry.manifestDigest) throw Object.assign(new Error("manifest_mismatch"), { served: got });
         manifest = m;
-      } catch {
+      } catch (e) {
         down = true;
+        input.onManifestFailure?.(entry, e);
       }
     }
     const ops = new Map<string, OperationView>();

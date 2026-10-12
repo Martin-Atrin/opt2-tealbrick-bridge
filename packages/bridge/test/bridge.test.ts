@@ -404,3 +404,39 @@ describe(`hooks and offline rules (${real ? "real" : "double"})`, () => {
   });
 });
 }
+
+describe("C57: an app restarting or updating during a config apply", () => {
+  let w: World;
+  before(async () => {
+    w = await makeWorld({ manifestFailures: 1 });
+  });
+  after(async () => {
+    await w.close();
+  });
+
+  test("first apply fails the manifest: UI 503 app_unavailable (+Retry-After, never 404), serves after the background retry", async () => {
+    const first = await fetch(`${w.publicUrl}/a/notes/`);
+    assert.equal(first.status, 503);
+    assert.equal(first.headers.get("retry-after"), "5");
+    assert.equal((await first.json()).error.code, "app_unavailable");
+    await waitFor(() => w.bridge.ctx.table?.apps.get(INS as never)?.down === false, 10000);
+    assert.equal((await fetch(`${w.publicUrl}/a/notes/`)).status, 200);
+  });
+
+  test("app update (new manifestDigest) while the app answers 503: tools say app_unavailable, then recover without a new config", async () => {
+    const s = await session(w);
+    const digest = w.updateApp(2);
+    await w.publish();
+    await waitFor(() => w.bridge.ctx.table?.rev === w.rev(), 10000);
+    assert.equal(w.bridge.ctx.table?.apps.get(INS as never)?.entry.manifestDigest, digest);
+    const during = await call(w, s, "notes__notes_list", {});
+    if (during.isError) assert.equal(during.structuredContent.error.code, "app_unavailable", "never unknown_tool while the app restarts");
+    const revBefore = w.rev();
+    await waitFor(() => w.bridge.ctx.table?.apps.get(INS as never)?.down === false, 15000);
+    assert.equal(w.rev(), revBefore, "recovered without a new config revision");
+    const after = await call(w, s, "notes__notes_list", {});
+    assert.equal(after.isError, undefined);
+    assert.equal((await fetch(`${w.publicUrl}/a/notes/`)).status, 200);
+  });
+});
+

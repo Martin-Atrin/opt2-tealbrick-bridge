@@ -82,11 +82,78 @@ async function portalRequest(ctx: BridgeContext, method: "GET" | "POST", pathAnd
   });
 }
 
+/**
+ * C57: an app whose manifest could not be fetched during a config apply (e.g. restarting after an update) is
+ * retried in the background with backoff (2 s → 60 s), independent of config revisions. A new manifestDigest in
+ * a later config is a new retry key (refetch). On success the runtime entry in the CURRENT table is filled in
+ * place and listeners are told (MCP tool lists refresh, list_changed).
+ */
+export function startManifestRetry(ctx: BridgeContext, signal: AbortSignal): void {
+  const attempts = new Map<string, { at: number; delay: number }>();
+  let running = false;
+  const tick = async () => {
+    const t = ctx.table;
+    if (!t || signal.aborted || running) return;
+    running = true;
+    let fixed = false;
+    try {
+      for (const app of t.apps.values()) {
+        if (!app.down) continue;
+        const key = `${app.entry.ins}|${app.entry.manifestDigest}`;
+        const a = attempts.get(key) ?? { at: 0, delay: 2_000 };
+        if (Date.now() < a.at) continue;
+        try {
+          const m = await fetchManifestFrom(ctx, app.entry);
+          const got = ctx.api.manifestDigest(m);
+          if (got !== app.entry.manifestDigest) throw new ManifestError("manifest_mismatch", got);
+          app.manifest = m;
+          app.ops = new Map(ctx.api.withStandardOps(m).map((op) => [op.id, op]));
+          app.scopeTypes = (m.scopes ?? []).map((sc) => sc.type);
+          app.down = false;
+          attempts.delete(key);
+          fixed = true;
+          ctx.log.info("bridge.manifest.recovered", { ins: app.entry.ins });
+        } catch (e) {
+          const next = Math.min(a.delay * 2, 60_000);
+          attempts.set(key, { at: Date.now() + a.delay, delay: next });
+          logManifestFailure(ctx, app.entry, e);
+        }
+      }
+    } finally {
+      running = false;
+    }
+    if (fixed && ctx.table === t) ctx.emit("table", t, t);
+  };
+  const timer = setInterval(() => void tick(), 1_000);
+  timer.unref();
+  signal.addEventListener("abort", () => clearInterval(timer));
+}
+
+export class ManifestError extends Error {
+  readonly served: string | undefined;
+  constructor(code: string, served?: string) {
+    super(code);
+    this.served = served;
+  }
+}
+
+/** One line per app + reason per minute: fetch failure vs digest mismatch (with both digests — public values). */
+export function logManifestFailure(ctx: BridgeContext, app: AppEntry, e: unknown): void {
+  const mismatch = e instanceof ManifestError && e.message === "manifest_mismatch";
+  ctx.log.warn("bridge.manifest.unavailable", {
+    ins: app.ins,
+    product: app.product,
+    code: mismatch ? "manifest_mismatch" : e instanceof ManifestError ? e.message : "fetch_failed",
+    expected: app.manifestDigest,
+    ...(mismatch ? { served: (e as ManifestError).served } : {}),
+  });
+}
+
 async function fetchManifestFrom(ctx: BridgeContext, app: AppEntry): Promise<Manifest> {
   const res = await ctx.fetch(new URL("/tb/v1/manifest", app.internalUrl), { redirect: "error", signal: AbortSignal.timeout(10_000) });
-  if (!res.ok) throw new Error(`manifest ${res.status}`);
+  if (!res.ok) throw new ManifestError(`fetch_http_${res.status}`);
   const v = ctx.api.validateManifest(await res.json());
-  if (!v.ok) throw new Error("manifest_invalid");
+  if (!v.ok) throw new ManifestError("manifest_invalid");
   return v.manifest;
 }
 
@@ -135,6 +202,7 @@ export async function applyConfig(ctx: BridgeContext, jws: string, opts: { boot?
     issuers: portalKeySet(ctx.api, nextKeys),
     previous: ctx.table,
     fetchManifest: (app) => fetchManifestFrom(ctx, app),
+    onManifestFailure: (app, e) => logManifestFailure(ctx, app, e),
     now,
     reject: (r) => ctx.reject(r),
   });

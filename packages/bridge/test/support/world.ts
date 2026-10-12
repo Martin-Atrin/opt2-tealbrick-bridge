@@ -94,6 +94,8 @@ export interface World {
   publish(tweak?: (c: WorkspaceConfig) => void): Promise<number>;
   rev(): number;
   close(): Promise<void>;
+  /** the app is updated: serves a new manifest (new digest) and fails its next `failures` manifest fetches */
+  updateApp(failures: number): string;
   rotateKey(phase: "announce" | "activate" | "retire"): Promise<void>;
   /** serve a document signed by an untrusted key as the next revision */
   serveForged(): Promise<void>;
@@ -119,7 +121,9 @@ async function body(req: IncomingMessage): Promise<any> {
   return t ? JSON.parse(t) : undefined;
 }
 
-export async function makeWorld(opts: { withHook?: boolean; real?: boolean } = {}): Promise<World> {
+export async function makeWorld(opts: { withHook?: boolean; real?: boolean; manifestFailures?: number } = {}): Promise<World> {
+  let manifestFailures = opts.manifestFailures ?? 0;
+  let servedManifest: Record<string, unknown> = notesManifest;
   const real = !!opts.real;
   const api = real ? manifestApi() : fakeApi();
   const portalKey = await api.generateKeyPair();
@@ -140,7 +144,13 @@ export async function makeWorld(opts: { withHook?: boolean; real?: boolean } = {
   // ── fake app (notes) and hook app (guard) ──
   const app = await listen(async (req, res) => {
     const url = new URL(req.url ?? "/", "http://x");
-    if (url.pathname === "/tb/v1/manifest") return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(notesManifest));
+    if (url.pathname === "/tb/v1/manifest") {
+      if (manifestFailures > 0) {
+        manifestFailures -= 1;
+        return res.writeHead(503).end();
+      }
+      return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(servedManifest));
+    }
     if (url.pathname.startsWith("/tb/v1/ops/")) {
       const op = url.pathname.slice(11);
       const b = await body(req);
@@ -325,6 +335,13 @@ export async function makeWorld(opts: { withHook?: boolean; real?: boolean } = {
         signingKey = next.key;
       }
       if (phase === "retire") keyEntries = keyEntries.filter((k) => k.status !== "retired");
+    },
+    updateApp(failures) {
+      servedManifest = { ...notesManifest, version: "1.0.1" };
+      manifestFailures = failures;
+      const d = api.manifestDigest(servedManifest as never);
+      base.apps[0] = { ...(base.apps[0] as WorkspaceConfig["apps"][number]), version: "1.0.1", manifestDigest: d };
+      return d;
     },
     portalDown() {
       down = true;
