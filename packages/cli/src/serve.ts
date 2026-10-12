@@ -23,6 +23,13 @@ import { TOOL_NAME_RULE } from "@opt2-tealbrick/spec/bridge";
 import { encodeOnBehalfOf, type OnBehalfOfClaim, onBehalfOfOk } from "./relay-main.ts";
 
 export interface InboxSpec {
+  /**
+   * F35 (CLI 0.1.12): `"connect"` = choose the inbox at serve time, re-resolved at most every AUTO_RESOLVE_MS:
+   * (1) the Buzz channels/groups the agent is a member of (connect__buzz_channels → connect__buzz_read each), else
+   * (2) its Buzz DMs (direct conversations → buzz_read), else (3) Connect's bot channel inbox, only when the agent has
+   * a chat bot account (connect__accounts_list: as_itself on slack|teams|telegram|discord). `tool` is ignored.
+   */
+  auto?: "connect";
   /** MCP tool name, e.g. `<product>__<op>` */
   tool: string;
   args?: Record<string, unknown>;
@@ -160,6 +167,12 @@ export function validateServeConfig(raw: unknown): ServeConfig {
   if (c.routines !== undefined && (!Array.isArray(c.routines) || c.routines.length > 8)) throw new Error("routines: 0..8 entries");
   if (c.inboxes.length === 0 && (c.routines ?? []).length === 0) throw new Error("set at least one of inboxes and routines");
   for (const i of c.inboxes) {
+    if (i.auto !== undefined && i.auto !== "connect") throw new Error('inbox auto must be "connect"');
+    if (i.auto === "connect") {
+      i.tool = AUTO_TOOL;
+      if (i.wake !== undefined && i.wake !== "mentions" && i.wake !== "all") throw new Error('inbox auto: wake must be "mentions" or "all"');
+      continue;
+    }
     if (!isToolName(i.tool)) throw new Error(`inbox tool must be a <product>__<op> name: ${String(i.tool)}`);
     if (i.cursor && (typeof i.cursor.param !== "string" || typeof i.cursor.from !== "string")) throw new Error(`inbox ${i.tool}: cursor {param, from}`);
     if (i.wake !== undefined && i.wake !== "mentions" && i.wake !== "all") throw new Error(`inbox ${i.tool}: wake must be "mentions" or "all"`);
@@ -178,6 +191,23 @@ export function validateServeConfig(raw: unknown): ServeConfig {
     if (h.appendSystemPromptFile !== undefined && typeof h.appendSystemPromptFile !== "string") throw new Error("harness.appendSystemPromptFile: a path");
   }
   return c;
+}
+
+/** F35: auto inbox — re-resolve at most this often, and at once after a derived inbox is refused */
+export const AUTO_RESOLVE_MS = 300_000;
+const AUTO_TOOL = "connect__auto";
+const CHAT_BOT_SERVICES = ["slack", "teams", "telegram", "discord"];
+const MAX_AUTO_INBOXES = 8;
+
+/** F35: the concrete inboxes for an `auto: "connect"` entry (pure; the caller makes the tool calls). */
+export function autoInboxes(base: InboxSpec, channels: { id: string; type: string }[] | null, hasChatBot: boolean): { why: string; inboxes: InboxSpec[] } {
+  const buzz = (channel: string, wake: "mentions" | "all"): InboxSpec => ({ tool: "connect__buzz_read", args: { channel }, cursor: { param: "since", from: "max:createdAt" }, items: "messages", id: "id", skipIf: { fromSelf: true }, wake });
+  const joined = (channels ?? []).filter((c) => c.type === "channel" || c.type === "group");
+  if (joined.length) return { why: "buzz_channels", inboxes: joined.slice(0, MAX_AUTO_INBOXES).map((c) => buzz(c.id, base.wake ?? "mentions")) };
+  const dms = (channels ?? []).filter((c) => c.type === "direct");
+  if (dms.length) return { why: "buzz_dms", inboxes: dms.slice(0, MAX_AUTO_INBOXES).map((c) => buzz(c.id, "all")) };
+  if (hasChatBot) return { why: "chat_bot", inboxes: [{ tool: "connect__channel_inbox", cursor: { param: "sinceSeq", from: "nextSeq" }, id: "seq", wake: base.wake ?? "mentions" }] };
+  return { why: "none", inboxes: [] };
 }
 
 const isToolName = (t: unknown): t is string => typeof t === "string" && /^[a-z0-9_-]{3,64}$/.test(t) && t.includes("__");
@@ -287,6 +317,38 @@ export async function serveLoop(cfg: ServeConfig, deps: ServeDeps, signal: Abort
     return { ...r, held };
   };
   const warnedNoMentions = new Set<string>();
+  // F35: auto inboxes, resolved at most every AUTO_RESOLVE_MS (one buzz_channels call; accounts_list only when Buzz has
+  // nothing); one log line when the choice changes (L3)
+  const auto = new Map<number, { at: number; key: string; inboxes: InboxSpec[] }>();
+  const resolveAuto = async (idx: number, base: InboxSpec): Promise<InboxSpec[]> => {
+    const cached = auto.get(idx);
+    if (cached && deps.now() - cached.at < AUTO_RESOLVE_MS) return cached.inboxes;
+    let channels: { id: string; type: string }[] | null = null;
+    const ch = await deps.mcp.callTool("connect__buzz_channels", {});
+    if (!ch.isError) {
+      const list = structured(ch)?.channels;
+      channels = Array.isArray(list) ? list.filter((c): c is { id: string; type: string } => !!c && typeof (c as { id?: unknown }).id === "string" && typeof (c as { type?: unknown }).type === "string") : [];
+    }
+    let hasChatBot = false;
+    if (!channels?.length) {
+      const acc = await deps.mcp.callTool("connect__accounts_list", {});
+      const list = acc.isError ? [] : structured(acc)?.accounts;
+      hasChatBot = Array.isArray(list) && list.some((a) => (a as { kind?: unknown }).kind === "as_itself" && CHAT_BOT_SERVICES.includes(String((a as { service?: unknown }).service)));
+    }
+    const r = autoInboxes(base, channels, hasChatBot);
+    const key = `${r.why}|${r.inboxes.map(inboxKey).join(",")}`;
+    if (cached?.key !== key) deps.log("serve.inbox.auto", { chosen: r.why, inboxes: r.inboxes.map((i) => (i.args?.channel as string | undefined) ?? i.tool), ...(ch.isError ? { buzzChannels: "refused" } : {}) });
+    auto.set(idx, { at: deps.now(), key, inboxes: r.inboxes });
+    return r.inboxes;
+  };
+  const currentInboxes = async (): Promise<InboxSpec[]> => {
+    const out: InboxSpec[] = [];
+    for (const [idx, i] of cfg.inboxes.entries()) {
+      if (i.auto === "connect") out.push(...(await resolveAuto(idx, i)));
+      else out.push(i);
+    }
+    return out;
+  };
   const refused = new Map<string, { count: number; next: number }>();
   /** F15: does this item start a turn? (DMs always; channels per `wake`, default mentions) */
   const wakes = (inbox: InboxSpec, it: Record<string, unknown>, key: string): boolean => {
@@ -417,7 +479,7 @@ export async function serveLoop(cfg: ServeConfig, deps: ServeDeps, signal: Abort
         if (signal.aborted) break;
         await pollRoutine(spec);
       }
-      for (const inbox of cfg.inboxes) {
+      for (const inbox of await currentInboxes()) {
         if (signal.aborted) break;
         const key = inboxKey(inbox);
         // F35: an inbox the bridge or app refuses (e.g. scope_denied under a read-only grant) backs off on its own,
@@ -431,6 +493,8 @@ export async function serveLoop(cfg: ServeConfig, deps: ServeDeps, signal: Abort
           const n = (off?.count ?? 0) + 1;
           const waitMs = Math.min(pollMs * 2 ** n, INBOX_MAX_BACKOFF_MS);
           refused.set(key, { count: n, next: deps.now() + waitMs });
+          // F35: a refused derived inbox (left the channel, bot removed) → choose again on the next cycle
+          for (const [idx, a] of auto) if (a.inboxes.some((x) => inboxKey(x) === key)) auto.set(idx, { ...a, at: 0 });
           deps.log("serve.inbox.refused", { tool: inbox.tool, code: String((structured(res)?.error as { code?: string } | undefined)?.code ?? "error"), retryInMs: waitMs });
           continue;
         }

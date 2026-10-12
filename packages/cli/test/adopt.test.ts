@@ -130,7 +130,7 @@ describe("tealbrick adopt (C96 phase 1)", () => {
     const sugg = start.agents[0]?.adopt;
     assert.ok(sugg, "C106a: the device request carries the adopt suggestion");
     assert.equal(sugg?.wake, "serve");
-    assert.deepEqual(sugg?.channel, { kind: "connect_inbox" });
+    assert.deepEqual(sugg?.channel, { kind: "buzz_channel" }, "F35: the owner picks the Buzz channel at approval");
     assert.deepEqual(sugg?.grants.find((g) => g.product === "knowledge"), { product: "knowledge", crud: ["read"], operations: ["document_create"] }, "read + the write op the persona needs");
     assert.ok(sugg?.grants.some((g) => g.product === "connect"));
     assert.equal(r.json.toolsReady, true);
@@ -144,6 +144,7 @@ describe("tealbrick adopt (C96 phase 1)", () => {
     assert.equal(serve.harness.maxBudgetUsd, 5);
     assert.equal(serve.harness.turnTimeoutSeconds, 900);
     assert.equal(serve.inboxes[0].wake, "mentions");
+    assert.equal(serve.inboxes[0].auto, "connect", "F35: the default inbox is chosen at serve time");
     // F45: the harness works in <adopt dir>/work (0700), not in the shell's cwd
     assert.equal(serve.harness.cwd, "work");
     const { statSync: st } = await import("node:fs");

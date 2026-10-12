@@ -309,7 +309,7 @@ export function planText(p: AdoptPlan, files: string[]): string {
     ...(d.builtinTools.proposed.length || d.builtinTools.dropped.length ? [`  built-in tools ${d.builtinTools.proposed.join(", ") || "none"}${d.builtinTools.dropped.length ? ` (dropped: ${d.builtinTools.dropped.join(", ")})` : ""}`] : []),
     ...d.mcpServers.map((m) => `  MCP not wired  ${m.name}: ${m.reason}`),
     `  connection     one owner approval in Portal (device flow); card "${p.name}"`,
-    `  inbox          ${p.serve ? `${p.buzzChannels.length ? `Buzz ${p.buzzChannels.join(", ")}` : "Connect channel inbox (bots only; add --inbox buzz:<channel> for Buzz)"}, wake: ${p.wake}` : "none (this harness runs itself)"}`,
+    `  inbox          ${p.serve ? `${p.buzzChannels.length ? `Buzz ${p.buzzChannels.join(", ")}` : "auto: the Buzz channel you choose at approval, else Buzz DMs, else the chat-bot inbox (or --inbox buzz:<channel>)"}, wake: ${p.wake}` : "none (this harness runs itself)"}`,
     `  files to write ${files.join(", ") || "none"} (each existing file is backed up first)`,
     ...d.notCopied.slice(0, 20).map((x) => `  not copied     ${x.path} (${x.reason})`),
     ...(d.notCopied.length > 20 ? [`  not copied     … ${d.notCopied.length - 20} more`] : []),
@@ -482,7 +482,8 @@ export function adoptSuggestion(tools: string[], plan: Pick<AdoptPlan, "serve" |
   const grants = [...products.entries()].slice(0, 16).map(([product, writes]) => ({ product, crud: ["read" as const], ...(writes.size ? { operations: [...writes] } : {}) }));
   return {
     grants,
-    ...(plan.buzzChannels.length ? { channel: { kind: "buzz_channel" as const, id: plan.buzzChannels[0] as string } } : plan.serve ? { channel: { kind: "connect_inbox" as const } } : {}),
+    // F35: the owner picks (or creates) the Buzz channel in the approval form when none is named
+    ...(plan.buzzChannels.length ? { channel: { kind: "buzz_channel" as const, id: plan.buzzChannels[0] as string } } : plan.serve ? { channel: { kind: "buzz_channel" as const } } : {}),
     wake: plan.serve ? "serve" : "none",
   };
 }
@@ -657,10 +658,10 @@ export const adopt: Handler = async (ctx) => {
       ...(d.settings.timeoutSeconds && d.settings.timeoutSeconds >= 10 ? { turnTimeoutSeconds: Math.min(d.settings.timeoutSeconds, 86_400) } : {}),
       ...(d.builtinTools.proposed.length ? { builtinTools: d.builtinTools.proposed } : {}),
     };
-    // F35: with Buzz channels the agent listens there (buzz_read under the read grant); the bot channel inbox only
-    // without them
+    // F35: with --inbox buzz:<ch> the agent listens there; otherwise the serve-time auto inbox (joined Buzz channel →
+    // Buzz DMs → the bot channel inbox only when a chat bot exists), re-resolved while serve runs
     const inboxes = [
-      ...(plan.buzzChannels.length ? [] : [{ tool: "connect__channel_inbox", cursor: { param: "sinceSeq", from: "nextSeq" }, id: "seq", wake }]),
+      ...(plan.buzzChannels.length ? [] : [{ auto: "connect", wake }]),
       ...plan.buzzChannels.map((channel) => ({ tool: "connect__buzz_read", args: { channel }, cursor: { param: "since", from: "max:createdAt" }, items: "messages", id: "id", skipIf: { fromSelf: true }, wake })),
     ];
     const cfg = { format: "tealbrick.agent-serve/1", harness: harnessCfg, pollSeconds: 30, holds: true, inboxes };
