@@ -15,7 +15,7 @@
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",
-    "@opt2-tealbrick/conformance": "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/conformance-v0.1.7/opt2-tealbrick-conformance-0.1.7.tgz",
+    "@opt2-tealbrick/conformance": "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/conformance-v0.1.8/opt2-tealbrick-conformance-0.1.8.tgz",
     "@types/node": "24.19.2",
     "fast-check": "4",
     "typescript": "5.9.3"

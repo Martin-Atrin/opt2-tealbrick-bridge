@@ -1,12 +1,11 @@
 /**
  * C45: run the REAL conformance suite against the real builds of this repo.
- *   - bridge, pass A: `tb-conformance bridge --cmd "node packages/bridge-server/dist/server.js"`, every group but
- *     `keyset` (the production entry; the suite brings its fake Portal, apps and agents; logs captured for B11.no_log)
- *   - bridge, pass B: `--start packages/bridge-server/test/conformance-start.ts --test-roots --keyset-required
- *     --groups keyset` (BSD-08 B20 incl. the strict spec-0.1.12 checks: the harness passes the suite's test roots and
- *     the harness-only `keysetRequired` start option; the released build keeps KEYSET_REQUIRED=false until 0.1.12)
+ *   - bridge: ONE pass, `tb-conformance bridge --cmd "node packages/bridge-server/test/conformance-entry.ts"
+ *     --test-roots` (conformance 0.1.8: the strict key-set checks run by default with test roots). The harness entry
+ *     starts the built bridge and passes the suite's test roots to the programmatic `portalRootKeys` option; as a
+ *     process the suite captures its logs (B11.no_log). The suite brings its own fake Portal, apps and agents.
  *   - relay:  `tb-conformance relay` with the real CLI (`tealbrick bridge serve --stdio`, `tealbrick agent login`)
- * Fails on any failing check, except the exact waivers in scripts/conformance-waivers.json (id + status).
+ * Fails on any failing or not-run check, except the exact waivers in scripts/conformance-waivers.json (id + status).
  * Requires `npm run build` first. Reports go to .tb-ci/conformance/ (git-ignored).
  */
 import { spawnSync } from "node:child_process";
@@ -42,8 +41,7 @@ mkdirSync(out, { recursive: true });
 const waivers = (JSON.parse(readFileSync(join(root, "scripts", "conformance-waivers.json"), "utf8")) as { waivers: Waiver[] }).waivers;
 const FAILING = new Set(["fail", "not_run", "not_implemented"]);
 const node = process.execPath;
-const server = join(root, "packages", "bridge-server", "dist", "server.js");
-const harness = join(root, "packages", "bridge-server", "test", "conformance-start.ts");
+const entry = join(root, "packages", "bridge-server", "test", "conformance-entry.ts");
 const tealbrick = join(root, "packages", "cli", "dist", "main.js");
 
 function run(target: string, args: string[], env: NodeJS.ProcessEnv = process.env, name = target): Report {
@@ -51,20 +49,6 @@ function run(target: string, args: string[], env: NodeJS.ProcessEnv = process.en
   const r = spawnSync(node, [cli, target, ...args, "--report", base], { stdio: ["ignore", "ignore", "inherit"], env, cwd: root });
   if (r.error) throw r.error;
   return JSON.parse(readFileSync(`${base}.json`, "utf8")) as Report;
-}
-
-/**
- * One verdict per check over both bridge passes: a `fail` / `not_implemented` anywhere counts; otherwise the best
- * status wins, so B20 (`not_run` in pass A without test roots) is judged by pass B, everything else by pass A.
- */
-function merge(a: Report, b: Report): Report {
-  const rank = (s: string) => (s === "fail" || s === "not_implemented" ? 3 : s === "pass" ? 2 : s === "not_applicable" ? 1 : 0);
-  const by = new Map<string, Report["checks"][number]>();
-  for (const c of [...a.checks, ...b.checks]) {
-    const prev = by.get(c.id);
-    if (!prev || rank(c.status) > rank(prev.status)) by.set(c.id, c);
-  }
-  return { ...a, checks: [...by.values()], payloadScan: { findings: [...(a.payloadScan?.findings ?? []), ...(b.payloadScan?.findings ?? [])] }, notes: [...(a.notes ?? []), ...(b.notes ?? [])] };
 }
 
 function judge(target: string, rep: Report): string[] {
@@ -91,11 +75,7 @@ function judge(target: string, rep: Report): string[] {
 const problems: string[] = [];
 // BSD-08: the harness entry starts the BUILT bridge and passes the suite's test roots (--test-roots) to the
 // programmatic `portalRootKeys` option, so B20 runs; the runner sets TB_OWN_INFRA_ORIGINS for its fake apps (B21).
-{
-  const all = run("bridge", ["--cmd", `"${node}" "${server}"`, "--timeout", "15000"]);
-  const keyset = run("bridge", ["--start", harness, "--test-roots", "--keyset-required", "--groups", "keyset", "--timeout", "15000"], { ...process.env, BRIDGE_CONF_KEYSET_REQUIRED: "1" }, "bridge-keyset");
-  problems.push(...judge("bridge", merge(all, keyset)));
-}
+problems.push(...judge("bridge", run("bridge", ["--cmd", `"${node}" "${entry}"`, "--test-roots", "--timeout", "15000"])));
 
 const home = mkdtempSync(join(tmpdir(), "tb-relay-conf-"));
 try {
