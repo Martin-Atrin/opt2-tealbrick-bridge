@@ -5,19 +5,20 @@
 
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import type { Socket } from "node:net";
 import { hostname } from "node:os";
 import { join } from "node:path";
 import type { ManifestApi } from "./api.ts";
 import { CallRouter } from "./calls.ts";
 import { BridgeContext } from "./context.ts";
 import { InternalApi } from "./internal.ts";
-import { McpServer } from "./mcp.ts";
+import { type McpLimits, McpServer } from "./mcp.ts";
 import { htmlPage, OAuthServer } from "./oauth.ts";
 import { PersonSurfaces } from "./person.ts";
 import { applyConfig, ensureEnrolled, runConfigLoop, startManifestRetry, startStatusLoop } from "./portal.ts";
 import { remintStandalone, StandaloneAdmin, startStandaloneLoop } from "./standalone.ts";
 import { BridgeState, keksFromEnv } from "./state.ts";
-import { assertOrigin, envelope, headerValue, jsonLogger, type Logger, sendError, sendJson } from "./util.ts";
+import { assertOrigin, clientIp, envelope, headerValue, jsonLogger, type Logger, OpenCounter, sendError, sendJson } from "./util.ts";
 
 export interface BridgeServerOptions {
   api: ManifestApi;
@@ -28,7 +29,24 @@ export interface BridgeServerOptions {
   form?: "deployed" | "own_infra";
   /** test hook: listen on these instead of env ports (0 = any free port) */
   ports?: { public: number; internal: number };
+  /** test hook: listener limits (defaults: {@link DEFAULT_LIMITS}) */
+  limits?: Partial<ListenerLimits> & { mcp?: Partial<McpLimits> };
 }
+
+/** Listener limits against slow-body and connection exhaustion (BSD-01). */
+export interface ListenerLimits {
+  /** whole request (headers + body) must arrive within this; responses (SSE, long-poll) are not affected */
+  requestTimeoutMs: number;
+  headersTimeoutMs: number;
+  /** how often Node checks the two timeouts above */
+  checkIntervalMs: number;
+  /** open connections on the public listener */
+  maxConnections: number;
+  /** open connections (direct) or open requests (behind the edge proxy) per client address */
+  perClient: number;
+}
+
+export const DEFAULT_LIMITS: ListenerLimits = { requestTimeoutMs: 30_000, headersTimeoutMs: 15_000, checkIntervalMs: 5_000, maxConnections: 2000, perClient: 50 };
 
 export interface RunningBridge {
   ctx: BridgeContext;
@@ -112,7 +130,7 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
   }
 
   const router = new CallRouter(ctx);
-  const mcp = new McpServer(ctx, router);
+  const mcp = new McpServer(ctx, router, o.limits?.mcp);
   const oauth = new OAuthServer(ctx, keks.current);
   const person = new PersonSurfaces(ctx);
   const internal = new InternalApi(ctx, router);
@@ -125,9 +143,21 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
   startManifestRetry(ctx, abort.signal);
   startStandaloneLoop(ctx, abort.signal);
 
+  const limits: ListenerLimits = { ...DEFAULT_LIMITS, ...o.limits };
+  const hsts = publicUrl.startsWith("https:");
+  // Behind the edge proxy every socket comes from the proxy, so the per-client cap counts open requests per
+  // client address (X-Forwarded-For, rightmost); reached directly (TB_TRUST_PROXY=0) it counts sockets.
+  const openRequests = new OpenCounter(limits.perClient);
+  const openSockets = new OpenCounter(limits.perClient);
+
   const publicHandler = async (req: IncomingMessage, res: ServerResponse) => {
     const requestId = requestIdOf(ctx);
     const path = new URL(req.url ?? "/", "http://x").pathname;
+    res.setHeader("x-content-type-options", "nosniff");
+    if (hsts) res.setHeader("strict-transport-security", "max-age=31536000");
+    const release = openRequests.acquire(clientIp(req));
+    if (!release) return sendJson(res, 429, envelope("rate_limited", "too many open requests from this address", requestId), { "retry-after": "5", connection: "close" });
+    res.on("close", release);
     try {
       if (path === "/healthz") return sendJson(res, 200, { status: "ok" });
       if (path === "/readyz") return ctx.identity && ctx.table ? sendJson(res, 200, { status: "ready" }) : sendJson(res, 503, { status: "starting" });
@@ -168,9 +198,20 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
     }
   };
 
-  const publicServer = createServer({ requestTimeout: 0, headersTimeout: 30_000 }, (req, res) => void publicHandler(req, res));
+  const listenerOptions = { requestTimeout: limits.requestTimeoutMs, headersTimeout: limits.headersTimeoutMs, connectionsCheckingInterval: limits.checkIntervalMs };
+  const publicServer = createServer(listenerOptions, (req, res) => void publicHandler(req, res));
+  publicServer.maxConnections = limits.maxConnections;
+  publicServer.on("connection", (socket: Socket) => {
+    if (process.env.TB_TRUST_PROXY !== "0") return;
+    const release = openSockets.acquire(socket.remoteAddress ?? "unknown");
+    if (!release) {
+      socket.destroy();
+      return;
+    }
+    socket.once("close", release);
+  });
   publicServer.on("upgrade", (req, socket, head) => person.upgrade(req, socket as never, head));
-  const internalServer = createServer({ requestTimeout: 0, headersTimeout: 30_000 }, (req, res) => void internalHandler(req, res));
+  const internalServer = createServer(listenerOptions, (req, res) => void internalHandler(req, res));
   await Promise.all([
     new Promise<void>((r) => publicServer.listen(publicPort, r)),
     new Promise<void>((r) => internalServer.listen(internalPort, r)),

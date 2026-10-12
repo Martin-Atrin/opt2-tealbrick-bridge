@@ -12,7 +12,9 @@ import { redirectMatching } from "./redirect.ts";
 describe("bridge HTTP fuzz (C62)", () => {
   let w: World;
   before(async () => {
-    w = await makeWorld({ real: true });
+    // robustness, not rate limiting: ~20 000 requests from one connection would hit the BSD-02 bucket (429);
+    // the limiter has its own tests (limits.test.ts)
+    w = await makeWorld({ real: true, limits: { mcp: { ratePerS: 1_000_000, burst: 1_000_000 } } });
   });
   after(async () => {
     await w.close();

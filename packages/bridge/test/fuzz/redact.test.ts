@@ -97,7 +97,6 @@ describe("redact() properties (C62)", () => {
   // C62: with this tree and pointer ["/__proto__/toString"] redact() walks into Object.prototype and deletes toString (BSD-06)
   test(
     "random pointers incl. __proto__ never change Object.prototype or Array.prototype",
-    { skip: "BUG: redact() follows /__proto__/<member> into Object.prototype and deletes it (calls.ts redact; AUDIT BSD-06)" },
     async () => {
       await check(
         "redact.prototypes.all",

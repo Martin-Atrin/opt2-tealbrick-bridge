@@ -13,10 +13,13 @@ import { isRefusal } from "./api.ts";
 import type { BridgeContext } from "./context.ts";
 import { esc, htmlPage } from "./oauth.ts";
 import type { AppRuntime } from "./table.ts";
-import { BridgeError, clientIp, envelope, headerValue, nowS, RateLimiter, readBody, sendJson } from "./util.ts";
+import { BridgeError, clientIp, envelope, headerValue, nowS, OpenCounter, RateLimiter, readBody, sendJson } from "./util.ts";
 
 const MAX_UI_BODY = 10 * 1024 * 1024;
 const MAX_PUBLIC_BODY = 1024 * 1024;
+/** open WebSocket upgrades per client address, and their idle timeout (H-6) */
+const MAX_UPGRADES_PER_CLIENT = 20;
+const UPGRADE_IDLE_MS = 10 * 60_000;
 
 interface KeySession {
   csrf: string;
@@ -28,6 +31,10 @@ export class PersonSurfaces {
   private readonly ctx: BridgeContext;
   private readonly keySessions = new Map<string, KeySession>();
   private readonly publicLimit = new RateLimiter(60);
+  /** unauthenticated body routes (launch, key page POST), per client address (BSD-01) */
+  private readonly launchLimit = new RateLimiter(30);
+  private readonly keysPostLimit = new RateLimiter(30);
+  private readonly upgrades = new OpenCounter(MAX_UPGRADES_PER_CLIENT);
 
   constructor(ctx: BridgeContext) {
     this.ctx = ctx;
@@ -54,6 +61,7 @@ export class PersonSurfaces {
     let body: Buffer | undefined;
     if (rest === "/tb/launch") {
       if (req.method !== "POST") return sendJson(res, 405, envelope("method_not_allowed", "POST only", requestId));
+      if (!this.launchLimit.take(clientIp(req))) return sendJson(res, 429, envelope("rate_limited", "rate limited", requestId), { "retry-after": "60" });
       body = await readBody(req, 16 * 1024);
       const ticket = new URLSearchParams(body.toString("utf8")).get("ticket") ?? "";
       const v = this.ctx.api.verifyJws<PersonTicketLaunchClaims>(ticket, this.ctx.table?.issuers ?? { keys: [] }, {
@@ -143,30 +151,55 @@ export class PersonSurfaces {
     });
   }
 
-  /** WebSocket upgrade pass-through for the app UI path only. */
+  /**
+   * WebSocket upgrade pass-through for the app UI path only (H-6): client X-Forwarded-* are replaced by the
+   * bridge's own, an app that is down is refused, open upgrades are capped per client address and idle
+   * tunnels are closed.
+   */
   upgrade(req: IncomingMessage, socket: Socket, head: Buffer): void {
     const url = new URL(req.url ?? "/", "http://x");
     const m = /^\/a\/([a-z][a-z0-9-]{1,31})(\/.*)?$/.exec(url.pathname);
     const app = m ? this.ctx.table?.appsByProduct.get(m[1] as string) : undefined;
     if (!app || !this.allowedUiPath(app, m?.[2] ?? "/")) {
-      socket.end("HTTP/1.1 404 Not Found\r\n\r\n");
+      socket.end("HTTP/1.1 404 Not Found\r\nconnection: close\r\n\r\n");
       return;
     }
+    if (app.down || !app.manifest) {
+      socket.end("HTTP/1.1 503 Service Unavailable\r\nretry-after: 5\r\nconnection: close\r\n\r\n");
+      return;
+    }
+    const release = this.upgrades.acquire(clientIp(req));
+    if (!release) {
+      socket.end("HTTP/1.1 429 Too Many Requests\r\nretry-after: 60\r\nconnection: close\r\n\r\n");
+      return;
+    }
+    socket.once("close", release);
     const target = new URL(app.entry.internalUrl);
+    const pub = new URL(this.ctx.publicUrl);
     const up = netConnect(Number(target.port || 80), target.hostname, () => {
       const lines = [`${req.method} ${url.pathname}${url.search} HTTP/1.1`, `host: ${target.host}`];
       for (const [k, v] of Object.entries(req.headers)) {
         const lk = k.toLowerCase();
-        if (lk === "host" || lk === "authorization" || (lk.startsWith("tb-") && lk !== "tb-csrf")) continue;
+        if (lk === "host" || lk === "authorization" || lk.startsWith("x-forwarded-") || (lk.startsWith("tb-") && lk !== "tb-csrf")) continue;
         for (const val of Array.isArray(v) ? v : [v]) if (val !== undefined) lines.push(`${k}: ${val}`);
       }
+      lines.push(`x-forwarded-proto: ${pub.protocol.replace(":", "")}`, `x-forwarded-host: ${pub.host}`);
       up.write(`${lines.join("\r\n")}\r\n\r\n`);
       if (head.length) up.write(head);
       up.pipe(socket);
       socket.pipe(up);
     });
-    up.on("error", () => socket.destroy());
-    socket.on("error", () => up.destroy());
+    const close = () => {
+      up.destroy();
+      socket.destroy();
+    };
+    socket.setTimeout(UPGRADE_IDLE_MS, close);
+    up.setTimeout(UPGRADE_IDLE_MS, close);
+    up.on("error", close);
+    // the app closed: flush what is buffered to the client, then end (the idle timeout covers a client that stays)
+    up.on("close", () => socket.end());
+    socket.on("error", close);
+    socket.on("close", () => up.destroy());
   }
 
   // ── §9.3 key-entry page ──
@@ -178,6 +211,7 @@ export class PersonSurfaces {
     const session = sid ? this.keySessions.get(sid) : undefined;
     const secure = (this.ctx.keysUrl ?? this.ctx.publicUrl).startsWith("https:");
     if (req.method === "POST") {
+      if (!this.keysPostLimit.take(clientIp(req))) return htmlPage(res, 429, "Too many requests", "<p>Please wait a minute and try again.</p>", { "retry-after": "60" });
       const form = new URLSearchParams((await readBody(req, 20 * 1024)).toString("utf8"));
       const ticket = form.get("ticket");
       if (ticket) {

@@ -17,7 +17,7 @@ import { type CrudAction, type DynamicCatalogEntry, type DynamicResolution, EFFE
 import type { Json, OperationView } from "./api.ts";
 import type { BridgeContext } from "./context.ts";
 import { type AppRuntime, grantKey, insRef, pauseFor, type Table, trustFor } from "./table.ts";
-import { BridgeError, isRecord, nowS } from "./util.ts";
+import { BridgeError, isRecord, nowS, readCapped, readCappedJson } from "./util.ts";
 
 export type Caller =
   | { type: "agent"; agt: `agt_${string}`; con: `con_${string}` }
@@ -44,6 +44,79 @@ export type CallOutcome = OpResult<JsonValue>;
 const RESOLVE_TTL_MS = 5 * 60_000;
 const APP_TIMEOUT_MS = 30_000;
 const MAX_RESULT_BYTES = 4 * 1024 * 1024;
+/** hook answers and bridge-only SDK answers (catalog, resolve, mark, scope summary), BSD-05 */
+const MAX_SMALL_ANSWER_BYTES = 256 * 1024;
+/** dynamic search results kept per call */
+const MAX_SEARCH_RESULTS = 50;
+
+/**
+ * Bridge verdict codes: only the bridge decides these, so an app answer naming one is not passed through
+ * (an app cannot make a call look paused or revoked to the agent, H-7).
+ */
+const BRIDGE_VERDICTS: ReadonlySet<string> = new Set([
+  "paused",
+  "grant_revoked",
+  "grant_invalid",
+  "grant_expired",
+  "no_grant",
+  "unauthenticated",
+  "config_expired",
+  "hook_denied",
+  "hook_failed",
+  "crud_exceeds_grant",
+  "not_in_workflow",
+  "audience_not_agent",
+  "scope_type_unknown",
+]);
+const APP_CODE_RULE = /^[a-z][a-z0-9_]{1,40}$/;
+
+/** Fixed metric label set (H-5): bridge codes as they are, every app-side code as `app_code`. */
+const METRIC_CODES: ReadonlySet<string> = new Set([
+  "ok",
+  "unauthenticated",
+  "paused",
+  "unknown_tool",
+  "no_grant",
+  "grant_invalid",
+  "grant_expired",
+  "grant_revoked",
+  "crud_exceeds_grant",
+  "audience_not_agent",
+  "scope_type_unknown",
+  "not_in_workflow",
+  "input_invalid",
+  "dynamic_resolve_failed",
+  "dynamic_ceiling_exceeded",
+  "hook_denied",
+  "hook_failed",
+  "hook_reentry",
+  "call_depth_exceeded",
+  "config_expired",
+  "app_unavailable",
+  "app_timeout",
+  "app_error",
+  "after_failed",
+  "payload_too_large",
+  "rate_limited",
+  "request_timeout",
+]);
+
+/** Maps any code to the fixed metric label set (H-5). */
+export function metricCode(code: string): string {
+  return METRIC_CODES.has(code) ? code : "app_code";
+}
+
+/** An app-side error code passes through only when well-formed and not a bridge verdict (H-7). */
+export function appErrorCode(code: unknown): string {
+  return typeof code === "string" && APP_CODE_RULE.test(code) && !BRIDGE_VERDICTS.has(code) ? code : "app_error";
+}
+
+/** App error text without control or bidi-override characters, at most 500 chars (H-7). */
+export function appErrorMessage(message: unknown, fallback: string): string {
+  if (typeof message !== "string") return fallback;
+  const clean = message.replace(/[\p{Cc}\u2028\u2029\u200e\u200f\u202a-\u202e\u2066-\u2069]/gu, " ").slice(0, 500).trim();
+  return clean || fallback;
+}
 
 /** Calls currently in flight: hook re-entry and companion depth (BRIDGE §8.2). */
 interface Active {
@@ -99,7 +172,7 @@ export class CallRouter {
       await res.body?.cancel().catch(() => undefined);
       throw new BridgeError("app_error", 502, `bridge op ${bop} answered ${res.status}`);
     }
-    return (await res.json()) as T;
+    return readCappedJson<T>(res, MAX_SMALL_ANSWER_BYTES);
   }
 
   async catalog(app: AppRuntime, op: string): Promise<DynamicCatalogEntry[]> {
@@ -114,7 +187,7 @@ export class CallRouter {
 
   async search(app: AppRuntime, op: string, query: string, limit?: number): Promise<DynamicCatalogEntry[]> {
     const entries = await this.bridgeOp<DynamicCatalogEntry[]>(app, "catalog", { op, query, ...(limit ? { limit } : {}) });
-    return Array.isArray(entries) ? entries : [];
+    return Array.isArray(entries) ? entries.slice(0, MAX_SEARCH_RESULTS) : [];
   }
 
   private async resolve(app: AppRuntime, op: string, tool: string): Promise<DynamicResolution> {
@@ -212,8 +285,11 @@ export class CallRouter {
         redirect: "error",
         signal: AbortSignal.timeout(Math.min(Math.max(h.timeoutMs, 100), 2_000)),
       });
-      if (!res.ok) throw new Error(String(res.status));
-      return (await res.json()) as R;
+      if (!res.ok) {
+        await res.body?.cancel().catch(() => undefined);
+        throw new Error(String(res.status));
+      }
+      return await readCappedJson<R>(res, MAX_SMALL_ANSWER_BYTES);
     } finally {
       this.count(`hook|${h.id}|${Date.now() - started > h.timeoutMs ? "slow" : "done"}`);
     }
@@ -329,7 +405,7 @@ export class CallRouter {
       throw e;
     } finally {
       this.active.delete(call);
-      this.count(`call|${target.app.entry.product}|${code}`);
+      this.count(`call|${target.app.entry.product}|${metricCode(code)}`);
       ctx.log.info("bridge.call", {
         call,
         ...(caller.type === "agent" ? { agt: caller.agt } : { ins: caller.ins }),
@@ -390,8 +466,13 @@ export class CallRouter {
         throw new BridgeError(isTimeout(e2) ? "app_timeout" : "app_unavailable", isTimeout(e2) ? 504 : 503);
       }
     }
-    const text = await res.text();
-    if (Buffer.byteLength(text) > MAX_RESULT_BYTES) throw new BridgeError("payload_too_large", 502);
+    let text: string;
+    try {
+      text = (await readCapped(res, MAX_RESULT_BYTES)).toString("utf8");
+    } catch (e) {
+      if (e instanceof BridgeError) throw e;
+      throw new BridgeError(isTimeout(e) ? "app_timeout" : "app_unavailable", isTimeout(e) ? 504 : 503);
+    }
     let parsed: unknown;
     try {
       parsed = text ? JSON.parse(text) : undefined;
@@ -401,8 +482,9 @@ export class CallRouter {
     if (res.status === 200 && isRecord(parsed) && parsed.status === "ok") return parsed as CallOutcome;
     if (res.status === 202 && isRecord(parsed) && parsed.status === "held" && typeof parsed.holdId === "string") return parsed as CallOutcome;
     if (isRecord(parsed) && isRecord(parsed.error) && typeof parsed.error.code === "string") {
-      // app-side codes pass through unchanged
-      throw new BridgeError(parsed.error.code, res.status, typeof parsed.error.message === "string" ? parsed.error.message.slice(0, 500) : parsed.error.code);
+      // app-side codes pass through, but never as a bridge verdict, never malformed (H-7)
+      const code = appErrorCode(parsed.error.code);
+      throw new BridgeError(code, Math.min(599, Math.max(400, res.status)), appErrorMessage(parsed.error.message, code));
     }
     throw new BridgeError("app_error", 502, `app answered ${res.status}`);
   }
@@ -432,21 +514,29 @@ function isPreConnect(e: unknown): boolean {
   return !!cause?.code && PRE_CONNECT.has(cause.code);
 }
 
-/** Removes the members named by RFC 6901 pointers (after-hook `redactions`). */
+const UNSAFE_SEGMENTS: ReadonlySet<string> = new Set(["__proto__", "constructor", "prototype"]);
+
+/**
+ * Removes the members named by RFC 6901 pointers (after-hook `redactions`). Steps only through own
+ * properties and never through `__proto__`/`constructor`/`prototype`, so a pointer cannot reach a shared
+ * prototype (BSD-06).
+ */
 export function redact(value: JsonValue, pointers: readonly unknown[]): JsonValue {
   const copy = structuredClone(value);
   for (const p of pointers) {
     if (typeof p !== "string" || !p.startsWith("/")) continue;
     const parts = p.slice(1).split("/").map((s) => s.replace(/~1/g, "/").replace(/~0/g, "~"));
+    if (parts.some((part) => UNSAFE_SEGMENTS.has(part))) continue;
     let node: unknown = copy;
-    for (let i = 0; i < parts.length - 1; i++) {
-      node = isRecord(node) || Array.isArray(node) ? (node as Record<string, unknown>)[parts[i] as string] : undefined;
+    for (let i = 0; i < parts.length - 1 && node !== undefined; i++) {
+      const part = parts[i] as string;
+      node = (isRecord(node) || Array.isArray(node)) && Object.hasOwn(node, part) ? (node as Record<string, unknown>)[part] : undefined;
     }
     const last = parts.at(-1) as string;
     if (Array.isArray(node)) {
       const i = Number(last);
-      if (Number.isInteger(i) && i >= 0 && i < node.length) node.splice(i, 1);
-    } else if (isRecord(node)) delete node[last];
+      if (Number.isInteger(i) && i >= 0 && i < node.length && String(i) === last) node.splice(i, 1);
+    } else if (isRecord(node) && Object.hasOwn(node, last)) delete node[last];
   }
   return copy;
 }

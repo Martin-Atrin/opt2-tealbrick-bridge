@@ -11,7 +11,7 @@
     "lint": "biome check . && node scripts/check-literals.ts",
     "test": "tsc -p packages/bridge/tsconfig.build.json && node --test --test-timeout=60000 \"packages/*/test/**/*.test.ts\"",
     "conformance": "npm run build && node --test --test-timeout=60000 packages/bridge/test/bridge.test.ts && node scripts/conformance.ts",
-    "build": "tsc -p packages/bridge/tsconfig.build.json && tsc -p packages/bridge-server/tsconfig.build.json && tsc -p packages/cli/tsconfig.build.json && tsc -p packages/harness-claude/tsconfig.build.json && tsc -p packages/harness-eve/tsconfig.build.json"
+    "build": "tsc -p packages/bridge/tsconfig.build.json && tsc -p packages/bridge-server/tsconfig.build.json && tsc -p packages/harness-claude/tsconfig.build.json && tsc -p packages/harness-eve/tsconfig.build.json && tsc -p packages/cli/tsconfig.build.json"
   },
   "devDependencies": {
     "@biomejs/biome": "2.5.15",
