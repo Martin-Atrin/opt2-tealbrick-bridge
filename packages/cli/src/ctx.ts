@@ -48,6 +48,7 @@ export const OPTIONS = {
   purge: { type: "boolean" },
   inbox: { type: "string" },
   "keep-existing": { type: "boolean" },
+  "switch-to-stdio": { type: "boolean" },
   start: { type: "boolean" },
   /** agent serve: restart after a crash with backoff (own pidfile) */
   supervise: { type: "boolean" },

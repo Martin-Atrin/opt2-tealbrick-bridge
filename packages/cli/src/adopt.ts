@@ -14,10 +14,10 @@ import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } fro
 import { confirm, desktopConfigPath, mergeJsonConfig, mergeTomlConfig, planConnect, readExisting, writeAtomic } from "./connect.ts";
 import type { Ctx, Handler } from "./ctx.ts";
 import { CliError, EXIT, usageError } from "./io.ts";
-import { type AdoptSuggestion, agentLogin, probeAgent } from "./lead.ts";
+import { type AdoptSuggestion, agentLogin, probeAgent, selfRevoke } from "./lead.ts";
 import { pickAgentItem } from "./relay-main.ts";
 import { AGENT_ITEM_PREFIX } from "./store.ts";
-import { heartbeatPath, isAlive, pidPath, readPid, stopLoop } from "./supervise.ts";
+import { heartbeatPath, isAlive, pidPath, readHeartbeat, readPid, stopLoop } from "./supervise.ts";
 
 export const ADOPT_HARNESSES = ["claude-sdk", "claude-code", "claude-desktop", "codex", "command"] as const;
 export type AdoptHarness = (typeof ADOPT_HARNESSES)[number];
@@ -145,6 +145,8 @@ async function credentialNames(dir: string): Promise<{ path: string; reason: str
       const p = join(d, e.name);
       if (e.isDirectory()) {
         if (CREDENTIAL_DIR.has(e.name)) out.push({ path: p, reason: e.name === ".tealbrick" ? "v1 identity/credential folder: only the serve config and pid files are read (F29)" : "credential/session folder (by name)" });
+        // F42: older v1 identity folders (.tealbrick.pre-reenroll-<date>, .tealbrick-old …) are one entry, never read
+        else if (/^\.tealbrick[.\-_]/.test(e.name)) out.push({ path: p, reason: "older v1 identity/credential folder (by name): not read" });
         else await walk(p, depth + 1);
       } else if (CREDENTIAL_NAME.some((r) => r.test(e.name))) out.push({ path: p, reason: "credential-like file (by name)" });
     }
@@ -191,7 +193,11 @@ export async function detect(env: Record<string, string | undefined>, cwd: strin
         try {
           const r = JSON.parse(await readFile(rp, "utf8")) as Record<string, unknown>;
           const agents = (r.agents ?? r) as Record<string, unknown>;
-          s = { ...(typeof recipe.agent === "string" && typeof agents[recipe.agent] === "object" ? (agents[recipe.agent] as Record<string, unknown>) : r), ...c };
+          // F41: the top level holds the defaults (model/effort/maxTurns/maxBudgetUsd/timeoutSeconds…); the agent
+          // block under agents.<name> overrides them; inline claude.* overrides both
+          const { agents: _blocks, ...top } = r;
+          const block = typeof recipe.agent === "string" && agents[recipe.agent] && typeof agents[recipe.agent] === "object" ? (agents[recipe.agent] as Record<string, unknown>) : {};
+          s = { ...top, ...block, ...c };
         } catch {
           d.settings.unknown.push("recipe (not readable JSON)");
         }
@@ -303,7 +309,7 @@ export function planText(p: AdoptPlan, files: string[]): string {
     ...(d.builtinTools.proposed.length || d.builtinTools.dropped.length ? [`  built-in tools ${d.builtinTools.proposed.join(", ") || "none"}${d.builtinTools.dropped.length ? ` (dropped: ${d.builtinTools.dropped.join(", ")})` : ""}`] : []),
     ...d.mcpServers.map((m) => `  MCP not wired  ${m.name}: ${m.reason}`),
     `  connection     one owner approval in Portal (device flow); card "${p.name}"`,
-    `  inbox          ${p.serve ? `Connect channel inbox${p.buzzChannels.length ? ` + Buzz ${p.buzzChannels.join(", ")}` : " (bots only; add --inbox buzz:<channel> for Buzz)"}, wake: ${p.wake}` : "none (this harness runs itself)"}`,
+    `  inbox          ${p.serve ? `${p.buzzChannels.length ? `Buzz ${p.buzzChannels.join(", ")}` : "Connect channel inbox (bots only; add --inbox buzz:<channel> for Buzz)"}, wake: ${p.wake}` : "none (this harness runs itself)"}`,
     `  files to write ${files.join(", ") || "none"} (each existing file is backed up first)`,
     ...d.notCopied.slice(0, 20).map((x) => `  not copied     ${x.path} (${x.reason})`),
     ...(d.notCopied.length > 20 ? [`  not copied     … ${d.notCopied.length - 20} more`] : []),
@@ -444,7 +450,9 @@ export async function referencedTools(files: string[]): Promise<string[]> {
   for (const f of files) {
     for (const line of (await readFile(f, "utf8")).split("\n")) {
       const r = rewriteLine(line);
-      for (const m of r.line.matchAll(/\b([a-z][a-z0-9-]{1,31})__([a-z][a-z0-9_]{1,63})\b/g)) out.add(`${m[1]}__${m[2]}`);
+      // F46: an unrewritten v1 `mcp__<server>__<tool>` name is not an opt2 product ("mcp" was a phantom product)
+      const plain = r.line.replace(/\bmcp__[A-Za-z0-9_-]+__[A-Za-z0-9_]+/g, " ");
+      for (const m of plain.matchAll(/\b([a-z][a-z0-9-]{1,31})__([a-z][a-z0-9_]{1,63})\b/g)) if (m[1] !== "mcp") out.add(`${m[1]}__${m[2]}`);
     }
   }
   return [...out];
@@ -457,12 +465,17 @@ const WRITE_TOOLS = new Set(["knowledge__document_create", "knowledge__document_
  * C106a: the grant SUGGESTION sent with the device request — read for every Teal Brick product the agent uses (Connect
  * always, for its inbox) and the write ops its persona needs. Write ops are never pre-approved: the owner ticks them.
  */
-export function adoptSuggestion(tools: string[], plan: Pick<AdoptPlan, "serve" | "buzzChannels">): AdoptSuggestion {
+export function adoptSuggestion(tools: string[], plan: Pick<AdoptPlan, "serve" | "buzzChannels">, deployed: string[] | null = null): AdoptSuggestion {
   const products = new Map<string, Set<string>>();
   const use = (p: string) => products.get(p) ?? products.set(p, new Set()).get(p) ?? new Set<string>();
-  if (plan.serve) use("connect");
+  // F46: with the deployed catalog known (owner session), read is suggested for EVERY deployed app and nothing else;
+  // without it, only the products the persona names (Core marks the ones not deployed)
+  const isDeployed = (p: string) => deployed === null || deployed.includes(p);
+  for (const p of deployed ?? []) use(p);
+  if (plan.serve && isDeployed("connect")) use("connect");
   for (const t of tools) {
     const [p, op] = t.split("__") as [string, string];
+    if (!isDeployed(p)) continue;
     const ops = use(p);
     if (WRITE_TOOLS.has(t)) ops.add(op);
   }
@@ -472,6 +485,32 @@ export function adoptSuggestion(tools: string[], plan: Pick<AdoptPlan, "serve" |
     ...(plan.buzzChannels.length ? { channel: { kind: "buzz_channel" as const, id: plan.buzzChannels[0] as string } } : plan.serve ? { channel: { kind: "connect_inbox" as const } } : {}),
     wake: plan.serve ? "serve" : "none",
   };
+}
+
+/**
+ * F46: the products deployed in the owner's workspace (owner session: instances.list), or null when no owner session
+ * is on this machine (then the suggestion comes from the persona only). Never fails the adopt.
+ */
+async function deployedProducts(ctx: Ctx): Promise<string[] | null> {
+  try {
+    const { requireSession, resolveWorkspace } = await import("./session.ts");
+    const { client } = await requireSession(ctx);
+    const ws = await resolveWorkspace(ctx, client);
+    const res = await client.call<{ items?: { product?: unknown; state?: unknown }[] }>("instances.list", { ws });
+    const out = new Set<string>();
+    for (const i of res.items ?? []) if (typeof i.product === "string" && i.state !== "removed") out.add(i.product);
+    return [...out].sort();
+  } catch {
+    return null;
+  }
+}
+
+/** F44: is `agent serve` running for this connection (own pidfile), and when did it last poll? */
+async function serveRunning(ctx: Ctx, con: string): Promise<{ pid: number; lastPollAt: string | null } | null> {
+  const held = await readPid(pidPath(ctx.configDir(), con));
+  if (!held || !isAlive(held.pid)) return null;
+  const hb = await readHeartbeat(heartbeatPath(ctx.configDir(), con));
+  return { pid: held.pid, lastPollAt: hb?.lastPollAt ?? null };
 }
 
 /** `tealbrick adopt` */
@@ -521,13 +560,32 @@ export const adopt: Handler = async (ctx) => {
   const entryName = reuse?.name ?? "tealbrick";
   const reuseCard = prior?.state.agt ?? ctx.g.agent ?? reuse?.agt ?? null;
   const dirFor = (agt: string) => join(adoptRoot(ctx), agt);
-  const planned = [...(serve ? ["<adopt>/serve.json"] : []), ...(d.persona.files.length ? ["<adopt>/persona/persona.md"] : []), ...(harness === "claude-code" || harness === "claude-desktop" || harness === "codex" ? [`${target ?? `${harness} MCP config`} (entry "${entryName}")`] : [])];
-  const existingLines = existing.map((e) => `  EXISTING       ${target}: Teal Brick entry "${e.name}" (${e.remote ? "remote/OAuth" : "local relay"}${e.agt ? `, card ${e.agt}` : ""})${reuse ? ` → adopt REUSES it${reuseCard ? ` and card ${reuseCard}` : " (card unknown: pass --agent <agt_…> to keep the same card)"}` : ""}`);
+  // F47: REUSE keeps the existing entry's transport; a remote (URL/OAuth) entry becomes the local stdio relay ONLY with
+  // --switch-to-stdio (that ends the harness's own OAuth login for the entry)
+  const switchToStdio = ctx.v["switch-to-stdio"] === true;
+  const keepRemote = !!reuse?.remote && !switchToStdio;
+  const wires = (harness === "claude-code" || harness === "claude-desktop" || harness === "codex") && !keepRemote;
+  const planned = [...(serve ? ["<adopt>/serve.json"] : []), ...(d.persona.files.length ? ["<adopt>/persona/persona.md"] : []), ...(wires ? [`${target ?? `${harness} MCP config`} (entry "${entryName}")`] : [])];
+  const transport = (e: ExistingEntry) => (e.remote ? (switchToStdio ? "remote/OAuth → switched to the local stdio relay (--switch-to-stdio)" : "kept: remote OAuth (pass --switch-to-stdio to use the local relay)") : "kept: local stdio relay");
+  const existingLines = existing.map((e) => `  EXISTING       ${target}: Teal Brick entry "${e.name}" (${e.remote ? "remote/OAuth" : "local relay"}${e.agt ? `, card ${e.agt}` : ""})${reuse ? ` → adopt REUSES it${reuseCard ? ` and card ${reuseCard}` : " (card unknown: pass --agent <agt_…> to keep the same card)"}; ${transport(e)}` : ""}`);
   if (existing.length > 1) existingLines.push(`  CHOOSE         several Teal Brick entries: remove the ones you do not need, or pass --keep-existing to add "tealbrick" next to them`);
-  const text = [planText(plan, planned), ...existingLines].join("\n");
+  // F46: the grant suggestion (deployed catalog when an owner session is on this machine, else the persona)
+  const deployed = await deployedProducts(ctx);
+  const suggestion = adoptSuggestion(await referencedTools(d.persona.files), plan, deployed);
+  const suggestLines = [
+    `  access asked   read: ${suggestion.grants.map((g) => g.product).join(", ") || "none"}${suggestion.grants.some((g) => g.operations?.length) ? `; write (you tick them): ${suggestion.grants.flatMap((g) => (g.operations ?? []).map((o) => `${g.product}__${o}`)).join(", ")}` : ""}`,
+    `  apps from      ${deployed ? "the apps deployed in your workspace" : "the persona only (sign in with tealbrick login first to offer every deployed app)"}`,
+  ];
+  const text = [planText(plan, planned), ...suggestLines, ...existingLines].join("\n");
 
   if (ctx.v["dry-run"] === true) {
-    ctx.emit({ dryRun: true, plan: { ...plan, files: planned }, existing: prior ? { agent: prior.state.agt, connection: prior.state.con } : null, existingEntries: existing, target, entry: entryName, card: reuseCard }, `${text}\n\n--dry-run: nothing was written.`);
+    // F43: the persona is built in memory, so the rewrite and review lists show before anything is written
+    const preview = d.persona.files.length ? await buildPersona(d.persona.files, plan) : { review: [] as string[] };
+    const reviewText = preview.review.length ? ["", "persona rewrites and lines to review:", ...preview.review.map((l) => `  ${l}`)] : [];
+    ctx.emit(
+      { dryRun: true, plan: { ...plan, files: planned }, existing: prior ? { agent: prior.state.agt, connection: prior.state.con } : null, existingEntries: existing, target, entry: entryName, card: reuseCard, transport: reuse ? (keepRemote ? "remote" : "stdio") : null, suggestion, personaReview: preview.review },
+      `${text}${reviewText.length ? `\n${reviewText.join("\n")}` : ""}\n\n--dry-run: nothing was written.`,
+    );
     return;
   }
   ctx.say(text);
@@ -544,7 +602,7 @@ export const adopt: Handler = async (ctx) => {
     const card = ctx.v["keep-existing"] === true && !prior && !ctx.g.agent ? null : reuseCard;
     const sub: Ctx = { ...ctx, v: { ...ctx.v, ...(card ? {} : { create: true }), name, ...(plan.purpose ? { purpose: plan.purpose } : {}) }, g: { ...ctx.g, agents: card ? [card] : [], agent: card ?? undefined }, emit: (r) => void captured.push(r as never) };
     if (card) delete (sub.v as Record<string, unknown>).create;
-    await agentLogin(sub, { adopt: adoptSuggestion(await referencedTools(d.persona.files), plan) });
+    await agentLogin(sub, { adopt: suggestion });
     const con = captured.flatMap((c) => c.connections ?? [])[0]?.con;
     if (!con) throw new CliError(EXIT.unexpected, "internal", "the device flow returned no connection");
     item = await pickAgentItem(ctx.store(), con);
@@ -568,7 +626,7 @@ export const adopt: Handler = async (ctx) => {
   }
 
   // §5 wire MCP (one "tealbrick" entry; backup first; unchanged → no write)
-  if (harness === "claude-code" || harness === "claude-desktop" || harness === "codex") {
+  if (wires) {
     const sub: Ctx = { ...ctx, v: { ...ctx.v, local: true, remote: undefined }, g: { ...ctx.g, agent: item.agt, agents: [item.agt] } };
     const cp = await planConnect(sub, harness);
     if (!cp.target) throw new CliError(EXIT.unexpected, "internal", `no config path for ${harness}`);
@@ -588,6 +646,8 @@ export const adopt: Handler = async (ctx) => {
   if (serve) {
     const harnessCfg: Record<string, unknown> = {
       kind: "claude",
+      // F45: the harness works in <adopt dir>/work (0700), never in the shell's cwd
+      cwd: "work",
       modelKeyEnv: "ANTHROPIC_API_KEY",
       ...(state.persona ? { appendSystemPromptFile: relative(adir, state.persona.path) } : {}),
       ...(d.settings.model ? { model: d.settings.model } : {}),
@@ -597,11 +657,15 @@ export const adopt: Handler = async (ctx) => {
       ...(d.settings.timeoutSeconds && d.settings.timeoutSeconds >= 10 ? { turnTimeoutSeconds: Math.min(d.settings.timeoutSeconds, 86_400) } : {}),
       ...(d.builtinTools.proposed.length ? { builtinTools: d.builtinTools.proposed } : {}),
     };
+    // F35: with Buzz channels the agent listens there (buzz_read under the read grant); the bot channel inbox only
+    // without them
     const inboxes = [
-      { tool: "connect__channel_inbox", cursor: { param: "sinceSeq", from: "nextSeq" }, id: "seq", wake },
+      ...(plan.buzzChannels.length ? [] : [{ tool: "connect__channel_inbox", cursor: { param: "sinceSeq", from: "nextSeq" }, id: "seq", wake }]),
       ...plan.buzzChannels.map((channel) => ({ tool: "connect__buzz_read", args: { channel }, cursor: { param: "since", from: "max:createdAt" }, items: "messages", id: "id", skipIf: { fromSelf: true }, wake })),
     ];
     const cfg = { format: "tealbrick.agent-serve/1", harness: harnessCfg, pollSeconds: 30, holds: true, inboxes };
+    await mkdir(join(adir, "work"), { recursive: true, mode: 0o700 });
+    await chmod(join(adir, "work"), 0o700);
     const text2 = `${JSON.stringify(cfg, null, 2)}\n`;
     const path = join(adir, "serve.json");
     if (state.serve?.digest !== digestOf(text2) || !existsSync(path)) {
@@ -632,7 +696,7 @@ export const adopt: Handler = async (ctx) => {
       const { spawn } = await import("node:child_process");
       const log = join(adir, "serve.log");
       const fd = openSync(log, "a", 0o600);
-      const child = spawn(process.execPath, [process.argv[1] ?? "tealbrick", "agent", "serve", "--file", state.serve.path, "--agent", item.agt, "--supervise"], { detached: true, stdio: ["ignore", fd, fd], env: ctx.io.env as NodeJS.ProcessEnv });
+      const child = spawn(process.execPath, [process.argv[1] ?? "tealbrick", "agent", "serve", "--file", state.serve.path, "--agent", item.agt, "--supervise"], { detached: true, cwd: adir, stdio: ["ignore", fd, fd], env: ctx.io.env as NodeJS.ProcessEnv });
       child.unref();
       started = { pid: child.pid ?? null, log };
     }
@@ -640,6 +704,7 @@ export const adopt: Handler = async (ctx) => {
 
   // §9 verify (reads only; writes need the owner's write grant)
   const probe = await probeAgent(ctx, item);
+  const running = started ? null : await serveRunning(ctx, item.con);
   const serveCmd = state.serve ? `tealbrick agent serve --file ${state.serve.path} --agent ${item.agt} --supervise` : null;
   const report = {
     agent: item.agt,
@@ -654,6 +719,7 @@ export const adopt: Handler = async (ctx) => {
     personaReview,
     serve: serveCmd,
     started,
+    running,
     notCopied: d.notCopied.map((x) => x.path),
   };
   ctx.emit(
@@ -664,13 +730,13 @@ export const adopt: Handler = async (ctx) => {
       changes.length ? `changed: ${changes.join(", ")}` : "nothing changed (already adopted)",
       ...(report.backups.length ? [`backups: ${report.backups.join(", ")}`] : []),
       ...(personaReview.length ? ["review these persona lines (tool or channel references):", ...personaReview.map((l) => `  ${l}`)] : []),
-      ...(started ? [`started agent serve (supervisor pid ${started.pid ?? "?"}), log ${started.log}`] : serveCmd ? [`run: ${serveCmd}  (or re-run adopt with --start)`] : []),
+      ...(started ? [`started agent serve (supervisor pid ${started.pid ?? "?"}), log ${started.log}`] : running ? [`serve running (supervisor pid ${running.pid}, last poll ${running.lastPollAt ?? "never"})`] : serveCmd ? [`run: ${serveCmd}  (or re-run adopt with --start)`] : []),
       "test: ask the owner to send the agent a message in the Teal Brick inbox; writes need the owner's write grant.",
     ].join("\n"),
   );
 };
 
-/** §10 --undo: own pidfile only (L20), restore backups, remove the local key; the owner revokes in Portal. */
+/** §10 --undo: own pidfile only (L20), restore backups, revoke the own connection at the bridge (F39), remove the local key. */
 async function adoptUndo(ctx: Ctx): Promise<void> {
   const found = await findState(ctx, ctx.v.name ? String(ctx.v.name) : undefined, ctx.v.harness ? String(ctx.v.harness) : undefined, ctx.g.agent);
   if (!found) throw usageError("nothing to undo: pass --name or --agent of an adopted agent");
@@ -694,6 +760,11 @@ async function adoptUndo(ctx: Ctx): Promise<void> {
     } else left.push(`${w.target}: changed since adopt; remove the "tealbrick" entry yourself`);
   }
   if (state.serve) await rm(state.serve.path, { force: true });
+  // F39: the agent revokes its OWN connection with its own key, BEFORE the key is deleted (bridge ≥ 0.1.18)
+  const item = await pickAgentItem(ctx.store(), state.con).catch(() => null);
+  const revoked = item ? await selfRevoke(ctx, item) : ({ ok: false, reason: "the local key is already gone" } as const);
+  if (revoked.ok) done.push(`revoked connection ${state.con} at the bridge${revoked.already ? " (it was already revoked)" : ""}; Portal lists it revoked with the next config`);
+  else left.push(`revoke of ${state.con} failed: ${revoked.reason}`);
   await ctx.store().delete(`${AGENT_ITEM_PREFIX}${state.con}`);
   done.push(`deleted the local key of ${state.con}`);
   if (ctx.v.purge === true) {
@@ -705,7 +776,8 @@ async function adoptUndo(ctx: Ctx): Promise<void> {
     state.serve = null;
     await writePrivate(join(dir, "adopt.json"), `${JSON.stringify({ ...state, undone: new Date(ctx.now()).toISOString() }, null, 2)}\n`);
   }
-  // F39: no agent-side self-revoke exists yet (Core connections.revoke is browser-only): name the exact connection
-  ctx.emit({ undone: state.agt, connection: state.con, revokeNeeded: true, done, left }, [...done, ...left.map((l) => `left: ${l}`), `Owner: revoke connection ${state.con} of agent ${state.agt} in Portal → the agent card → Connections (the local key is gone; the server connection stays valid until then).`].join("\n"));
+  // the owner step only when the self-revoke failed (the connection stays valid on the server until then)
+  const ownerStep = revoked.ok ? [] : [`Owner: revoke connection ${state.con} of agent ${state.agt} in Portal → the agent card → Connections (the local key is gone; the server connection stays valid until then).`];
+  ctx.emit({ undone: state.agt, connection: state.con, revoked: revoked.ok, revokeNeeded: !revoked.ok, done, left }, [...done, ...left.map((l) => `left: ${l}`), ...ownerStep].join("\n"));
 }
 

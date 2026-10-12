@@ -16,7 +16,7 @@
  */
 import { spawn } from "node:child_process";
 import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname } from "node:path";
+import { dirname, resolve as resolvePath } from "node:path";
 import type { HeldResult, McpClient, McpToolResult } from "@opt2-tealbrick/bridge";
 import { channelSenderId } from "@opt2-tealbrick/manifest";
 import { TOOL_NAME_RULE } from "@opt2-tealbrick/spec/bridge";
@@ -570,7 +570,8 @@ export async function claudeRunner(h: Extract<HarnessSpec, { kind: "claude" }>, 
       prompt,
       {
         bridge: { agentId, command: relay.command, args: relayArgs },
-        cwd: h.cwd ?? process.cwd(),
+        // F45: a relative cwd is relative to the serve config (adopt writes "work" = <adopt dir>/work)
+        cwd: h.cwd ? resolvePath(configDir, h.cwd) : process.cwd(),
         ...(h.model ? { model: h.model } : {}),
         modelKeyEnv: h.modelKeyEnv ?? "ANTHROPIC_API_KEY",
         ...(systemPrompt ? { appendSystemPrompt: systemPrompt } : {}),

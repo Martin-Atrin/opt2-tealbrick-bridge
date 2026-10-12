@@ -26,6 +26,7 @@ describe("tealbrick adopt (C96 phase 1)", () => {
   let bridge: Server;
   let registeredKey: unknown;
   let deviceStarts = 0;
+  const revokes: string[] = [];
 
   before(async () => {
     await h.setup();
@@ -35,6 +36,10 @@ describe("tealbrick adopt (C96 phase 1)", () => {
       for await (const c of req) chunks.push(c as Buffer);
       const body = Buffer.concat(chunks).toString("utf8");
       if (req.url === "/oauth/token") return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ access_token: "k5-access", token_type: "Bearer", expires_in: 900 }));
+      if (req.url === "/agent/connection/revoke" && req.method === "POST") {
+        revokes.push(JSON.parse(body).assertion);
+        return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ con: CON, status: "revoked" }));
+      }
       if (req.url === "/mcp" && req.method === "POST") {
         const m = JSON.parse(body);
         const result = m.method === "initialize" ? { protocolVersion: "2025-06-18", instructions: "Teal Brick apps" } : { tools: [{ name: "connect__channel_inbox" }, { name: "knowledge__recall" }] };
@@ -109,6 +114,11 @@ describe("tealbrick adopt (C96 phase 1)", () => {
     assert.ok(!all.includes(SECRET_FILE_VALUE) && !all.includes(SECRET_ENV_VALUE), "no secret value in any output");
     assert.equal(h.portal.requests.length, before, "no network call");
     assert.equal(existsSync(adoptDir()), false, "nothing written");
+    // F43: the persona is built in memory — rewrites and review lines show in the dry-run
+    assert.ok(r.json.personaReview.some((l: string) => /rewrote create_document → knowledge__document_create/.test(l)));
+    assert.ok(r.json.personaReview.some((l: string) => /mcp__mail__send/.test(l)));
+    // F46: no phantom product "mcp" from the v1 mcp__mail__send name
+    assert.ok(!r.json.suggestion.grants.some((g: { product: string }) => g.product === "mcp"));
   });
 
   test("real run, then a re-run: one device flow, persona + serve config written once, the re-run changes nothing", async () => {
@@ -134,6 +144,10 @@ describe("tealbrick adopt (C96 phase 1)", () => {
     assert.equal(serve.harness.maxBudgetUsd, 5);
     assert.equal(serve.harness.turnTimeoutSeconds, 900);
     assert.equal(serve.inboxes[0].wake, "mentions");
+    // F45: the harness works in <adopt dir>/work (0700), not in the shell's cwd
+    assert.equal(serve.harness.cwd, "work");
+    const { statSync: st } = await import("node:fs");
+    assert.equal(st(join(dir, "work")).mode & 0o777, 0o700);
     const persona = await readFile(join(dir, "persona", "persona.md"), "utf8");
     assert.match(persona, /adopted by tealbrick adopt/);
     assert.match(persona, /You read papers/);
@@ -183,7 +197,11 @@ describe("tealbrick adopt (C96 phase 1)", () => {
     assert.equal(await readFile(cfgPath, "utf8"), original, "restored byte for byte");
     assert.equal(await h.store.get(`tealbrick.agent.${CON}`), null, "local key deleted");
     assert.equal(u.json.connection, CON, "F39: the exact connection id is named");
-    assert.equal(u.json.revokeNeeded, true);
+    // F39: --undo revokes the own connection at the bridge with an assertion of THAT connection; no owner step
+    assert.equal(revokes.length, 1);
+    assert.equal(JSON.parse(Buffer.from(revokes[0]?.split(".")[1] ?? "", "base64url").toString("utf8")).con, CON);
+    assert.equal(u.json.revoked, true);
+    assert.equal(u.json.revokeNeeded, false);
     // F40: re-adopt after undo = SAME card, NEW connection (not "reused")
     const again = await h.run(["adopt", "--harness", "claude-desktop", "--name", "Desk agent", "--yes", "--json"]);
     assert.equal(again.code, 0, again.err);
@@ -200,6 +218,8 @@ describe("tealbrick adopt (C96 phase 1)", () => {
       buzz.map((i: { args: { channel: string } }) => i.args.channel),
       ["ch_research", "ch_team"],
     );
+    // F35: with Buzz channels the agent listens there only (no bot channel inbox under a read-only grant)
+    assert.ok(!serve.inboxes.some((i: { tool: string }) => i.tool === "connect__channel_inbox"));
     const bad = await h.run(["adopt", "--from-v1", v1(), "--inbox", "slack:x", "--dry-run", "--json"]);
     assert.equal(bad.code, 2);
   });
@@ -213,5 +233,54 @@ describe("tealbrick adopt (C96 phase 1)", () => {
     assert.ok(r.json.plan.detection.settings.unknown.includes("could not read recipe: mcpServers"));
     assert.equal(r.json.plan.detection.settings.model, undefined);
     assert.equal(r.json.plan.detection.settings.maxTurns, undefined);
+  });
+
+  test("F41/F42: top-level recipe defaults under the agent block; older .tealbrick* folders are one unread entry", async () => {
+    const base = join(h.home, "v1recipe");
+    await mkdir(join(base, ".tealbrick"), { recursive: true });
+    await mkdir(join(base, ".tealbrick.pre-reenroll-2026-09-01", "sessions"), { recursive: true });
+    await writeFile(join(base, ".tealbrick.pre-reenroll-2026-09-01", "kit.credentials.json"), "{}");
+    await writeFile(join(base, "recipe.json"), JSON.stringify({ model: "claude-opus-4-1", effort: "high", maxTurns: 40, maxBudgetUsd: 3, timeoutSeconds: 600, agents: { scout: { maxTurns: 12 } } }));
+    await writeFile(join(base, ".tealbrick", "native-serve.json"), JSON.stringify({ agent: { name: "Scout" }, claude: { recipe: { path: "../recipe.json", agent: "scout" } } }));
+    const r = await h.run(["adopt", "--from-v1", base, "--dry-run", "--json"]);
+    assert.equal(r.code, 0, r.err);
+    const st = r.json.plan.detection.settings;
+    assert.equal(st.model, "claude-opus-4-1", "top-level default kept");
+    assert.equal(st.effort, "high");
+    assert.equal(st.maxTurns, 12, "the agent block overrides the top level");
+    assert.equal(st.maxBudgetUsd, 3);
+    assert.equal(st.timeoutSeconds, 600);
+    const nc = r.json.plan.detection.notCopied.map((x: { path: string }) => x.path);
+    assert.ok(nc.includes(join(base, ".tealbrick.pre-reenroll-2026-09-01")), "the old identity folder is one entry");
+    assert.ok(!nc.some((x: string) => x.includes("kit.credentials.json")), "its files are not listed piecemeal");
+  });
+
+  test("F46: with an owner session the suggestion offers read for every DEPLOYED app and drops personas' others", async () => {
+    await h.signIn();
+    h.portal.on("GET", "/me", () => ({ body: { currentWorkspaceId: WS } }));
+    h.portal.on("GET", "/workspaces/{ws}/instances", () => ({ body: { items: [{ product: "connect", state: "running" }, { product: "kanban", state: "running" }, { product: "knowledge", state: "running" }] } }));
+    const r = await h.run(["adopt", "--from-v1", v1(), "--dry-run", "--json"]);
+    assert.equal(r.code, 0, r.err);
+    const products = r.json.suggestion.grants.map((g: { product: string }) => g.product).sort();
+    assert.deepEqual(products, ["connect", "kanban", "knowledge"]);
+    assert.deepEqual(r.json.suggestion.grants.find((g: { product: string }) => g.product === "knowledge").operations, ["document_create"]);
+    await h.store.delete("tealbrick.person");
+  });
+
+  test("F47: REUSE keeps a remote (OAuth) Codex entry unchanged; --switch-to-stdio is explicit and shown in the plan", async () => {
+    const cfg = join(h.home, ".codex", "config.toml");
+    await mkdir(join(h.home, ".codex"), { recursive: true });
+    const original = '[mcp_servers.tealbrick-dev]\nurl = "https://bridge.example/mcp"\n';
+    await writeFile(cfg, original);
+    const dry = await h.run(["adopt", "--harness", "codex", "--name", "Codex agent", "--agent", AGT, "--dry-run", "--json"]);
+    assert.equal(dry.code, 0, dry.err);
+    assert.equal(dry.json.transport, "remote");
+    const text = await h.run(["adopt", "--harness", "codex", "--name", "Codex agent", "--agent", AGT, "--dry-run"]);
+    assert.match(text.out + text.err, /kept: remote OAuth/);
+    const sw = await h.run(["adopt", "--harness", "codex", "--name", "Codex agent", "--agent", AGT, "--switch-to-stdio", "--dry-run", "--json"]);
+    assert.equal(sw.json.transport, "stdio");
+    const real = await h.run(["adopt", "--harness", "codex", "--name", "Codex agent", "--agent", AGT, "--yes", "--json"]);
+    assert.equal(real.code, 0, real.err);
+    assert.equal(await readFile(cfg, "utf8"), original, "the remote entry is not rewritten");
   });
 });

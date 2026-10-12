@@ -67,6 +67,36 @@ async function accessToken(ctx: Ctx, item: AgentItem): Promise<string> {
   throw new CliError(EXIT.refused, "invalid_grant", "the bridge refused this agent connection (revoked or paused)");
 }
 
+/**
+ * F39 (bridge ≥ 0.1.18): revoke THIS agent's own key connection at its bridge (`POST /agent/connection/revoke`, an
+ * agent assertion signed by the connection key). The bridge refuses it locally at once and reports it to Portal
+ * (client_revoke). Never throws: the caller prints the owner step when `ok` is false.
+ */
+export async function selfRevoke(ctx: Ctx, item: AgentItem): Promise<{ ok: true; already: boolean } | { ok: false; reason: string }> {
+  const now = Math.floor(ctx.now() / 1000);
+  let url: string;
+  try {
+    url = new URL("/agent/connection/revoke", item.tokenEndpoint).toString();
+  } catch {
+    return { ok: false, reason: "no bridge address in the local agent item" };
+  }
+  try {
+    const key = await keyOf(item);
+    const assertion = await api().signAssertion(
+      "tb-agent-assert+jwt",
+      { iss: `tb:agt:${item.agt}`, sub: `tb:agt:${item.agt}`, aud: `tb:brg:${item.bridgeId}`, iat: now, exp: now + 60, jti: api().ulid(), con: item.con },
+      key,
+    );
+    const res = await ctx.io.fetch(url, { method: "POST", headers: { "content-type": "application/json" }, body: JSON.stringify({ assertion }), redirect: "error", signal: AbortSignal.timeout(20_000) });
+    const body = (await res.json().catch(() => ({}))) as { con?: string; status?: string; already?: boolean };
+    if (res.ok && body.con === item.con && body.status === "revoked") return { ok: true, already: body.already === true };
+    if (res.status === 404) return { ok: false, reason: "the bridge is older than 0.1.18 (no self-revoke)" };
+    return { ok: false, reason: `the bridge refused the revoke (HTTP ${res.status})` };
+  } catch {
+    return { ok: false, reason: "bridge unreachable" };
+  }
+}
+
 /** spec 0.1.14 allows 1..80; live Core (3230e69) accepts ≤ 60, so the CLI stays at 60 until they agree */
 const CARD_NAME_MAX = 60;
 const CARD_PURPOSE_MAX = 280;
