@@ -7,7 +7,7 @@ import assert from "node:assert/strict";
 import { after, before, describe, test } from "node:test";
 import { BRIDGE_VERSION } from "../src/context.ts";
 import { buildStatusReport } from "../src/portal.ts";
-import { AGT, CON, INS, makeWorld, notesManifest, type World, waitFor } from "./support/world.ts";
+import { AGT, BRG, CON, INS, makeWorld, notesManifest, type World, WS, waitFor } from "./support/world.ts";
 
 const rejectedManifest = (w: World) => buildStatusReport(w.bridge.ctx).rejected.filter((r) => r.kind === "manifest");
 
@@ -82,5 +82,35 @@ describe("0.1.18: POST /agent/connection/revoke (F39 self-revoke)", () => {
     assert.equal((await revoke(assertion)).json.error?.code, "connection_unknown");
     const again = await revoke(await w.agentAssertion(AGT, CON2));
     assert.deepEqual(again.json, { con: CON2, status: "revoked", already: true });
+  });
+});
+
+/** C108: manifest 0.1.11 verifyGrant is the tolerant reader — an unknown (future) held family is ignored, not fatal. */
+describe("0.1.18: C108 tolerant held reader (manifest 0.1.11 verifyGrant)", () => {
+  let w: World;
+  before(async () => {
+    w = await makeWorld({ real: true });
+  });
+  after(async () => {
+    await w.close();
+  });
+
+  test('an agent grant with held ["destructive","future_x"] is accepted and the call runs', async () => {
+    const now = () => Math.floor(Date.now() / 1000);
+    const grant = await w.signPortal("tb-grant+jwt", { iss: "tb:portal", sub: `tb:agt:${AGT}`, aud: `tb:ins:${INS}`, iat: now(), exp: now() + 3600, jti: w.api.ulid(), ws: WS, cnf: { brg: BRG }, crud: ["read", "create"], mode: "free", held: ["destructive", "future_x"], caps: {}, wf: [], polrev: 1 });
+    await w.amend((c) => {
+      c.grants = c.grants.filter((g) => {
+        const p = JSON.parse(Buffer.from(g.split(".")[1] as string, "base64url").toString("utf8")) as { sub: string; aud: string };
+        return !(p.sub === `tb:agt:${AGT}` && p.aud === `tb:ins:${INS}`);
+      });
+      c.grants.push(grant);
+    });
+    await waitFor(() => w.bridge.ctx.table?.rev === w.rev(), 15000);
+    assert.equal(w.bridge.ctx.table?.grants.get(`tb:agt:${AGT}|tb:ins:${INS}`)?.token, grant, "the grant is loaded, not dropped");
+    const token = await w.agentToken();
+    const init = await w.mcp(token, { jsonrpc: "2.0", id: 1, method: "initialize", params: { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "t", version: "1" } } });
+    const r = await w.mcp(token, { jsonrpc: "2.0", id: 2, method: "tools/call", params: { name: "notes__notes_list", arguments: {} } }, init.session as string);
+    assert.equal(r.status, 200);
+    assert.notEqual(r.json.result?.isError, true, JSON.stringify(r.json.result?.structuredContent));
   });
 });
