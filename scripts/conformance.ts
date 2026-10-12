@@ -16,9 +16,11 @@ interface Check {
   id: string;
   status: string;
   asserted: string;
+  ms?: number;
 }
 interface Report {
   ok: boolean;
+  notes?: string[];
   checks: Check[];
   payloadScan?: { findings: string[] };
 }
@@ -26,6 +28,8 @@ interface Waiver {
   target: string;
   id: string;
   status: string;
+  /** optional: the waiver applies only when the observed text matches (environment waivers) */
+  assertedMatch?: string;
 }
 
 const root = resolve(fileURLToPath(new URL("..", import.meta.url)));
@@ -49,7 +53,7 @@ function judge(target: string, rep: Report): string[] {
   const problems: string[] = [];
   for (const c of rep.checks) {
     if (!FAILING.has(c.status)) continue;
-    const w = waivers.find((x) => x.target === target && x.id === c.id && x.status === c.status);
+    const w = waivers.find((x) => x.target === target && x.id === c.id && x.status === c.status && (!x.assertedMatch || new RegExp(x.assertedMatch).test(c.asserted)));
     if (w) {
       console.log(`${target}: WAIVED ${c.id} (${c.status}) — see scripts/conformance-waivers.json`);
       continue;
@@ -57,6 +61,10 @@ function judge(target: string, rep: Report): string[] {
     problems.push(`${target}: ${c.status} ${c.id} — ${c.asserted.slice(0, 300)}`);
   }
   for (const f of rep.payloadScan?.findings ?? []) problems.push(`${target}: payload scan finding ${f}`);
+  if (problems.length) {
+    for (const n of rep.notes ?? []) console.error(`${target} note: ${n.slice(0, 600)}`);
+    for (const c of rep.checks) console.error(`${target} timing: ${c.id} ${c.status} ${c.ms ?? "?"} ms`);
+  }
   const counts = rep.checks.reduce<Record<string, number>>((m, c) => ({ ...m, [c.status]: (m[c.status] ?? 0) + 1 }), {});
   console.log(`${target}: ${JSON.stringify(counts)}`);
   return problems;

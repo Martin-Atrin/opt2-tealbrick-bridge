@@ -5,8 +5,16 @@
       "target": "bridge",
       "id": "C5.portal_key_rotation",
       "status": "fail",
-      "reason": "Suite fixture bug: bridge-world publish() freezes portalKeys into configExtra and rotateKey() mints revisions that still list only the old key, so the announced key never reaches the bridge (see coordination/specs/REQUESTS.md 'bridge → specs/conformance'). With the fixture fixed locally the unchanged bridge passes; the bridge's own e2e suite tests rotation.",
+      "reason": "Suite fixture bug: bridge-world publish() freezes portalKeys into configExtra and rotateKey() mints revisions that still list only the old key, so the announced key never reaches the bridge (see coordination/specs/REQUESTS.md 'bridge \u2192 specs/conformance'). With the fixture fixed locally the unchanged bridge passes; the bridge's own e2e suite tests rotation.",
       "removeWhen": "@opt2-tealbrick/conformance ships the rotation fixture fix (expected 0.1.4)"
+    },
+    {
+      "target": "relay",
+      "id": "B10.stdio_only",
+      "status": "not_run",
+      "assertedMatch": "lsof unavailable",
+      "reason": "Environment only: the CI image (node bookworm) has no lsof, so the suite cannot list sockets and records not_run. The check runs and passes on developer machines; the relay has no listener by construction (stdio only, CORE I5). Requested a /proc/net fallback in the suite (coordination/specs/REQUESTS.md).",
+      "removeWhen": "the suite inspects sockets without lsof, or the CI image ships lsof"
     }
   ]
 }
