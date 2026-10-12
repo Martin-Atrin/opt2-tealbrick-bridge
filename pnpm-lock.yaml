@@ -30,8 +30,8 @@ importers:
         specifier: https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.6/opt2-tealbrick-manifest-0.1.6.tgz
         version: https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.6/opt2-tealbrick-manifest-0.1.6.tgz
       '@opt2-tealbrick/spec':
-        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.11/opt2-tealbrick-spec-0.1.11.tgz
-        version: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.11/opt2-tealbrick-spec-0.1.11.tgz
+        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.12/opt2-tealbrick-spec-0.1.12.tgz
+        version: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.12/opt2-tealbrick-spec-0.1.12.tgz
 
   packages/bridge-server:
     dependencies:
@@ -39,8 +39,8 @@ importers:
         specifier: workspace:*
         version: link:../bridge
       '@opt2-tealbrick/spec':
-        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.11/opt2-tealbrick-spec-0.1.11.tgz
-        version: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.11/opt2-tealbrick-spec-0.1.11.tgz
+        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.12/opt2-tealbrick-spec-0.1.12.tgz
+        version: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.12/opt2-tealbrick-spec-0.1.12.tgz
 
   packages/cli:
     dependencies:
@@ -51,8 +51,8 @@ importers:
         specifier: workspace:*
         version: link:../harness-claude
       '@opt2-tealbrick/spec':
-        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.11/opt2-tealbrick-spec-0.1.11.tgz
-        version: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.11/opt2-tealbrick-spec-0.1.11.tgz
+        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.12/opt2-tealbrick-spec-0.1.12.tgz
+        version: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.12/opt2-tealbrick-spec-0.1.12.tgz
 
   packages/harness-claude:
     dependencies:
@@ -60,8 +60,8 @@ importers:
         specifier: workspace:*
         version: link:../bridge
       '@opt2-tealbrick/spec':
-        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.11/opt2-tealbrick-spec-0.1.11.tgz
-        version: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.11/opt2-tealbrick-spec-0.1.11.tgz
+        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.12/opt2-tealbrick-spec-0.1.12.tgz
+        version: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.12/opt2-tealbrick-spec-0.1.12.tgz
 
   packages/harness-eve:
     dependencies:
@@ -69,8 +69,8 @@ importers:
         specifier: workspace:*
         version: link:../bridge
       '@opt2-tealbrick/spec':
-        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.11/opt2-tealbrick-spec-0.1.11.tgz
-        version: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.11/opt2-tealbrick-spec-0.1.11.tgz
+        specifier: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.12/opt2-tealbrick-spec-0.1.12.tgz
+        version: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.12/opt2-tealbrick-spec-0.1.12.tgz
 
 packages:
 
@@ -139,6 +139,10 @@ packages:
   '@opt2-tealbrick/spec@https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.11/opt2-tealbrick-spec-0.1.11.tgz':
     resolution: {integrity: sha512-JYo44ClyIzB2U4EmB/RSGSp02MVTG1h0Kx5zwAtnHdXAc8y2oIWSIK1cALIMXzawgCYsgRLviD+Yl9JLGrBv4A==, tarball: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.11/opt2-tealbrick-spec-0.1.11.tgz}
     version: 0.1.11
+
+  '@opt2-tealbrick/spec@https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.12/opt2-tealbrick-spec-0.1.12.tgz':
+    resolution: {integrity: sha512-202Dx3X0tfUn7BBxHwlS3yUijPv3qTTfwkRednhdQqHzKlIIFlmlSMobSTRioksKMHzHYmrjuQBDiPVICwzkfw==, tarball: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.12/opt2-tealbrick-spec-0.1.12.tgz}
+    version: 0.1.12
 
   '@types/node@24.19.2':
     resolution: {integrity: sha512-93d49wCWJkCyN87MxLpNN6KXPCwFw7bVUg79mGUV1OS40JGWwVCr8n61DXCSqz7CV6/VfPkb7xec7uP2M+QHWQ==}
@@ -222,6 +226,8 @@ snapshots:
       ajv: 8.17.1
 
   '@opt2-tealbrick/spec@https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.11/opt2-tealbrick-spec-0.1.11.tgz': {}
+
+  '@opt2-tealbrick/spec@https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.12/opt2-tealbrick-spec-0.1.12.tgz': {}
 
   '@types/node@24.19.2':
     dependencies:
