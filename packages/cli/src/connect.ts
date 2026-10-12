@@ -9,7 +9,7 @@ import { unifiedDiff } from "./diff.ts";
 import { CliError, EXIT, isRecord, usageError } from "./io.ts";
 import { normalizePortalOrigin } from "./portal.ts";
 import type { CredentialStore } from "./store.ts";
-import { createFileStore, isAgentItem } from "./store.ts";
+import { createFileStore, isAgentItem, relayStoreArgs } from "./store.ts";
 import { TomlError, tomlString, upsertMcpTable } from "./toml.ts";
 
 /**
@@ -101,14 +101,15 @@ function desktopConfigPath(ctx: Ctx): string {
   }
 }
 
-export function stdioArgs(agt: string): string[] {
-  return ["bridge", "serve", "--stdio", "--agent", agt];
+/** Relay args for a harness config; carries the file-store choice (the harness starts the relay with its own env). */
+export function stdioArgs(agt: string, env: Record<string, string | undefined> = {}): string[] {
+  return ["bridge", "serve", "--stdio", "--agent", agt, ...relayStoreArgs(env)];
 }
 
 export async function planConnect(ctx: Ctx, harness: Harness): Promise<ConnectPlan> {
   if (ctx.v.remote === true && ctx.v.local === true) throw usageError("pass --remote or --local, not both");
   const info = await readAgentInfo(ctx);
-  const stdio = (): Record<string, unknown> => ({ command: "tealbrick", args: stdioArgs(needAgent(info.agt)) });
+  const stdio = (): Record<string, unknown> => ({ command: "tealbrick", args: stdioArgs(needAgent(info.agt), ctx.io.env) });
   switch (harness) {
     case "claude-desktop": {
       if (ctx.v.local !== true) {
@@ -153,12 +154,12 @@ export async function planConnect(ctx: Ctx, harness: Harness): Promise<ConnectPl
         entry,
         toml: null,
         target,
-        text: `claude mcp add --scope user tealbrick -- tealbrick ${stdioArgs(agt).join(" ")}\n\nOr put this in ./.mcp.json:\n${JSON.stringify({ mcpServers: { tealbrick: entry } }, null, 2)}`,
+        text: `claude mcp add --scope user tealbrick -- tealbrick ${stdioArgs(agt, ctx.io.env).join(" ")}\n\nOr put this in ./.mcp.json:\n${JSON.stringify({ mcpServers: { tealbrick: entry } }, null, 2)}`,
       };
     }
     case "generic": {
       const out: Record<string, unknown> = {};
-      if (info.agt) out.stdio = { command: "tealbrick", args: stdioArgs(needAgent(info.agt)) };
+      if (info.agt) out.stdio = { command: "tealbrick", args: stdioArgs(needAgent(info.agt), ctx.io.env) };
       if (info.bridgeUrl) out.remote = { url: mcpUrl(info.bridgeUrl) };
       if (Object.keys(out).length === 0) throw usageError("nothing to print: pass --agent <agt_…> and/or --bridge <url>");
       return { harness, mode: "print", url: info.bridgeUrl ? mcpUrl(info.bridgeUrl) : null, entry: out, toml: null, target: null, text: JSON.stringify(out, null, 2) };

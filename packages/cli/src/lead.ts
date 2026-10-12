@@ -20,7 +20,7 @@ import { CliError, EXIT, isRecord, usageError } from "./io.ts";
 import { defaultOpenUrl } from "./owner.ts";
 import { type AgentItem, pickAgentItem, readAgentItems as readItems, serveRelay } from "./relay-main.ts";
 import { requireSession } from "./session.ts";
-import { AGENT_ITEM_PREFIX } from "./store.ts";
+import { AGENT_ITEM_PREFIX, relayStoreArgs } from "./store.ts";
 import { CLIENT_ID } from "./version.ts";
 
 let apiCache: ManifestApi | undefined;
@@ -260,7 +260,8 @@ async function agentServe(ctx: Ctx): Promise<void> {
   });
   const mcp = connectMcp({ streams: { input: fromRelay, output: toRelay } });
   await mcp.initialize("tealbrick-agent-serve");
-  const relayCmd = { command: process.execPath, args: [process.argv[1] ?? "tealbrick", "bridge", "serve", "--stdio", "--agent", item.agt] };
+  // the harness starts this relay with a filtered env (no TB_*, no XDG_CONFIG_HOME): the store choice travels as argv
+  const relayCmd = { command: process.execPath, args: [process.argv[1] ?? "tealbrick", "bridge", "serve", "--stdio", "--agent", item.agt, ...relayStoreArgs(ctx.io.env)] };
   const runTurn =
     cfg.harness.kind === "claude"
       ? await serve.claudeRunner(cfg.harness, item.agt, relayCmd)

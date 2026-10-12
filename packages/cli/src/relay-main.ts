@@ -5,7 +5,7 @@
 import { manifestApi, type RelayStatus, startRelay } from "@opt2-tealbrick/bridge/relay";
 import type { AgentId, BridgeId, ConnectionId, Ed25519PublicJwk } from "@opt2-tealbrick/spec/credentials";
 import { CliError, EXIT, usageError } from "./io.ts";
-import { type CredentialStore, createStore, isAgentItem } from "./store.ts";
+import { type CredentialStore, isAgentItem, relayStore } from "./store.ts";
 
 /** One key connection on this machine: item `tealbrick.agent.<con>` (K4 + bridge endpoints). */
 export interface AgentItem {
@@ -67,14 +67,21 @@ export async function serveRelay(opts: { store: CredentialStore; agent: string |
   await relay.done;
 }
 
-/** Standalone process entry used by main.ts for `bridge serve`: `[--stdio] [--agent <id>]` only. */
+/**
+ * Standalone process entry used by main.ts for `bridge serve`: `[--stdio] [--agent <id>] [--store keychain|file]
+ * [--config-dir <dir>]`. `--store`/`--config-dir` carry the credential-store choice when a harness starts the relay with
+ * a filtered env (harness-claude drops every TB_* name and XDG_CONFIG_HOME).
+ */
 export async function relayMain(argv: string[]): Promise<number> {
   const rest = argv.slice(2);
   let agent = process.env.TB_AGENT;
   let stdio = false;
+  const storeArgs: { store?: string; configDir?: string } = {};
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a === "--stdio") stdio = true;
+    else if (a === "--store") storeArgs.store = rest[++i];
+    else if (a === "--config-dir") storeArgs.configDir = rest[++i];
     else if (a === "--agent") agent = rest[++i];
     else if (a?.startsWith("--agent=")) agent = a.slice(8);
     else {
@@ -87,7 +94,7 @@ export async function relayMain(argv: string[]): Promise<number> {
     return EXIT.usage;
   }
   try {
-    await serveRelay({ store: createStore(process.env), agent, stderr: process.stderr });
+    await serveRelay({ store: relayStore(process.env, storeArgs), agent, stderr: process.stderr });
     return EXIT.ok;
   } catch (e) {
     const err = e instanceof CliError ? e : new CliError(EXIT.unexpected, "internal", e instanceof Error ? e.message : "unexpected error");

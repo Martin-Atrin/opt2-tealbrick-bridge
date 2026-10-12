@@ -208,6 +208,25 @@ export function createStore(env: Record<string, string | undefined>, platform: s
   return platform === "darwin" ? createKeychainStore() : createUnsupportedKeychain(platform);
 }
 
+/**
+ * Arguments that carry THIS process's credential-store choice to a relay it hands to a harness
+ * (`tealbrick bridge serve --stdio …`). Harnesses start the relay with a filtered env (harness-claude `sessionEnv`
+ * drops every TB_* name and XDG_CONFIG_HOME; desktop apps use their own env), so the choice must travel as argv.
+ * Keychain (the default) needs none. The config dir is a path, never a secret.
+ */
+export function relayStoreArgs(env: Record<string, string | undefined>): string[] {
+  return env.TB_CREDENTIAL_STORE === "file" ? ["--store", "file", "--config-dir", configDir(env)] : [];
+}
+
+/** The store a relay process uses: `--store`/`--config-dir` from argv win over its (possibly filtered) env. */
+export function relayStore(env: Record<string, string | undefined>, args: { store?: string; configDir?: string }, platform: string = process.platform): CredentialStore {
+  if (args.store === "file") return createFileStore(args.configDir ?? configDir(env));
+  if (args.store === "keychain") return createStore({ TB_CREDENTIAL_STORE: "keychain" }, platform);
+  if (args.store !== undefined) throw new CliError(EXIT.usage, "bad_request", "--store must be keychain or file");
+  if (args.configDir !== undefined) throw new CliError(EXIT.usage, "bad_request", "--config-dir needs --store file");
+  return createStore(env, platform);
+}
+
 /** Agent item names on this machine across the keychain and the file store (login warning only). */
 export async function listAgentItems(store: CredentialStore, env: Record<string, string | undefined>): Promise<string[]> {
   const names = new Set<string>();
