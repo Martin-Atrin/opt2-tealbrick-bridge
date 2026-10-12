@@ -376,7 +376,8 @@ export class CallRouter {
         }
         if (!isRecord(r) || !isRecord(r.add)) throw new BridgeError("hook_failed", 503, `hook ${h.id} bad answer`);
         for (const [k, val] of Object.entries(r.add)) {
-          if (!k.startsWith(`${h.product}.`)) throw new BridgeError("hook_failed", 503, `hook ${h.id} wrote outside its namespace`);
+          // §8.5 (G4b): `tb.*` is the bridge's namespace — never writable by a hook, whatever the product is called
+          if (k.startsWith("tb.") || !k.startsWith(`${h.product}.`)) throw new BridgeError("hook_failed", 503, `hook ${h.id} wrote outside its namespace`);
           context = { ...context, [k]: val as JsonValue };
         }
       }
@@ -415,9 +416,9 @@ export class CallRouter {
     } finally {
       this.active.delete(call);
       this.count(`call|${target.app.entry.product}|${metricCode(code)}`);
-      ctx.log.info("bridge.call", {
+      ctx.log.info(caller.type === "app" && !req.parentCall ? "call.app_initiated" : "bridge.call", {
         call,
-        ...(caller.type === "agent" ? { agt: caller.agt } : { ins: caller.ins }),
+        ...(caller.type === "agent" ? { agt: caller.agt } : { ins: caller.ins, parentCall: req.parentCall ?? null }),
         product: target.app.entry.product,
         op: target.op.id,
         decision: code === "ok" ? "forwarded" : "refused",

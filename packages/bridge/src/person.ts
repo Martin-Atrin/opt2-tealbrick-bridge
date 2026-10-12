@@ -77,7 +77,7 @@ export class PersonSurfaces {
       }
       // The SDK redeems the ticket once (jti in the app DB); the bridge only checks and forwards it.
     }
-    return this.proxy(req, res, app, url.pathname + url.search, body, MAX_UI_BODY, true);
+    return this.proxy(req, res, app, url.pathname + url.search, body, MAX_UI_BODY, true, rest === "/tb/launch" ? (loc) => launchRedirect(app.entry.product, loc) : undefined);
   }
 
   private allowedUiPath(app: AppRuntime, rest: string): boolean {
@@ -106,7 +106,7 @@ export class PersonSurfaces {
   }
 
   /** Forwards to the app, stripping Authorization and TB-* (except TB-CSRF on the UI path). */
-  private proxy(req: IncomingMessage, res: ServerResponse, app: AppRuntime, pathAndQuery: string, body: Buffer | undefined, max: number, keepCsrf: boolean): Promise<void> {
+  private proxy(req: IncomingMessage, res: ServerResponse, app: AppRuntime, pathAndQuery: string, body: Buffer | undefined, max: number, keepCsrf: boolean, rewriteLocation?: (loc: string | undefined) => string): Promise<void> {
     return new Promise((resolve) => {
       const target = new URL(pathAndQuery, app.entry.internalUrl);
       const headers: Record<string, string | string[]> = {};
@@ -126,7 +126,9 @@ export class PersonSurfaces {
       const upstream = send(target, { method: req.method, headers, timeout: 60_000 }, (ur) => {
         const out: Record<string, string | string[]> = {};
         for (const [k, v] of Object.entries(ur.headers)) if (v !== undefined && !["connection", "transfer-encoding"].includes(k)) out[k] = v;
-        res.writeHead(ur.statusCode ?? 502, out);
+        const status = ur.statusCode ?? 502;
+        if (rewriteLocation && status >= 300 && status < 400) out.location = rewriteLocation(typeof ur.headers.location === "string" ? ur.headers.location : undefined);
+        res.writeHead(status, out);
         ur.pipe(res);
         ur.on("end", () => resolve());
       });
@@ -294,3 +296,27 @@ function parseCookies(header: string | undefined): Record<string, string> {
 }
 
 export { BridgeError };
+
+/**
+ * C86 (BRIDGE §3 launch path): after the ticket POST the app SDK redirects to the ticket's `path`. The bridge keeps
+ * that redirect only when it stays under the ticket's own `/a/<product>/` and passes the path rule (relative,
+ * `/`-prefixed, no `//`, `\\`, `..`, scheme or host, no control characters); on any doubt → `/a/<product>/`.
+ */
+export function launchRedirect(product: string, location: string | undefined): string {
+  const home = `/a/${product}/`;
+  if (!location) return home;
+  const prefix = `/a/${product}`;
+  if (location !== prefix && !location.startsWith(home)) return home;
+  const path = location.slice(prefix.length) || "/";
+  const pathOnly = path.split(/[?#]/)[0] ?? "";
+  let decoded: string;
+  try {
+    decoded = decodeURIComponent(pathOnly);
+  } catch {
+    return home;
+  }
+  for (const p of [path, decoded]) {
+    if (!p.startsWith("/") || p.includes("//") || p.includes("\\") || p.includes("..") || [...p].some((ch) => ch.charCodeAt(0) < 0x20 || ch.charCodeAt(0) === 0x7f) || /^[a-z][a-z0-9+.-]*:/i.test(p.slice(1))) return home;
+  }
+  return `${prefix}${path}`;
+}

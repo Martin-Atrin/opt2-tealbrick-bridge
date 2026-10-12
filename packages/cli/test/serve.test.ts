@@ -1,7 +1,8 @@
 import assert from "node:assert/strict";
 import { describe, it } from "node:test";
 import type { McpToolResult } from "@opt2-tealbrick/bridge";
-import { promptFor, type ServeConfig, type ServeState, serveLoop, validateServeConfig } from "../src/serve.ts";
+import { decodeOnBehalfOf, encodeOnBehalfOf } from "../src/relay-main.ts";
+import { promptFor, type ServeConfig, type ServeState, senderOf, serveLoop, validateServeConfig } from "../src/serve.ts";
 
 interface World {
   inbox: Record<string, unknown>[];
@@ -191,5 +192,71 @@ describe("agent serve: wake filter (F15)", () => {
     assert.equal(r.prompts.length, 1);
     assert.equal(r.logs.filter((l) => l === "serve.inbox.no_mentions_field").length, 1);
     assert.throws(() => validateServeConfig({ format: "tealbrick.agent-serve/1", harness: { kind: "claude" }, inboxes: [{ tool: "connect__channel_inbox", wake: "some" }] }));
+  });
+});
+
+describe("agent serve: onBehalfOf (G4b)", () => {
+  it("Connect channel items name their sender as an unverified channel_sender claim", () => {
+    const inbox = { tool: "connect__channel_inbox" };
+    assert.deepEqual(senderOf(inbox, { service: "Slack", sender: { id: "U024BE7LH", name: "Ann" } }), { kind: "channel_sender", id: "slack:U024BE7LH", display: "Ann" });
+    assert.deepEqual(senderOf({ ...inbox, sender: { channel: "buzz", idField: "pubkey" } }, { pubkey: "npub1abc" }), { kind: "channel_sender", id: "buzz:npub1abc" });
+    assert.equal(senderOf(inbox, { service: "slack" }), undefined, "no sender id → no claim");
+    assert.equal(senderOf(inbox, { service: "sl ack", sender: { id: "U1" } }), undefined, "bad channel → no claim");
+    assert.equal(senderOf(inbox, { service: "slack", sender: { id: "x".repeat(300) } }), undefined, "oversized → no claim");
+    assert.equal(senderOf({ ...inbox, sender: false }, { service: "slack", sender: { id: "U1" } }), undefined);
+    const c = { kind: "channel_sender" as const, id: "telegram:12345", display: "Bo" };
+    assert.deepEqual(decodeOnBehalfOf(encodeOnBehalfOf(c)), c);
+    assert.equal(decodeOnBehalfOf("not-json"), undefined);
+  });
+
+  it("one turn per sender; each turn gets its sender's claim; the hold follow-up keeps it", async () => {
+    const abort = new AbortController();
+    let state: ServeState = { cursors: {}, seen: {}, primed: {} };
+    const turns: { prompt: string; onBehalfOf?: unknown }[] = [];
+    let polls = 0;
+    let clock = 2_000_000;
+    const items = [
+      { seq: 1, service: "slack", sender: { id: "U1", name: "Ann" }, text: "a1" },
+      { seq: 2, service: "slack", sender: { id: "U2", name: "Bo" }, text: "b1" },
+      { seq: 3, service: "slack", sender: { id: "U1", name: "Ann" }, text: "a2" },
+    ];
+    await serveLoop(
+      { ...cfg, backlog: true },
+      {
+        mcp: {
+          async callTool(name, args) {
+            if (name === "connect__channel_inbox") {
+              polls += 1;
+              if (polls > 6) abort.abort();
+              return { structuredContent: { messages: items.filter((m) => m.seq > Number(args.sinceSeq ?? 0)), nextSeq: 3 } };
+            }
+            return { structuredContent: { status: "approved" } };
+          },
+        },
+        async runTurn(prompt, events, opts) {
+          turns.push({ prompt, onBehalfOf: opts?.onBehalfOf });
+          if (turns.length === 1) events.onHeld({ status: "held", holdId: "hld_9", expiresAt: new Date(2_000_000_000_000).toISOString(), checkWith: "connect__tb_hold_status", tool: "connect__channel_send" } as never);
+          return { ok: true };
+        },
+        loadState: async () => structuredClone(state),
+        saveState: async (s) => {
+          state = structuredClone(s);
+        },
+        log: () => undefined,
+        sleep: async (ms) => {
+          clock += ms;
+          await new Promise((r) => setTimeout(r, 1));
+        },
+        now: () => clock,
+      },
+      abort.signal,
+    );
+    assert.equal(turns.length, 3, "two sender turns + one hold follow-up");
+    assert.match(turns[0]?.prompt as string, /a1[\s\S]*a2/);
+    assert.doesNotMatch(turns[0]?.prompt as string, /b1/);
+    assert.deepEqual(turns[0]?.onBehalfOf, { kind: "channel_sender", id: "slack:U1", display: "Ann" });
+    assert.deepEqual(turns[1]?.onBehalfOf, { kind: "channel_sender", id: "slack:U2", display: "Bo" });
+    assert.match(turns[2]?.prompt as string, /APPROVED/);
+    assert.deepEqual(turns[2]?.onBehalfOf, turns[0]?.onBehalfOf, "the follow-up acts for the same sender");
   });
 });

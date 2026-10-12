@@ -11,18 +11,22 @@ import { isRefusal, type Json, type KeySet } from "./api.ts";
 import type { CallRouter } from "./calls.ts";
 import { type BridgeContext, SDK_CURRENT_MAJOR } from "./context.ts";
 import { type AppRuntime, internalUrlAllowed, type Table } from "./table.ts";
-import { BridgeError, envelope, headerValue, isRecord, nowS, parseJson, readBody, sendError, sendJson, statusFor } from "./util.ts";
+import { BridgeError, envelope, headerValue, isRecord, nowS, parseJson, readBody, sendError, sendJson, statusFor, TokenBucket } from "./util.ts";
 
 interface InstanceCaller {
   ins: InstanceId;
   svc: string | undefined;
 }
 
+/** C85 app-initiated companion calls: 120 per minute per caller instance, burst 30. */
+export const APP_INITIATED_LIMIT = { perMinute: 120, burst: 30 } as const;
+
 export class InternalApi {
   private readonly ctx: BridgeContext;
   private readonly router: CallRouter;
   private readonly seenJtis = new Map<string, number>();
   private readonly waiters = new Set<() => void>();
+  private readonly appInitiated = new TokenBucket(APP_INITIATED_LIMIT.perMinute / 60, APP_INITIATED_LIMIT.burst);
 
   constructor(ctx: BridgeContext, router: CallRouter) {
     this.ctx = ctx;
@@ -276,6 +280,12 @@ export class InternalApi {
     if (app.down || !app.manifest) throw new BridgeError("app_unavailable", 503, "the target app is starting; retry");
     const op = app.ops.get(env.op);
     if (!op) throw new BridgeError("unknown_tool", 404);
+    // C85: an app-initiated call (no parentCall: timers, background work) is limited per caller instance like any
+    // caller (120/min, burst 30); calls inside a request chain are bounded by that request
+    if (!env.parentCall) {
+      const wait = this.appInitiated.take(caller.ins);
+      if (wait) return sendError(res, new BridgeError("rate_limited", 429, "too many app-initiated calls from this instance; retry later"), requestId, { "retry-after": String(wait) });
+    }
     try {
       const { result } = await this.router.route({
         caller: { type: "app", ins: caller.ins, grant },

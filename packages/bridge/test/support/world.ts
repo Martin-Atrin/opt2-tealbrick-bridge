@@ -14,7 +14,7 @@ import type { Ed25519KeyPair, ManifestApi } from "../../src/api.ts";
 import { manifestApi } from "../../src/manifest-adapter.ts";
 import type { McpLimits } from "../../src/mcp.ts";
 import { type ListenerLimits, type RunningBridge, startBridge } from "../../src/server.ts";
-import { silentLogger } from "../../src/util.ts";
+import { type Logger, silentLogger } from "../../src/util.ts";
 import { fakeApi } from "./fake-api.ts";
 
 export const WS = "ws_01HZZZZZZZZZZZZZZZZZZZZZZZ";
@@ -71,7 +71,10 @@ export const hookManifest = {
   scopes: [],
   skills: [],
   publicRoutes: [],
-  hooks: [{ id: "check", title: "Check", phase: "before", order: 1, match: { products: ["notes"] } }],
+  hooks: [
+    { id: "check", title: "Check", phase: "before", order: 1, match: { products: ["notes"] } },
+    { id: "enrich", title: "Enrich", phase: "context", order: 2, match: { products: ["notes"] } },
+  ],
 };
 
 export interface AppLog {
@@ -93,7 +96,7 @@ export interface World {
   signRaw(input: string): Promise<string>;
   acks: StatusReport[];
   appLog: AppLog;
-  hookMode: { mode: "allow" | "deny" | "fail" };
+  hookMode: { mode: "allow" | "deny" | "fail"; answer?: (hook: string, body: Record<string, unknown>) => unknown };
   /** publish a new config revision (tweak: mutate the base config) */
   publish(tweak?: (c: WorkspaceConfig) => void): Promise<number>;
   rev(): number;
@@ -135,6 +138,8 @@ export interface World {
 }
 
 export interface WorldOptions {
+  /** bridge logger (default: silent) */
+  logger?: Logger;
   withHook?: boolean;
   real?: boolean;
   manifestFailures?: number;
@@ -176,7 +181,7 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
   const agentKey = await api.generateKeyPair();
   const acks: StatusReport[] = [];
   const appLog: AppLog = { ops: [], hooks: [] };
-  const hookMode = { mode: "allow" as "allow" | "deny" | "fail" };
+  const hookMode: World["hookMode"] = { mode: "allow" };
   const appOps: World["appOps"] = {};
   let down = false;
   let pulls = 0;
@@ -254,6 +259,8 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
       const b = await body(req);
       appLog.hooks.push({ hook: url.pathname.slice(13), body: b });
       if (hookMode.mode === "fail") return res.writeHead(500).end();
+      const custom = hookMode.answer?.(url.pathname.slice(13), b);
+      if (custom !== undefined) return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(custom));
       return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ allow: hookMode.mode === "allow", reason: "blocked by test" }));
     }
     res.writeHead(404).end();
@@ -370,7 +377,7 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
   try {
     bridge = await startBridge({
       api,
-      logger: silentLogger,
+      logger: opts.logger ?? silentLogger,
       ports: { public: 0, internal: 0 },
       env: bridgeEnv(),
       ...(opts.limits ? { limits: opts.limits } : {}),
@@ -479,7 +486,7 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
     async restart() {
       const ports = { public: (bridge.publicServer.address() as AddressInfo).port, internal: (bridge.internalServer.address() as AddressInfo).port };
       await bridge.stop();
-      bridge = await startBridge({ api, logger: silentLogger, ports, env: bridgeEnv(), ...(opts.limits ? { limits: opts.limits } : {}), ...rootOpt });
+      bridge = await startBridge({ api, logger: opts.logger ?? silentLogger, ports, env: bridgeEnv(), ...(opts.limits ? { limits: opts.limits } : {}), ...rootOpt });
       world.bridge = bridge;
     },
     dataDir: dir,

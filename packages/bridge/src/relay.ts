@@ -28,6 +28,12 @@ export interface RelayOptions {
   stdin?: Readable;
   stdout?: Writable;
   fetch?: typeof fetch;
+  /**
+   * v0.1.13 (G4b): `_meta` entries added to every `tools/call` (e.g. `tealbrick/onBehalfOf` for the turn's message
+   * sender, set by `tealbrick agent serve`). Keys the MCP client sets itself win. No check runs here: the bridge
+   * validates the claim and treats it as unverified.
+   */
+  toolCallMeta?: Record<string, unknown>;
 }
 
 export type SignWithSigner = (typ: (typeof TYP)[keyof typeof TYP], claims: object, signer: { kid: string; sign(input: string): Promise<string> | string }) => Promise<string>;
@@ -204,6 +210,11 @@ export function startRelay(o: RelayOptions): RunningRelay {
       return;
     }
     if (m.method === "initialize") initRequest = m;
+    if (o.toolCallMeta && m.method === "tools/call" && m.params && typeof m.params === "object") {
+      const params = m.params as { _meta?: unknown };
+      const own = params._meta && typeof params._meta === "object" ? (params._meta as Record<string, unknown>) : {};
+      m = { ...m, params: { ...params, _meta: { ...o.toolCallMeta, ...own } } };
+    }
     const p = (async () => {
       try {
         const out = await post(m);
