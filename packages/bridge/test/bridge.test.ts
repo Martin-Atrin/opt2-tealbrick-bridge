@@ -152,12 +152,21 @@ describe(`deployed bridge (${real ? "real manifest crypto" : "test double"})`, (
     assert.equal(reuse.status, 403);
     // key page via a keys ticket
     const ticket = await w.signPortal("tb-ticket+jwt", { iss: "tb:portal", sub: "tb:per:per_01HPPPPPPPPPPPPPPPPPPPPPPP", aud: `tb:brg:${BRG}`, iat: now(), exp: now() + 120, jti: w.api.ulid(), ws: WS, pur: "keys" });
+    // Browser rule: the ticket arrives by a CROSS-SITE form POST (Portal → bridge). A SameSite=Strict cookie set
+    // on that response is NOT sent on a redirected follow-up GET of the same navigation. So the bridge must render
+    // the form in the POST response itself; the cookie is only needed for the later same-site form posts.
     const open = await fetch(`${w.publicUrl}/keys`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ ticket }), redirect: "manual" });
-    assert.equal(open.status, 303);
-    const cookie = String(open.headers.get("set-cookie")).split(";")[0] as string;
-    const page = await (await fetch(`${w.publicUrl}/keys`, { headers: { cookie } })).text();
+    assert.equal(open.status, 200, "no redirect: the follow-up GET would arrive without the Strict cookie");
+    const setCookie = String(open.headers.get("set-cookie"));
+    assert.match(setCookie, /HttpOnly/);
+    assert.match(setCookie, /SameSite=Strict/);
+    assert.match(setCookie, /Path=\/keys/);
+    const page = await open.text();
     const csrf = /name="csrf" value="([^"]+)"/.exec(page)?.[1] as string;
-    assert.ok(csrf);
+    assert.ok(csrf, "the key form (with CSRF token) is in the ticket POST response");
+    const cookie = setCookie.split(";")[0] as string;
+    const cookieless = await fetch(`${w.publicUrl}/keys`);
+    assert.equal(cookieless.status, 401, "a GET without the cookie (what the browser would send after a cross-site redirect) has no session");
     const set = await fetch(`${w.publicUrl}/keys`, { method: "POST", headers: { cookie, "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ csrf, name: "NOTES_API_KEY", value: "sk-test-123" }), redirect: "manual" });
     assert.equal(set.status, 303);
     const replay = await fetch(`${w.publicUrl}/keys`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ ticket }), redirect: "manual" });
@@ -265,6 +274,21 @@ describe(`deployed bridge (${real ? "real manifest crypto" : "test double"})`, (
     assert.equal(afterRevoke.status, 400, "… and revokes the whole connection");
     await waitFor(() => w.acks.some((a) => a.connectionsRevoked.some((c) => c.reason === "refresh_reuse")), 5000);
     assert.ok(w.acks.some((a) => a.connectionsCreated.length > 0), "new pairing connections are reported to Portal");
+  });
+
+  test("Portal key rotation: announced (pending) key verifies configs and grants after activation; retire drops the old key", async () => {
+    const s = await session(w);
+    await w.rotateKey("announce");
+    await w.publish();
+    await waitFor(() => (w.bridge.ctx.table?.rev ?? 0) === w.rev(), 3000);
+    await w.rotateKey("activate");
+    await w.publish();
+    await waitFor(() => (w.bridge.ctx.table?.rev ?? 0) === w.rev(), 3000);
+    assert.equal((await call(w, s, "notes__notes_list", {})).isError, undefined, "grants signed by the new key are forwarded");
+    await w.rotateKey("retire");
+    await w.publish();
+    await waitFor(() => (w.bridge.ctx.table?.rev ?? 0) === w.rev(), 3000);
+    assert.equal((await call(w, s, "notes__notes_list", {})).isError, undefined);
   });
 
   test("Portal down: calls keep working on the last good config (C9)", async () => {

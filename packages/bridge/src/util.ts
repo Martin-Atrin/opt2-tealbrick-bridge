@@ -75,7 +75,7 @@ export function jsonLogger(write: (line: string) => void = (l) => process.stderr
   const emit = (level: string, event: string, fields: Record<string, unknown> = {}) => {
     try {
       if (level !== "info") {
-        const key = `${event}|${String(fields.code ?? "")}`;
+        const key = `${event}|${String(fields.kind ?? "")}|${String(fields.code ?? "")}`;
         const last = seen.get(key) ?? 0;
         const now = Date.now();
         if (now - last < 60_000) return;

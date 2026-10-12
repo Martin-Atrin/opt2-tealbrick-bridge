@@ -13,7 +13,7 @@ import type { Rejection, Table } from "./table.ts";
 import type { Logger } from "./util.ts";
 import { nowS } from "./util.ts";
 
-export const BRIDGE_VERSION = "0.1.6";
+export const BRIDGE_VERSION = "0.1.7";
 export const SDK_MAJORS = [1];
 
 /** The SDK major this bridge is built for; `sdkMajorServed` (manifest, C44) also serves the one before. */
@@ -83,7 +83,7 @@ export class BridgeContext extends EventEmitter {
   reject(r: Rejection): void {
     const k = `${r.kind}|${r.code}`;
     this.rejected.set(k, (this.rejected.get(k) ?? 0) + 1);
-    this.log.warn("bridge.rejected", { kind: r.kind, code: r.code });
+    this.log.warn("bridge.rejected", { kind: r.kind, code: r.code, ...(r.detail ? { detail: r.detail } : {}) });
   }
 
   /** Config older than 12 h → agent and app→app calls fail closed (C9). Standalone documents are re-minted. */

@@ -36,6 +36,8 @@ export interface GrantRef {
 export interface Rejection {
   kind: "config" | "grant" | "slice" | "assertion" | "ticket" | "pairing" | "claim";
   code: string;
+  /** log only (never in the status report): e.g. the verifier's reason, never a token */
+  detail?: string;
 }
 
 export interface Table {

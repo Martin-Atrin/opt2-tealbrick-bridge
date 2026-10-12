@@ -104,7 +104,7 @@ export async function applyConfig(ctx: BridgeContext, jws: string, opts: { boot?
   const issuers = portalKeySet(ctx.api, id.portalKeys);
   const v = ctx.api.verifyConfig(jws, { now, self: ctx.bridgeRef, issuers });
   if (isRefusal(v)) {
-    if (!opts.boot) ctx.reject({ kind: "config", code: v.code });
+    if (!opts.boot) ctx.reject({ kind: "config", code: v.code, detail: `${v.reason}; rev ${peekRev(jws)}; trusted ${id.portalKeys.length}` });
     // At boot an S2 older than 12 h fails verification on time; load it anyway so person paths work (§5.4).
     if (!opts.boot) return false;
   }
@@ -147,6 +147,11 @@ export async function applyConfig(ctx: BridgeContext, jws: string, opts: { boot?
   // final Portal config with `standalone`: freeze it and become the issuer (BRIDGE §11)
   if (body.standalone) await remintStandalone(ctx);
   return true;
+}
+
+function peekRev(jws: string): number | undefined {
+  const b = peekBody(jws) as { rev?: unknown } | undefined;
+  return typeof b?.rev === "number" ? b.rev : undefined;
 }
 
 function peekBody(jws: string): unknown {

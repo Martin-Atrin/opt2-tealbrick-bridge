@@ -189,14 +189,12 @@ export class PersonSurfaces {
           return htmlPage(res, 401, "Link expired", "<p>This link has expired or was used. Open the key page again from Portal.</p>");
         }
         const id = randomBytes(32).toString("base64url");
-        this.keySessions.set(id, { csrf: randomBytes(24).toString("base64url"), exp: nowS() + LIFETIME_S.keyPageSession, req: v.claims.req ?? [] });
-        res.writeHead(303, {
-          location: "/keys",
-          "set-cookie": `${cookieName}=${id}; HttpOnly; ${secure ? "Secure; " : ""}SameSite=Strict; Path=/keys; Max-Age=${LIFETIME_S.keyPageSession}`,
-          "cache-control": "no-store",
-        });
-        res.end();
-        return;
+        const fresh: KeySession = { csrf: randomBytes(24).toString("base64url"), exp: nowS() + LIFETIME_S.keyPageSession, req: v.claims.req ?? [] };
+        this.keySessions.set(id, fresh);
+        // Render the page in THIS response (no redirect): the ticket arrives by a cross-site form POST from the
+        // Portal, and a browser does not send a SameSite=Strict cookie on the redirected GET of that navigation.
+        // The later form posts on this page are same-site, so Strict works for them.
+        return this.renderKeys(res, t, fresh, { "set-cookie": `${cookieName}=${id}; HttpOnly; ${secure ? "Secure; " : ""}SameSite=Strict; Path=/keys; Max-Age=${LIFETIME_S.keyPageSession}` });
       }
       if (!session || session.exp <= nowS()) return htmlPage(res, 401, "Session expired", "<p>Open the key page again from Portal.</p>");
       if (form.get("csrf") !== session.csrf) return htmlPage(res, 403, "Refused", "<p>The form expired. Reload the page.</p>");
@@ -216,6 +214,10 @@ export class PersonSurfaces {
       return;
     }
     if (!session || session.exp <= nowS()) return htmlPage(res, 401, "Open from Portal", "<p>Open the key page from Portal (Workspace → workspace default keys).</p>");
+    return this.renderKeys(res, t, session);
+  }
+
+  private renderKeys(res: ServerResponse, t: NonNullable<BridgeContext["table"]>, session: KeySession, headers: Record<string, string> = {}): void {
     const reqs = t.config.keyRequirements.filter((k) => k.source === "account_default");
     const byName = new Map<string, { label: string; provider?: string; products: Set<string>; required: boolean }>();
     for (const k of reqs) {
@@ -236,7 +238,7 @@ export class PersonSurfaces {
 ${set ? `<form method="post" action="/keys"><input type="hidden" name="csrf" value="${esc(session.csrf)}"><input type="hidden" name="name" value="${esc(n)}"><input type="hidden" name="action" value="delete"><button type="submit">Delete</button></form>` : ""}</section>`;
       })
       .join("");
-    htmlPage(res, 200, "Workspace default keys", `<p>Keys are stored in your workspace only. Teal Brick Portal never sees them. Values are never shown again.</p>${rows || "<p>No app needs a key.</p>"}`);
+    htmlPage(res, 200, "Workspace default keys", `<p>Keys are stored in your workspace only. Teal Brick Portal never sees them. Values are never shown again.</p>${rows || "<p>No app needs a key.</p>"}`, headers);
   }
 }
 

@@ -94,6 +94,7 @@ export interface World {
   publish(tweak?: (c: WorkspaceConfig) => void): Promise<number>;
   rev(): number;
   close(): Promise<void>;
+  rotateKey(phase: "announce" | "activate" | "retire"): Promise<void>;
   /** stop answering as Portal (simulates Portal down) */
   portalDown(): void;
   rejectedBridgeAssertions(): number;
@@ -128,7 +129,9 @@ export async function makeWorld(opts: { withHook?: boolean; real?: boolean } = {
   let bridgeJwk: Ed25519KeyPair["publicJwk"] | undefined;
   let configJws = "";
   let rev = 0;
-  const sign = (typ: string, claims: object) => api.signJws(typ as never, claims, portalKey);
+  let signingKey = portalKey;
+  let keyEntries: { key: Ed25519KeyPair; status: "pending" | "active" | "retired" }[] = [{ key: portalKey, status: "active" }];
+  const sign = (typ: string, claims: object) => api.signJws(typ as never, claims, signingKey);
 
   // ── fake app (notes) and hook app (guard) ──
   const app = await listen(async (req, res) => {
@@ -210,6 +213,8 @@ export async function makeWorld(opts: { withHook?: boolean; real?: boolean } = {
     c.exp = now() + 43200;
     c.jti = api.ulid();
     tweak?.(c);
+    c.portalKeys = keyEntries.map((k) => ({ jwk: k.key.publicJwk, status: k.status }));
+    c.grants = await Promise.all(c.grants.map(async (g) => sign("tb-grant+jwt", JSON.parse(Buffer.from(g.split(".")[1] as string, "base64url").toString("utf8")))));
     configJws = await sign("tb-config+jws", c);
     return rev;
   };
@@ -296,6 +301,17 @@ export async function makeWorld(opts: { withHook?: boolean; real?: boolean } = {
     agentToken,
     mcp,
     signPortal: sign,
+    async rotateKey(phase) {
+      if (phase === "announce") keyEntries.push({ key: await api.generateKeyPair(), status: "pending" });
+      if (phase === "activate") {
+        const next = keyEntries.find((k) => k.status === "pending");
+        if (!next) throw new Error("no pending key");
+        for (const k of keyEntries) if (k.status === "active") k.status = "retired";
+        next.status = "active";
+        signingKey = next.key;
+      }
+      if (phase === "retire") keyEntries = keyEntries.filter((k) => k.status !== "retired");
+    },
     portalDown() {
       down = true;
       portal.server.closeAllConnections();
