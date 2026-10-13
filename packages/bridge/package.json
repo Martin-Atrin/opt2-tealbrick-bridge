@@ -25,7 +25,7 @@
     "build": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
-    "@opt2-tealbrick/spec": "https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.24/opt2-tealbrick-spec-0.1.24.tgz",
-    "@opt2-tealbrick/manifest": "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.16/opt2-tealbrick-manifest-0.1.16.tgz"
+    "@opt2-tealbrick/spec": "https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.25/opt2-tealbrick-spec-0.1.25.tgz",
+    "@opt2-tealbrick/manifest": "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.17/opt2-tealbrick-manifest-0.1.17.tgz"
   }
 }
