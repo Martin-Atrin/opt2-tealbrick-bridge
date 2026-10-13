@@ -25,7 +25,7 @@ The command opens one device request. The owner approves it in Portal, where the
 
 Set `TB_CREDENTIAL_STORE=file`. Agent items are then stored in `$XDG_CONFIG_HOME/tealbrick/` (default `~/.config/tealbrick/`), with file mode 0600. The person (owner) credential always needs the OS keychain.
 
-Harnesses start the local relay with their own, filtered environment. So the CLI passes the store choice to the relay as arguments: `tealbrick bridge serve --stdio --agent <agt> --store file --config-dir <dir>`. `tealbrick connect` and `tealbrick agent serve` add these arguments for you.
+Harnesses start the local relay with their own, filtered environment. So the CLI passes the store choice to the relay as arguments: `tealbrick bridge serve --stdio --agent <agt> --store file --config-dir <dir>`. `tealbrick connect` and `tealbrick agent serve` add these arguments for you. When the bridge restarts (update, redeploy), it refuses new tool calls with `temporarily_unavailable` and Retry-After while it finishes the running ones (bridge 0.1.23 or later); the relay sends such a call again until the new bridge answers (at most 90 s), so the call runs once and the agent sees no error. A call that was cut off while running is reported as `app_unavailable` and is never sent again.
 
 ## Run an agent on its own machine: `tealbrick agent serve`
 

@@ -10,9 +10,9 @@
 export type { Kek, ManifestApi } from "./api.ts";
 export { redact } from "./calls.ts";
 export type { BridgeContext } from "./context.ts";
-export { BRIDGE_VERSION, MCP_VERSIONS, SDK_CURRENT_MAJOR, SDK_MAJORS } from "./context.ts";
+export { BRIDGE_VERSION, DRAIN_RETRY_AFTER_S, MCP_VERSIONS, SDK_CURRENT_MAJOR, SDK_MAJORS } from "./context.ts";
 export { type RelayOptions, type RelaySigner, type RelayStatus, type RunningRelay, startRelay } from "./relay.ts";
-export { type BridgeServerOptions, enrolBridge, ownInfraEnv, type RunningBridge, startBridge } from "./server.ts";
+export { type BridgeServerOptions, DRAIN_BOUND_MS, enrolBridge, onStopSignals, ownInfraEnv, type RunningBridge, startBridge } from "./server.ts";
 export { jsonLogger, type Logger, silentLogger } from "./util.ts";
 
 /** Two forms of the same package (DECISION-LOG C5). */

@@ -61,6 +61,34 @@ export interface RunningBridge {
   publicServer: Server;
   internalServer: Server;
   stop(): Promise<void>;
+  /**
+   * F57a / L21: graceful stop. New tool and companion calls get `temporarily_unavailable` + Retry-After, /readyz says
+   * draining, in-flight calls finish up to `boundMs`; calls still running then are aborted (each request id is still
+   * answered), then stop(). Resolves with what happened.
+   */
+  drain(boundMs?: number): Promise<{ waitedMs: number; aborted: number }>;
+}
+
+/** F57a: default drain bound, inside a 30 s platform drain window */
+export const DRAIN_BOUND_MS = 25_000;
+
+/**
+ * F57a / L21: the process signal wiring of every bridge entry (deployed image, test harness). SIGTERM (platform
+ * restart, update) drains: new calls are refused retryably, in-flight calls finish up to the bound, every request id
+ * is answered; SIGINT stops at once. The process exits 0 after either.
+ */
+export function onStopSignals(running: RunningBridge, logger: Logger, exit: (code: number) => void = (c) => process.exit(c)): void {
+  let stopping = false;
+  const stop = async (signal: "SIGTERM" | "SIGINT") => {
+    if (stopping) return;
+    stopping = true;
+    logger.info("bridge.stopping", { signal });
+    if (signal === "SIGTERM") await running.drain();
+    else await running.stop();
+    exit(0);
+  };
+  process.on("SIGTERM", () => void stop("SIGTERM"));
+  process.on("SIGINT", () => void stop("SIGINT"));
 }
 
 /** One request id per request; never derived from client input. */
@@ -172,7 +200,7 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
     res.on("close", release);
     try {
       if (path === "/healthz") return sendJson(res, 200, { status: "ok" });
-      if (path === "/readyz") return ctx.identity && ctx.table ? sendJson(res, 200, { status: "ready" }) : sendJson(res, 503, { status: "starting" });
+      if (path === "/readyz") return ctx.draining ? sendJson(res, 503, { status: "draining" }) : ctx.identity && ctx.table ? sendJson(res, 200, { status: "ready" }) : sendJson(res, 503, { status: "starting" });
       // C59: the key page lives ONLY on its own origin; that origin serves nothing else, and the main origin
       // (app UIs under /a/<product>/) never serves /keys.
       const host = (headerValue(req, "host") ?? "").replace(/:\d+$/, "").toLowerCase();
@@ -231,10 +259,30 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
   ]);
   logger.info("bridge.listening", { bridge: ctx.identity?.bridgeId, rev: ctx.table?.rev ?? 0 });
 
-  return {
+  const running: RunningBridge = {
     ctx,
     publicServer,
     internalServer,
+    async drain(boundMs = DRAIN_BOUND_MS) {
+      const started = Date.now();
+      ctx.draining = true;
+      ctx.log.info("bridge.draining", { inFlight: router.activeCount(), boundMs });
+      while (router.activeCount() > 0 && Date.now() - started < boundMs) await new Promise((r) => setTimeout(r, 50));
+      let aborted = 0;
+      if (router.activeCount() > 0) {
+        // the bound: cut off every forward still running; each call still answers its request id (app_unavailable)
+        aborted = router.abortAll();
+        // hooks and bridge ops are bounded at 2 s: wait for the answers to be written
+        const until = Date.now() + 3_000;
+        while (router.activeCount() > 0 && Date.now() < until) await new Promise((r) => setTimeout(r, 50));
+      }
+      // answers are written right after a call leaves the router: let the last ones flush before connections close
+      await new Promise((r) => setTimeout(r, 100));
+      const waitedMs = Date.now() - started;
+      ctx.log.info("bridge.drained", { waitedMs, aborted, left: router.activeCount() });
+      await running.stop();
+      return { waitedMs, aborted };
+    },
     async stop() {
       abort.abort();
       publicServer.closeAllConnections();
@@ -242,4 +290,5 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
       await Promise.all([new Promise((r) => publicServer.close(r)), new Promise((r) => internalServer.close(r))]);
     },
   };
+  return running;
 }

@@ -11,7 +11,7 @@ import type { AgentId, ConnectionId } from "@opt2-tealbrick/spec/credentials";
 import type { Skill } from "@opt2-tealbrick/spec/manifest";
 import type { Json } from "./api.ts";
 import type { CallRouter } from "./calls.ts";
-import { BRIDGE_VERSION, type BridgeContext, MCP_VERSIONS } from "./context.ts";
+import { BRIDGE_VERSION, type BridgeContext, DRAIN_RETRY_AFTER_S, MCP_VERSIONS } from "./context.ts";
 import { authenticateAgent } from "./identity.ts";
 import { tooDeep, validRpcId } from "./json-limits.ts";
 import type { Table } from "./table.ts";
@@ -290,6 +290,12 @@ export class McpServer {
     }
     if (isNotification) {
       res.writeHead(202).end();
+      return;
+    }
+    // F57a / L21: while draining (SIGTERM), a NEW tool call is not started: it is answered at once with the retryable
+    // code and Retry-After (nothing ran, so a retry is safe); other methods are still served
+    if (this.ctx.draining && rpc.method === "tools/call") {
+      sendJson(res, 200, { jsonrpc: "2.0", id: rpc.id, result: toolError("temporarily_unavailable", "the bridge is restarting; retry in a few seconds", requestId) }, { "retry-after": String(DRAIN_RETRY_AFTER_S) });
       return;
     }
     const controller = new AbortController();

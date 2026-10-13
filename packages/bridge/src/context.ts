@@ -13,8 +13,10 @@ import type { Rejection, Table } from "./table.ts";
 import type { Logger } from "./util.ts";
 import { nowS } from "./util.ts";
 
-export const BRIDGE_VERSION = "0.1.22";
+export const BRIDGE_VERSION = "0.1.23";
 export const SDK_MAJORS = [1];
+/** F57a / L21: Retry-After (seconds) on tool and companion calls refused while the bridge drains (nothing ran) */
+export const DRAIN_RETRY_AFTER_S = 2;
 
 /**
  * BSD-08 (CREDENTIALS §9.5): the root channel this build pins. A build constant, never env (Portal sets env at
@@ -68,6 +70,8 @@ export class BridgeContext extends EventEmitter {
   readonly keysetRequired: boolean;
   readonly fetch: typeof fetch;
   readonly boot = randomUUID();
+  /** F57a / L21: set on SIGTERM. New calls get `temporarily_unavailable` + Retry-After; in-flight calls finish. */
+  draining = false;
   /** epoch s of this process start: proofs signed before it are refused for one proof lifetime (BSD-12) */
   readonly bootS = Math.floor(Date.now() / 1000);
   identity: Identity | undefined;

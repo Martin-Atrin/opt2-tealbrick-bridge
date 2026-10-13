@@ -10,7 +10,7 @@ import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import { isRefusal, type Json, type KeySet } from "./api.ts";
 import type { CallRouter } from "./calls.ts";
 import { CALL_ID_RE } from "./calls.ts";
-import { type BridgeContext, SDK_CURRENT_MAJOR } from "./context.ts";
+import { type BridgeContext, DRAIN_RETRY_AFTER_S, SDK_CURRENT_MAJOR } from "./context.ts";
 import { type AppRuntime, internalUrlAllowed, type Table } from "./table.ts";
 import { BridgeError, envelope, headerValue, isRecord, nowS, parseJson, readBody, sendError, sendJson, statusFor, TokenBucket } from "./util.ts";
 
@@ -93,7 +93,11 @@ export class InternalApi {
       if (req.method === "POST" && url.pathname === "/tb/v1/claim") return await this.claim(req, res);
       if (req.method === "POST" && url.pathname === "/tb/v1/status") return await this.status(req, res, url);
       if (req.method === "GET" && url.pathname.startsWith("/tb/v1/keys/")) return await this.keyFetch(req, res, decodeURIComponent(url.pathname.slice(12)));
-      if (req.method === "POST" && url.pathname === "/tb/v1/call") return await this.companionCall(req, res, requestId);
+      if (req.method === "POST" && url.pathname === "/tb/v1/call") {
+        // F57a: no new companion call while draining (retryable; nothing ran)
+        if (this.ctx.draining) return sendJson(res, 503, envelope("temporarily_unavailable", "the bridge is restarting; retry in a few seconds", requestId), { "retry-after": String(DRAIN_RETRY_AFTER_S) });
+        return await this.companionCall(req, res, requestId);
+      }
       if (req.method === "GET" && url.pathname === "/metrics") return this.metrics(res);
       sendJson(res, 404, envelope("not_found", "not found", requestId));
     } catch (e) {

@@ -7,7 +7,7 @@
  * PORT (public listener), TB_INTERNAL_PORT (private listener, default 8788).
  */
 import { lchownSync } from "node:fs";
-import { dropPrivileges, jsonLogger, loadManifestApi, RUN_UID, startBridge } from "@opt2-tealbrick/bridge";
+import { dropPrivileges, jsonLogger, loadManifestApi, onStopSignals, RUN_UID, startBridge } from "@opt2-tealbrick/bridge";
 
 /** Process calls the drop needs (tests pass fakes). */
 export interface PrivilegeProcess {
@@ -37,17 +37,8 @@ export async function main(): Promise<void> {
   const logger = jsonLogger();
   if (dropRoot(process.env)) logger.info("bridge.privileges_dropped", { uid: process.getuid?.() ?? null });
   const api = await loadManifestApi();
-  const running = await startBridge({ api, logger });
-  let stopping = false;
-  const stop = async (signal: string) => {
-    if (stopping) return;
-    stopping = true;
-    logger.info("bridge.stopping", { signal });
-    await running.stop();
-    process.exit(0);
-  };
-  process.on("SIGTERM", () => void stop("SIGTERM"));
-  process.on("SIGINT", () => void stop("SIGINT"));
+  // F57a / L21: SIGTERM drains (in-flight calls finish, new ones are refused retryably), then the process exits
+  onStopSignals(await startBridge({ api, logger }), logger);
 }
 
 if (import.meta.url === `file://${process.argv[1]}` || process.argv[1]?.endsWith("/server.js")) {

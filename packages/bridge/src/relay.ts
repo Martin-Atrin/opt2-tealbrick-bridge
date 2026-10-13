@@ -93,9 +93,15 @@ export function startRelay(o: RelayOptions): RunningRelay {
         redirect: "error",
         signal: AbortSignal.timeout(20_000),
       });
-    } catch {
+    } catch (e) {
       status("offline");
-      throw new RelayError(-32002, "bridge unreachable");
+      throw new RelayError(-32002, "bridge unreachable", isPreConnect(e));
+    }
+    if (res.status >= 500) {
+      // F57a: a bridge that is starting (or a gateway in front of a restarting one) is not a revocation
+      await res.body?.cancel().catch(() => undefined);
+      status("offline");
+      throw new RelayError(-32002, "bridge unreachable", true);
     }
     const body = (await res.json().catch(() => ({}))) as { access_token?: string; expires_in?: number; error?: string; error_description?: string };
     if (!res.ok || !body.access_token) {
@@ -111,7 +117,8 @@ export function startRelay(o: RelayOptions): RunningRelay {
     return access.token;
   }
 
-  async function post(m: RpcMessage, retry = true): Promise<RpcMessage[]> {
+  /** `meta.retryAfterS` receives the answer's Retry-After (F57a). */
+  async function post(m: RpcMessage, retry = true, meta: { retryAfterS?: number } = {}): Promise<RpcMessage[]> {
     const t = await token();
     let res: Response;
     try {
@@ -127,14 +134,15 @@ export function startRelay(o: RelayOptions): RunningRelay {
         redirect: "error",
         signal: AbortSignal.any([abort.signal, AbortSignal.timeout(120_000)]),
       });
-    } catch {
+    } catch (e) {
       status("offline");
-      throw new RelayError(-32002, "bridge unreachable");
+      // refused before any byte was sent: nothing ran (F57a re-sends only such failures)
+      throw new RelayError(-32002, "bridge unreachable", isPreConnect(e));
     }
     if (res.status === 401 && retry) {
       await res.body?.cancel().catch(() => undefined);
       await token(true);
-      return post(m, false);
+      return post(m, false, meta);
     }
     if (res.status === 404 && retry && m.method !== "initialize" && initRequest) {
       // session lost at the bridge (restart): re-initialize transparently, then retry once
@@ -142,7 +150,7 @@ export function startRelay(o: RelayOptions): RunningRelay {
       session = undefined;
       await post({ ...initRequest, id: `relay-reinit-${Date.now()}` }, false);
       await post({ jsonrpc: "2.0", method: "notifications/initialized" }, false);
-      return post(m, false);
+      return post(m, false, meta);
     }
     if (m.method === "initialize") {
       const sid = res.headers.get("mcp-session-id");
@@ -161,12 +169,43 @@ export function startRelay(o: RelayOptions): RunningRelay {
       status("offline");
       throw new RelayError(-32603, "bridge connection lost");
     }
+    const ra = Number(res.headers.get("retry-after") ?? "");
+    if (Number.isFinite(ra) && ra > 0) meta.retryAfterS = ra;
     if (ct.includes("text/event-stream")) return parseSse(text);
     try {
       const v = JSON.parse(text) as RpcMessage | RpcMessage[];
       return Array.isArray(v) ? v : [v];
     } catch {
-      throw new RelayError(-32603, `bridge answered ${res.status}`);
+      // a gateway answer (502/503/504, not JSON) in front of a bridge that is down: the request never reached it
+      throw new RelayError(-32603, `bridge answered ${res.status}`, res.status >= 502 && res.status <= 504);
+    }
+  }
+
+  /**
+   * F57a / L21: a tools/call the bridge refused while draining (restart, update) did not run. Re-send it after
+   * Retry-After until the new instance answers; while the bridge is away, failures that prove nothing ran (refused
+   * connection, gateway answer, bridge starting) are retried too. Bounded by RELAY_DRAIN_WINDOW_MS from the first
+   * refusal; then the last answer goes to the client. Calls that were not refused are never re-sent.
+   */
+  async function postToolCall(m: RpcMessage): Promise<RpcMessage[]> {
+    let deadline = 0;
+    let waitS = 2;
+    for (;;) {
+      const meta: { retryAfterS?: number } = {};
+      let out: RpcMessage[];
+      try {
+        out = await post(m, true, meta);
+      } catch (e) {
+        if (!deadline || Date.now() >= deadline || !(e instanceof RelayError && e.nothingRan)) throw e;
+        await sleepS(waitS, abort.signal);
+        continue;
+      }
+      // the bridge's drain refusal = this code AND Retry-After (an app's own look-alike code carries no Retry-After)
+      if (meta.retryAfterS === undefined || !out.some((r) => r.id === m.id && drainingResult(r))) return out;
+      if (!deadline) deadline = Date.now() + RELAY_DRAIN_WINDOW_MS;
+      if (Date.now() >= deadline || abort.signal.aborted) return out;
+      waitS = Math.min(Math.max(meta.retryAfterS ?? 2, 1), 10);
+      await sleepS(waitS, abort.signal);
     }
   }
 
@@ -224,7 +263,7 @@ export function startRelay(o: RelayOptions): RunningRelay {
     }
     const p = (async () => {
       try {
-        const out = await post(m);
+        const out = m.method === "tools/call" ? await postToolCall(m) : await post(m);
         for (const r of out) {
           if (isPausedResult(r)) status("paused");
           write(r);
@@ -261,10 +300,30 @@ export function startRelay(o: RelayOptions): RunningRelay {
 
 class RelayError extends Error {
   readonly rpcCode: number;
-  constructor(code: number, message: string) {
+  /** F57a: the request provably never reached the bridge (safe to re-send) */
+  readonly nothingRan: boolean;
+  constructor(code: number, message: string, nothingRan = false) {
     super(message);
     this.rpcCode = code;
+    this.nothingRan = nothingRan;
   }
+}
+
+/** connection refused or no address: no byte reached the bridge */
+const PRE_CONNECT = new Set(["ECONNREFUSED", "ENOTFOUND", "EAI_AGAIN", "UND_ERR_CONNECT_TIMEOUT"]);
+function isPreConnect(e: unknown): boolean {
+  const code = (e as { cause?: { code?: string } })?.cause?.code;
+  return !!code && PRE_CONNECT.has(code);
+}
+
+function sleepS(s: number, signal: AbortSignal): Promise<void> {
+  return new Promise((r) => {
+    const t = setTimeout(r, s * 1000);
+    signal.addEventListener("abort", () => {
+      clearTimeout(t);
+      r();
+    }, { once: true });
+  });
 }
 
 function parseSse(text: string): RpcMessage[] {
@@ -289,3 +348,12 @@ function isPausedResult(m: RpcMessage): boolean {
   const r = m.result as { isError?: boolean; structuredContent?: { error?: { code?: string } } } | undefined;
   return !!r?.isError && r.structuredContent?.error?.code === "paused";
 }
+
+/** F57a: how long the relay keeps re-sending a tool call the bridge refused while draining (drain ≤ 25 s + restart) */
+export const RELAY_DRAIN_WINDOW_MS = 90_000;
+
+function drainingResult(r: RpcMessage): boolean {
+  const res = (r as { result?: { isError?: boolean; structuredContent?: { error?: { code?: string } } } }).result;
+  return res?.isError === true && res.structuredContent?.error?.code === "temporarily_unavailable";
+}
+

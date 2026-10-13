@@ -105,6 +105,10 @@ export interface World {
   close(): Promise<void>;
   /** stop the bridge process and start a new one on the same volume and ports */
   restart(): Promise<void>;
+  /** the bridge's listener ports (kept across restarts) */
+  ports: { public: number; internal: number };
+  /** the env the bridge runs with (F57a: c023 starts the bridge as a real process with it) */
+  bridgeEnv(): NodeJS.ProcessEnv;
   dataDir: string;
   pulls(): number;
   setAckFails(on: boolean): void;
@@ -425,8 +429,11 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
     return { status: r.status, json: text ? JSON.parse(text) : undefined, session: r.headers.get("mcp-session-id") };
   };
 
+  const ports = { public: (bridge.publicServer.address() as AddressInfo).port, internal: (bridge.internalServer.address() as AddressInfo).port };
   const world: World = {
     bridge,
+    ports,
+    bridgeEnv,
     publicUrl,
     keysUrl,
     internalUrl,
@@ -511,7 +518,7 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
       return d;
     },
     async restart() {
-      const ports = { public: (bridge.publicServer.address() as AddressInfo).port, internal: (bridge.internalServer.address() as AddressInfo).port };
+      // stop() is idempotent: the bridge may already be stopped (a drain ends with stop)
       await bridge.stop();
       bridge = await startBridge({ api, logger: opts.logger ?? silentLogger, ports, env: bridgeEnv(), ...(opts.limits ? { limits: opts.limits } : {}), ...rootOpt });
       world.bridge = bridge;

@@ -46,6 +46,8 @@ export type CallOutcome = OpResult<JsonValue>;
 
 const RESOLVE_TTL_MS = 5 * 60_000;
 const APP_TIMEOUT_MS = 30_000;
+/** F57a: message of a call cut off at the drain bound (it may have run: the caller checks before retrying) */
+const CUT_OFF = "the bridge restarted while this call ran; its outcome is unknown, check before retrying";
 const MAX_RESULT_BYTES = 4 * 1024 * 1024;
 /** hook answers and bridge-only SDK answers (catalog, resolve, mark, scope summary), BSD-05 */
 const MAX_SMALL_ANSWER_BYTES = 256 * 1024;
@@ -144,6 +146,20 @@ function hookMatches(m: { products: readonly string[]; operations?: readonly str
 export class CallRouter {
   private readonly ctx: BridgeContext;
   private readonly active = new Map<CallId, Active>();
+  /** F57a: aborted at the drain bound; every forward listens to it (hooks and bridge ops are bounded at 2 s) */
+  private readonly shutdown = new AbortController();
+  /** F57a: calls (agent and companion) still running — the drain waits for 0 */
+  activeCount(): number {
+    return this.active.size;
+  }
+  /**
+   * F57a: the drain bound is reached. Every call still forwarding is cut off and answers its caller with
+   * `app_unavailable` ("outcome unknown"): it may have run at the app, so it is never re-sent automatically.
+   */
+  abortAll(): number {
+    this.shutdown.abort();
+    return this.active.size;
+  }
   private readonly resolveCache = new Map<string, { at: number; value: DynamicResolution }>();
   private readonly catalogCache = new Map<string, { at: number; entries: DynamicCatalogEntry[] }>();
   readonly counters = new Map<string, number>();
@@ -534,12 +550,15 @@ export class CallRouter {
         headers: { "content-type": "application/json", authorization: `Bearer ${grant}`, "TB-Call": proof },
         body,
         redirect: "error",
-        signal: req.signal ? AbortSignal.any([req.signal, AbortSignal.timeout(APP_TIMEOUT_MS)]) : AbortSignal.timeout(APP_TIMEOUT_MS),
+        signal: AbortSignal.any([...(req.signal ? [req.signal] : []), this.shutdown.signal, AbortSignal.timeout(APP_TIMEOUT_MS)]),
       });
     let res: Response;
     try {
+      if (this.shutdown.signal.aborted) throw new BridgeError("app_unavailable", 503, CUT_OFF);
       res = await send();
     } catch (e) {
+      if (e instanceof BridgeError) throw e;
+      if (this.shutdown.signal.aborted) throw new BridgeError("app_unavailable", 503, CUT_OFF);
       if (isTimeout(e)) throw new BridgeError("app_timeout", 504);
       // one retry only if the connection failed before any byte was sent
       if (!isPreConnect(e)) throw new BridgeError("app_unavailable", 503);
@@ -554,6 +573,7 @@ export class CallRouter {
       text = (await readCapped(res, MAX_RESULT_BYTES)).toString("utf8");
     } catch (e) {
       if (e instanceof BridgeError) throw e;
+      if (this.shutdown.signal.aborted) throw new BridgeError("app_unavailable", 503, CUT_OFF);
       throw new BridgeError(isTimeout(e) ? "app_timeout" : "app_unavailable", isTimeout(e) ? 504 : 503);
     }
     let parsed: unknown;
