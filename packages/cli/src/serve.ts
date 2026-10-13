@@ -30,6 +30,11 @@ export interface InboxSpec {
    * a chat bot account (connect__accounts_list: as_itself on slack|teams|telegram|discord). `tool` is ignored.
    */
   auto?: "connect";
+  /**
+   * F59 (internal, set by the auto inbox): with no stored cursor yet, start at the serve start time (cursor = epoch
+   * seconds) instead of priming past existing items, so a mention posted while the inbox was not known is read.
+   */
+  startAtServe?: boolean;
   /** MCP tool name, e.g. `<product>__<op>` */
   tool: string;
   args?: Record<string, unknown>;
@@ -216,7 +221,7 @@ const MAX_AUTO_INBOXES = 8;
 
 /** F35: the concrete inboxes for an `auto: "connect"` entry (pure; the caller makes the tool calls). */
 export function autoInboxes(base: InboxSpec, channels: { id: string; type: string }[] | null, hasChatBot: boolean): { why: string; inboxes: InboxSpec[] } {
-  const buzz = (channel: string, wake: "mentions" | "all"): InboxSpec => ({ tool: "connect__buzz_read", args: { channel }, cursor: { param: "since", from: "max:createdAt" }, items: "messages", id: "id", skipIf: { fromSelf: true }, wake });
+  const buzz = (channel: string, wake: "mentions" | "all"): InboxSpec => ({ tool: "connect__buzz_read", args: { channel }, cursor: { param: "since", from: "max:createdAt" }, items: "messages", id: "id", skipIf: { fromSelf: true }, wake, startAtServe: true });
   const joined = (channels ?? []).filter((c) => c.type === "channel" || c.type === "group");
   if (joined.length) return { why: "buzz_channels", inboxes: joined.slice(0, MAX_AUTO_INBOXES).map((c) => buzz(c.id, base.wake ?? "mentions")) };
   const dms = (channels ?? []).filter((c) => c.type === "direct");
@@ -334,12 +339,25 @@ export async function serveLoop(cfg: ServeConfig, deps: ServeDeps, signal: Abort
   const warnedNoMentions = new Set<string>();
   // F35: auto inboxes, resolved at most every AUTO_RESOLVE_MS (one buzz_channels call; accounts_list only when Buzz has
   // nothing); one log line when the choice changes (L3)
-  const auto = new Map<number, { at: number; key: string; inboxes: InboxSpec[] }>();
+  const auto = new Map<number, { at: number; next: number; key: string; inboxes: InboxSpec[]; tries: number }>();
+  /** F59: serve start (epoch seconds): an auto-derived inbox without a stored cursor starts here, not "now" */
+  const serveStartS = Math.floor(deps.now() / 1000);
   const resolveAuto = async (idx: number, base: InboxSpec): Promise<InboxSpec[]> => {
     const cached = auto.get(idx);
-    if (cached && deps.now() - cached.at < AUTO_RESOLVE_MS) return cached.inboxes;
+    if (cached && deps.now() < cached.next) return cached.inboxes;
     let channels: { id: string; type: string }[] | null = null;
     const ch = await deps.mcp.callTool("connect__buzz_channels", {});
+    // F59: a transient refusal while choosing never settles the choice: keep the last good one (or none yet) and
+    // choose again soon (5 s, doubling, at most AUTO_RESOLVE_MS)
+    const transient = (r: McpToolResult) => r.isError === true && TRANSIENT_CODES.test(errCode(r));
+    const retryLater = (code: string): InboxSpec[] => {
+      const tries = (cached?.tries ?? 0) + 1;
+      const waitMs = Math.min(TRANSIENT_RETRY_MS * 2 ** (tries - 1), AUTO_RESOLVE_MS);
+      auto.set(idx, { at: cached?.at ?? 0, next: deps.now() + waitMs, key: cached?.key ?? "", inboxes: cached?.inboxes ?? [], tries });
+      deps.log("serve.inbox.auto_retry", { code, retryInMs: waitMs, kept: cached?.key ? cached.key.split("|")[0] : "none_yet" });
+      return cached?.inboxes ?? [];
+    };
+    if (transient(ch)) return retryLater(errCode(ch));
     if (!ch.isError) {
       const list = structured(ch)?.channels;
       channels = Array.isArray(list) ? list.filter((c): c is { id: string; type: string } => !!c && typeof (c as { id?: unknown }).id === "string" && typeof (c as { type?: unknown }).type === "string") : [];
@@ -347,13 +365,14 @@ export async function serveLoop(cfg: ServeConfig, deps: ServeDeps, signal: Abort
     let hasChatBot = false;
     if (!channels?.length) {
       const acc = await deps.mcp.callTool("connect__accounts_list", {});
+      if (transient(acc)) return retryLater(errCode(acc));
       const list = acc.isError ? [] : structured(acc)?.accounts;
       hasChatBot = Array.isArray(list) && list.some((a) => (a as { kind?: unknown }).kind === "as_itself" && CHAT_BOT_SERVICES.includes(String((a as { service?: unknown }).service)));
     }
     const r = autoInboxes(base, channels, hasChatBot);
     const key = `${r.why}|${r.inboxes.map(inboxKey).join(",")}`;
     if (cached?.key !== key) deps.log("serve.inbox.auto", { chosen: r.why, inboxes: r.inboxes.map((i) => (i.args?.channel as string | undefined) ?? i.tool), ...(ch.isError ? { buzzChannels: "refused" } : {}) });
-    auto.set(idx, { at: deps.now(), key, inboxes: r.inboxes });
+    auto.set(idx, { at: deps.now(), next: deps.now() + AUTO_RESOLVE_MS, key, inboxes: r.inboxes, tries: 0 });
     return r.inboxes;
   };
   const currentInboxes = async (): Promise<InboxSpec[]> => {
@@ -501,6 +520,11 @@ export async function serveLoop(cfg: ServeConfig, deps: ServeDeps, signal: Abort
         // up to 30 min, and is logged once per back-off step, not every poll
         const off = refused.get(key);
         if (off && deps.now() < off.next) continue;
+        // F59: an auto-derived inbox seen for the first time reads from the serve start (no priming past a gap)
+        if (inbox.startAtServe && inbox.cursor && state.cursors[key] === undefined && !state.primed[key]) {
+          state.cursors[key] = serveStartS;
+          state.primed[key] = true;
+        }
         const cursor = state.cursors[key];
         const args = { ...(inbox.args ?? {}), ...(inbox.cursor && cursor !== undefined ? { [inbox.cursor.param]: cursor } : {}) };
         const res = await deps.mcp.callTool(inbox.tool, args);
@@ -517,7 +541,7 @@ export async function serveLoop(cfg: ServeConfig, deps: ServeDeps, signal: Abort
           const waitMs = Math.min(pollMs * 2 ** n, INBOX_MAX_BACKOFF_MS);
           refused.set(key, { count: n, next: deps.now() + waitMs, quick: false });
           // F35: a refused derived inbox (left the channel, bot removed) → choose again on the next cycle
-          for (const [idx, a] of auto) if (a.inboxes.some((x) => inboxKey(x) === key)) auto.set(idx, { ...a, at: 0 });
+          for (const [idx, a] of auto) if (a.inboxes.some((x) => inboxKey(x) === key)) auto.set(idx, { ...a, next: 0 });
           deps.log("serve.inbox.refused", { tool: inbox.tool, code, retryInMs: waitMs });
           continue;
         }
@@ -600,8 +624,10 @@ export async function serveLoop(cfg: ServeConfig, deps: ServeDeps, signal: Abort
       continue;
     }
     // F58: wake early for a pending quick retry
-    const quickAt = Math.min(...[...refused.values()].filter((r) => r.quick).map((r) => r.next));
-    await deps.sleep(Number.isFinite(quickAt) ? Math.max(0, Math.min(pollMs, quickAt - deps.now())) : pollMs, signal);
+    // (only FUTURE wake-ups, and never less than 1 s: a stale entry must not turn the loop into a busy spin)
+    const t = deps.now();
+    const quickAt = Math.min(...[...refused.values()].filter((r) => r.quick && r.next > t).map((r) => r.next), ...[...auto.values()].filter((a) => a.tries > 0 && a.next > t).map((a) => a.next));
+    await deps.sleep(Number.isFinite(quickAt) ? Math.max(1_000, Math.min(pollMs, quickAt - t)) : pollMs, signal);
   }
 }
 
