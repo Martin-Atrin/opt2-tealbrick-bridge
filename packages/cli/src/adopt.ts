@@ -1,16 +1,16 @@
 /**
- * `tealbrick adopt` phase 1 (C96/C106, ADOPT-DESIGN §1–§3, §5–§12): onboard an agent that
- * already runs on this machine with one command and one owner approval (the existing device flow).
+ * `tealbrick adopt` (C96/C106, ADOPT-DESIGN §1–§3, §5–§12): onboard an agent that already runs on this machine
+ * (Claude Code, Claude Desktop, Codex, a command, or a Claude Agent SDK agent) with one command and one owner approval
+ * (the existing device flow). C121/C132: opt2 is version 0 — there is no v1 import path.
  *
  * detect → plan → (--dry-run stops) → approve → wire → serve config → verify → report.
- * Safety (§11): names and paths only, never a secret value (credential-like files are classified by NAME and never
- * opened); never copies v1 credentials, grants, channel bindings or sessions; never stops or signals a process it did
- * not start (L20: own pidfile only); backs up every config file before its first edit; --dry-run writes nothing.
+ * Safety (§11): names and paths only, never a secret value; never stops or signals a process it did not start
+ * (L20: own pidfile only); backs up every config file before its first edit; --dry-run writes nothing.
  */
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { chmod, copyFile, lstat, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
-import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, delimiter, dirname, join, relative, resolve } from "node:path";
 import { confirm, desktopConfigPath, mergeJsonConfig, mergeTomlConfig, planConnect, readExisting, writeAtomic } from "./connect.ts";
 import type { Ctx, Handler } from "./ctx.ts";
 import { CliError, EXIT, usageError } from "./io.ts";
@@ -22,86 +22,13 @@ import { heartbeatPath, isAlive, pidPath, readHeartbeat, readPid, stopLoop } fro
 export const ADOPT_HARNESSES = ["claude-sdk", "claude-code", "claude-desktop", "codex", "command"] as const;
 export type AdoptHarness = (typeof ADOPT_HARNESSES)[number];
 
-/**
- * credential-like by NAME (§2, F3): never opened, never copied, only listed.
- * F29 — the ONLY files adopt opens inside a v1 `.tealbrick/` folder are {@link V1_READ_ALLOWLIST}: the serve config
- * (paths and settings, no secret values) and the agent's own pid files (an integer, existence check only). Every other
- * entry of `.tealbrick/`, `traces/` and `sessions/` is listed by name and never opened.
- */
-export const V1_READ_ALLOWLIST = [".tealbrick/native-serve.json", ".tealbrick/native-serve.pid", ".tealbrick/serve.pid", ".tealbrick/agent.pid"] as const;
-const CREDENTIAL_NAME = [/\.key$/i, /credentials/i, /-url\.txt$/i, /^portal-grants\.json$/i, /\.pem$/i, /^\.env/i, /token/i, /secret/i];
-const CREDENTIAL_DIR = new Set([".tealbrick", "traces", "sessions"]);
-/** v1 built-ins that a Teal Brick agent must not get by default (shell, sub-agents) (§6, F8) */
-const DROPPED_BUILTINS = new Set(["Bash", "BashOutput", "KillShell", "KillBash", "Agent", "Task", "NotebookEdit"]);
-/**
- * §6 v1 → opt2 tool names (from a real v1 recipe + persona, onboarding lead). Applied ONLY to whole identifiers inside a
- * code span (`name`) or after `mcp__<server>__`, never inside words or prose; every rewrite is listed for review.
- */
-export const TOOL_REWRITES: Readonly<Record<string, string>> = {
-  list_collections: "knowledge__collections_list",
-  create_collection: "knowledge__collection_create",
-  create_document: "knowledge__document_create",
-  get_document: "knowledge__document_get",
-  update_document: "knowledge__document_update",
-  search: "knowledge__documents_search",
-  memory_recall: "knowledge__recall",
-  memory_native_query: "knowledge__recall",
-  buzz_send_message: "connect__buzz_post",
-  buzz_read_messages: "connect__buzz_read",
-};
-/** v1 names with no opt2 agent tool, or a different contract: listed for review, never rewritten */
-export const TOOL_REVIEW_NOTES: Readonly<Record<string, string>> = {
-  delete_document: "no opt2 agent tool",
-  buzz_list_members: "no opt2 tool (connect__buzz_channels lists channels only)",
-  memory_native_query: "rewritten to knowledge__recall; engine-native query is knowledge__gb_query",
-  buzz_send_message: "rewritten to connect__buzz_post; opt2 mentions go in the text (nostr:npub…)",
-  buzz_read_messages: "rewritten to connect__buzz_read; it needs a channel",
-};
-
-/** effects of one v1 MCP server: `tools` as an array or an object keyed by tool name; `effects` as a string or a list */
-export function serverEffects(server: unknown): string[] {
-  const out: string[] = [];
-  const add = (e: unknown) => {
-    if (typeof e === "string") out.push(e);
-    else if (Array.isArray(e)) for (const x of e) if (typeof x === "string") out.push(x);
-  };
-  if (!server || typeof server !== "object") return out;
-  const sv = server as { effects?: unknown; tools?: unknown };
-  add(sv.effects);
-  const tools = sv.tools;
-  const list = Array.isArray(tools) ? tools : tools && typeof tools === "object" ? Object.values(tools as Record<string, unknown>) : [];
-  for (const t of list) if (t && typeof t === "object") add((t as { effects?: unknown }).effects);
-  return out;
-}
-
-const escapeRe = (x: string) => x.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-
-/** One line rewritten per the rule above; returns the new line and the rewrites made. */
-export function rewriteLine(line: string): { line: string; rewrites: string[] } {
-  const rewrites: string[] = [];
-  let out = line;
-  for (const [from, to] of Object.entries(TOOL_REWRITES)) {
-    const span = new RegExp(`\`${escapeRe(from)}\``, "g");
-    const mcp = new RegExp(`\\bmcp__[A-Za-z0-9_-]+__${escapeRe(from)}\\b`, "g");
-    if (span.test(out) || mcp.test(out)) {
-      out = out.replace(new RegExp(`\`${escapeRe(from)}\``, "g"), `\`${to}\``).replace(new RegExp(`\\bmcp__[A-Za-z0-9_-]+__${escapeRe(from)}\\b`, "g"), to);
-      rewrites.push(`${from} → ${to}${TOOL_REVIEW_NOTES[from] ? ` (${TOOL_REVIEW_NOTES[from]})` : ""}`);
-    }
-  }
-  return { line: out, rewrites };
-}
+/** Persona lines the owner should read before the agent runs: tool references, outward verbs, keys */
 const REVIEW_LINE = /\bmcp__[a-z0-9_]+|\b(publish|send|post|email|tweet)\b|\bnpub1[0-9a-z]{20,}|\bsk-[A-Za-z0-9]/i;
 
 export interface Detection {
   harness: { chosen: AdoptHarness | null; candidates: AdoptHarness[]; reason: string };
   modelAuth: { anthropicKeyEnv: boolean; openaiKeyEnv: boolean; claudeCli: boolean; claudeLoginFile: boolean; codexCli: boolean; codexLoginFile: boolean };
   persona: { files: string[]; skipped: { path: string; reason: string }[] };
-  settings: { model?: string; effort?: string; maxTurns?: number; maxBudgetUsd?: number; timeoutSeconds?: number; unknown: string[] };
-  builtinTools: { proposed: string[]; dropped: string[] };
-  mcpServers: { name: string; reason: string }[];
-  notCopied: { path: string; reason: string }[];
-  memoryExport: string | null;
-  v1: { dir: string; agentName: string | null; running: boolean | null } | null;
 }
 
 const isExecutableOnPath = async (env: Record<string, string | undefined>, name: string): Promise<boolean> => {
@@ -126,37 +53,8 @@ const insideHome = async (home: string, p: string): Promise<boolean> => {
   }
 };
 
-const num = (v: unknown): number | undefined => (typeof v === "number" && Number.isFinite(v) ? v : undefined);
-const str = (v: unknown): string | undefined => (typeof v === "string" && v ? v : undefined);
-
-/** Credential-like files under `dir` by NAME (depth ≤ 4); never opened. */
-async function credentialNames(dir: string): Promise<{ path: string; reason: string }[]> {
-  const out: { path: string; reason: string }[] = [];
-  const walk = async (d: string, depth: number) => {
-    if (depth > 4 || out.length > 200) return;
-    let entries: import("node:fs").Dirent[];
-    try {
-      entries = await readdir(d, { withFileTypes: true });
-    } catch {
-      return;
-    }
-    for (const e of entries) {
-      if (e.name === "node_modules" || e.name === ".git") continue;
-      const p = join(d, e.name);
-      if (e.isDirectory()) {
-        if (CREDENTIAL_DIR.has(e.name)) out.push({ path: p, reason: e.name === ".tealbrick" ? "v1 identity/credential folder: only the serve config and pid files are read (F29)" : "credential/session folder (by name)" });
-        // F42: older v1 identity folders (.tealbrick.pre-reenroll-<date>, .tealbrick-old …) are one entry, never read
-        else if (/^\.tealbrick[.\-_]/.test(e.name)) out.push({ path: p, reason: "older v1 identity/credential folder (by name): not read" });
-        else await walk(p, depth + 1);
-      } else if (CREDENTIAL_NAME.some((r) => r.test(e.name))) out.push({ path: p, reason: "credential-like file (by name)" });
-    }
-  };
-  await walk(dir, 0);
-  return out;
-}
-
-/** §2 detect: read-only. Reads the v1 serve config and persona text; everything credential-like by NAME only. */
-export async function detect(env: Record<string, string | undefined>, cwd: string, o: { harness?: string; fromV1?: string; persona?: string; personaAppend?: boolean }): Promise<Detection> {
+/** §2 detect: read-only. The harness, the model sign-in (presence only) and the persona files. */
+export async function detect(env: Record<string, string | undefined>, cwd: string, o: { harness?: string; persona?: string; personaAppend?: boolean }): Promise<Detection> {
   const home = env.HOME ?? "";
   const modelAuth = {
     anthropicKeyEnv: !!env.ANTHROPIC_API_KEY,
@@ -166,99 +64,8 @@ export async function detect(env: Record<string, string | undefined>, cwd: strin
     codexCli: await isExecutableOnPath(env, "codex"),
     codexLoginFile: existsSync(join(home, ".codex", "auth.json")),
   };
-  const d: Detection = {
-    harness: { chosen: null, candidates: [], reason: "" },
-    modelAuth,
-    persona: { files: [], skipped: [] },
-    settings: { unknown: [] },
-    builtinTools: { proposed: [], dropped: [] },
-    mcpServers: [],
-    notCopied: [],
-    memoryExport: null,
-    v1: null,
-  };
-  if (o.fromV1) {
-    const base = basename(o.fromV1) === ".tealbrick" ? dirname(o.fromV1) : o.fromV1;
-    const servePath = join(base, ".tealbrick", "native-serve.json");
-    if (!existsSync(servePath)) throw usageError(`--from-v1: no .tealbrick/native-serve.json under ${base}`);
-    const cfg = JSON.parse(await readFile(servePath, "utf8")) as { agent?: { name?: unknown }; claude?: Record<string, unknown> };
-    const c = cfg.claude ?? {};
-    d.v1 = { dir: base, agentName: str(cfg.agent?.name) ?? null, running: null };
-    // settings: inline (claude.*) or from the recipe (claude.recipe {path, agent})
-    let s: Record<string, unknown> = c;
-    const recipe = c.recipe as { path?: unknown; agent?: unknown } | undefined;
-    if (recipe && typeof recipe.path === "string") {
-      const rp = isAbsolute(recipe.path) ? recipe.path : resolve(dirname(servePath), recipe.path);
-      if (existsSync(rp) && (await insideHome(home, rp))) {
-        try {
-          const r = JSON.parse(await readFile(rp, "utf8")) as Record<string, unknown>;
-          const agents = (r.agents ?? r) as Record<string, unknown>;
-          // F41: the top level holds the defaults (model/effort/maxTurns/maxBudgetUsd/timeoutSeconds…); the agent
-          // block under agents.<name> overrides them; inline claude.* overrides both
-          const { agents: _blocks, ...top } = r;
-          const block = typeof recipe.agent === "string" && agents[recipe.agent] && typeof agents[recipe.agent] === "object" ? (agents[recipe.agent] as Record<string, unknown>) : {};
-          s = { ...top, ...block, ...c };
-        } catch {
-          d.settings.unknown.push("recipe (not readable JSON)");
-        }
-      } else d.settings.unknown.push("recipe (missing or outside $HOME)");
-    }
-    // never crash on an unknown recipe shape (F28): each field is read on its own; a field that cannot be read is
-    // reported ("could not read recipe: <field>") and adopt continues
-    const field = (name: string, read: () => void) => {
-      try {
-        read();
-      } catch {
-        d.settings.unknown.push(`could not read recipe: ${name}`);
-      }
-    };
-    d.settings.model = str(s.model);
-    d.settings.effort = str(s.effort);
-    d.settings.maxTurns = num(s.maxTurns);
-    d.settings.maxBudgetUsd = num(s.maxBudgetUsd);
-    d.settings.timeoutSeconds = num(s.timeoutSeconds);
-    for (const k of Object.keys(s)) if (["tealbrickSdkConfig", "tealbrickCalls", "standingGrants", "contracts", "requireSubscription", "workspace"].includes(k)) d.settings.unknown.push(`${k} (v1-only; not carried over)`);
-    field("defaultTools", () => {
-      const tools = Array.isArray(s.defaultTools) ? s.defaultTools.filter((t): t is string => typeof t === "string") : [];
-      d.builtinTools.proposed = tools.filter((t) => !DROPPED_BUILTINS.has(t));
-      d.builtinTools.dropped = tools.filter((t) => DROPPED_BUILTINS.has(t));
-    });
-    const servers = s.mcpServers && typeof s.mcpServers === "object" && !Array.isArray(s.mcpServers) ? (s.mcpServers as Record<string, unknown>) : {};
-    if (s.mcpServers !== undefined && servers !== s.mcpServers) d.settings.unknown.push("could not read recipe: mcpServers");
-    for (const name of Object.keys(servers)) {
-      let effects: string[] = [];
-      field(`mcpServers.${name}`, () => {
-        effects = serverEffects(servers[name]);
-      });
-      const outward = effects.some((e) => e === "outward" || e === "money");
-      const writes = effects.some((e) => e === "write" || e === "writes");
-      d.mcpServers.push({ name, reason: outward ? "has outward/money tools: use Teal Brick apps (grants, holds, Rules) instead" : `not carried over (${writes ? "writes" : "read-only"}): agent serve wires only Teal Brick` });
-    }
-    const instr = str(c.instructionsFile);
-    if (instr) {
-      const p = isAbsolute(instr) ? instr : resolve(base, instr);
-      if (!existsSync(p)) d.persona.skipped.push({ path: p, reason: "instructions file missing" });
-      else if (!(await insideHome(home, p))) d.persona.skipped.push({ path: p, reason: "outside $HOME (links are not followed)" });
-      else d.persona.files.push(p);
-    }
-    d.notCopied.push(...(await credentialNames(base)));
-    const exp = join(base, "work", "knowledge-export");
-    if (existsSync(exp)) d.memoryExport = exp;
-    // is the v1 agent running? only its own pid files, existence check only (never a signal)
-    for (const n of ["native-serve.pid", "serve.pid", "agent.pid"]) {
-      const pf = join(base, ".tealbrick", n);
-      if (!existsSync(pf)) continue;
-      const pid = Number((await readFile(pf, "utf8")).trim());
-      if (Number.isInteger(pid) && pid > 0) {
-        try {
-          process.kill(pid, 0);
-          d.v1.running = true;
-        } catch (e) {
-          d.v1.running = (e as NodeJS.ErrnoException).code === "EPERM";
-        }
-      }
-    }
-  }
+  const d: Detection = { harness: { chosen: null, candidates: [], reason: "" }, modelAuth, persona: { files: [], skipped: [] } };
+  for (const n of ["CLAUDE.md", "AGENTS.md"]) if (existsSync(join(cwd, n))) d.persona.files.push(join(cwd, n));
   if (o.persona) {
     const p = resolve(cwd, o.persona);
     if (!existsSync(p)) throw usageError(`--persona: ${p} does not exist`);
@@ -271,15 +78,12 @@ export async function detect(env: Record<string, string | undefined>, cwd: strin
     d.persona.files.push(p);
   } else if (o.personaAppend) {
     throw usageError("--persona-append needs --persona <file>");
-  } else if (!o.fromV1) {
-    for (const n of ["CLAUDE.md", "AGENTS.md"]) if (existsSync(join(cwd, n))) d.persona.files.push(join(cwd, n));
   }
   // harness
   if (o.harness && o.harness !== "auto") {
     if (!(ADOPT_HARNESSES as readonly string[]).includes(o.harness)) throw usageError(`--harness must be auto or one of ${ADOPT_HARNESSES.join(", ")}`);
     d.harness = { chosen: o.harness as AdoptHarness, candidates: [o.harness as AdoptHarness], reason: "--harness" };
-  } else if (o.fromV1) d.harness = { chosen: "claude-sdk", candidates: ["claude-sdk"], reason: "v1 agent (Claude Agent SDK)" };
-  else {
+  } else {
     const c: AdoptHarness[] = [];
     if (existsSync(join(home, ".codex", "config.toml"))) c.push("codex");
     if (existsSync(join(home, "Library", "Application Support", "Claude", "claude_desktop_config.json")) || existsSync(join(env.XDG_CONFIG_HOME ?? join(home, ".config"), "Claude", "claude_desktop_config.json"))) c.push("claude-desktop");
@@ -313,17 +117,9 @@ export function planText(p: AdoptPlan, files: string[]): string {
     `  model auth     ${auth || "NONE FOUND — set ANTHROPIC_API_KEY or sign in to the harness first"}`,
     `  persona        ${d.persona.files.length ? d.persona.files.join(", ") : "none"}`,
     ...d.persona.skipped.map((x) => `  persona skip   ${x.path} (${x.reason})`),
-    ...(d.settings.model || d.settings.maxTurns ? [`  settings       ${[d.settings.model && `model ${d.settings.model}`, d.settings.effort && `effort ${d.settings.effort}`, d.settings.maxTurns && `maxTurns ${d.settings.maxTurns}`, d.settings.maxBudgetUsd && `budget $${d.settings.maxBudgetUsd}`, d.settings.timeoutSeconds && `timeout ${d.settings.timeoutSeconds}s`].filter(Boolean).join(", ")}`] : []),
-    ...(d.builtinTools.proposed.length || d.builtinTools.dropped.length ? [`  built-in tools ${d.builtinTools.proposed.join(", ") || "none"}${d.builtinTools.dropped.length ? ` (dropped: ${d.builtinTools.dropped.join(", ")})` : ""}`] : []),
-    ...d.mcpServers.map((m) => `  MCP not wired  ${m.name}: ${m.reason}`),
     `  connection     one owner approval in Portal (device flow); card "${p.name}"`,
     `  inbox          ${p.serve ? `${p.buzzChannels.length ? `Buzz ${p.buzzChannels.join(", ")}` : "auto: the Buzz channel you choose at approval, else Buzz DMs, else the chat-bot inbox (or --inbox buzz:<channel>)"}, wake: ${p.wake}` : "none (this harness runs itself)"}`,
     `  files to write ${files.join(", ") || "none"} (each existing file is backed up first)`,
-    ...d.notCopied.slice(0, 20).map((x) => `  not copied     ${x.path} (${x.reason})`),
-    ...(d.notCopied.length > 20 ? [`  not copied     … ${d.notCopied.length - 20} more`] : []),
-    ...d.settings.unknown.map((u) => `  not carried    ${u}`),
-    ...(d.memoryExport ? [`  memory export  ${d.memoryExport} found: NOT imported (owner decision, later)`] : []),
-    ...(d.v1?.running ? ["  v1 agent       still running: adopt does not stop it (stop it yourself when the new agent works)"] : []),
   ];
   return lines.join("\n");
 }
@@ -369,23 +165,16 @@ async function writePrivate(path: string, text: string): Promise<void> {
   await chmod(path, 0o600);
 }
 
-/** §6 persona: one file under the adopt dir, with a header and the v1 → opt2 rewrites; risky lines listed for review. */
+/** §6 persona: one file under the adopt dir, with a header; lines with tool references or outward verbs listed for review. */
 export async function buildPersona(files: string[], plan: Pick<AdoptPlan, "name" | "wake">): Promise<{ text: string; review: string[] }> {
   const parts: string[] = [];
   const review: string[] = [];
-  const reviewOnly = Object.keys(TOOL_REVIEW_NOTES).filter((k) => !(k in TOOL_REWRITES));
   for (const f of files) {
     const lines = (await readFile(f, "utf8")).split("\n");
-    const outLines = lines.map((line, i) => {
-      const r = rewriteLine(line);
-      const where = `${basename(f)}:${i + 1}`;
-      for (const w of r.rewrites) review.push(`${where}: rewrote ${w}`);
-      const missing = reviewOnly.filter((k) => new RegExp(`\\b${k}\\b`).test(r.line));
-      if (missing.length) review.push(`${where}: ${missing.map((k) => `${k} (${TOOL_REVIEW_NOTES[k]})`).join("; ")}: ${r.line.trim().slice(0, 120)}`);
-      else if (!r.rewrites.length && REVIEW_LINE.test(r.line)) review.push(`${where}: ${r.line.trim().slice(0, 160)}`);
-      return r.line;
+    lines.forEach((line, i) => {
+      if (REVIEW_LINE.test(line)) review.push(`${basename(f)}:${i + 1}: ${line.trim().slice(0, 160)}`);
     });
-    parts.push(outLines.join("\n").trim());
+    parts.push(lines.join("\n").trim());
   }
   const header = [
     `<!-- adopted by tealbrick adopt for "${plan.name}" -->`,
@@ -457,18 +246,17 @@ const PRODUCT_IDS = ["connect", "evolution", "fleet", "inbox", "kanban", "knowle
 const PRODUCT_NAMES: Readonly<Record<string, string>> = { Knowledge: "knowledge", Kanban: "kanban", Connect: "connect", Buzz: "connect", Evolution: "evolution" };
 
 /**
- * F46: the Teal Brick products the persona refers to, in any form: `<product>__<op>` (after the rewrites),
- * `mcp__<product>__…` or `mcp__tealbrick__<product>__…` (v1 names), or the product's name in prose ("Kanban").
- * Unknown v1 servers (`mcp__mail__send`) never become a product.
+ * F46: the Teal Brick products the persona refers to, in any form: `<product>__<op>`, a harness tool name
+ * `mcp__<product>__…` or `mcp__<server>__<product>__…` (e.g. the "tealbrick" MCP entry), or the product's name in
+ * prose ("Kanban"). Other MCP servers (`mcp__mail__send`) never become a product.
  */
 export async function referencedProducts(files: string[]): Promise<string[]> {
   const out = new Set<string>();
   for (const f of files) {
-    for (const raw of (await readFile(f, "utf8")).split("\n")) {
-      const line = rewriteLine(raw).line;
+    for (const line of (await readFile(f, "utf8")).split("\n")) {
       for (const m of line.matchAll(/\bmcp__([A-Za-z0-9_-]+)/g)) {
         const parts = (m[1] as string).split("__");
-        const product = parts[0] === "tealbrick" ? parts[1] : parts[0];
+        const product = PRODUCT_IDS.includes(parts[0] as string) ? parts[0] : parts[1];
         if (product && PRODUCT_IDS.includes(product)) out.add(product);
       }
       const plain = line.replace(/\bmcp__[A-Za-z0-9_-]+/g, " ");
@@ -509,7 +297,7 @@ export const adopt: Handler = async (ctx) => {
   if (ctx.v.undo === true) return adoptUndo(ctx);
   const home = ctx.io.env.HOME ?? "";
   if (!home) throw usageError("HOME is not set");
-  const d = await detect(ctx.io.env, ctx.cwd(), { ...(ctx.v.harness ? { harness: String(ctx.v.harness) } : {}), ...(ctx.v["from-v1"] ? { fromV1: resolve(ctx.cwd(), String(ctx.v["from-v1"])) } : {}), ...(ctx.v.persona ? { persona: String(ctx.v.persona) } : {}), ...(ctx.v["persona-append"] === true ? { personaAppend: true } : {}) });
+  const d = await detect(ctx.io.env, ctx.cwd(), { ...(ctx.v.harness ? { harness: String(ctx.v.harness) } : {}), ...(ctx.v.persona ? { persona: String(ctx.v.persona) } : {}), ...(ctx.v["persona-append"] === true ? { personaAppend: true } : {}) });
   if (!d.harness.chosen) {
     const why: Record<string, string> = { codex: "~/.codex/config.toml found", "claude-desktop": "Claude Desktop config found", "claude-code": "`claude` on PATH" };
     const choices: AdoptHarness[] = [...d.harness.candidates, ...(d.harness.candidates.includes("claude-sdk") ? [] : (["claude-sdk"] as AdoptHarness[]))];
@@ -524,8 +312,8 @@ export const adopt: Handler = async (ctx) => {
   }
   if (!d.harness.chosen) throw usageError("no harness chosen");
   const harness = d.harness.chosen;
-  const name = String(ctx.v.name ?? d.v1?.agentName ?? "").trim();
-  if (!name) throw usageError("pass --name <card name> (no v1 agent name found)");
+  const name = String(ctx.v.name ?? "").trim();
+  if (!name) throw usageError("pass --name <card name>");
   const wake = ctx.v.wake === "all" ? "all" : "mentions";
   if (ctx.v.wake !== undefined && ctx.v.wake !== "all" && ctx.v.wake !== "mentions") throw usageError("--wake must be mentions or all");
   const serveDefault = harness === "claude-sdk";
@@ -629,7 +417,7 @@ export const adopt: Handler = async (ctx) => {
     }
   }
 
-  // §8 serve config (claude-sdk): persona by file, v1 settings mapped, wake
+  // §8 serve config (claude-sdk): persona by file, wake
   if (serve) {
     const harnessCfg: Record<string, unknown> = {
       kind: "claude",
@@ -639,12 +427,6 @@ export const adopt: Handler = async (ctx) => {
       transcripts: "transcripts",
       modelKeyEnv: "ANTHROPIC_API_KEY",
       ...(state.persona ? { appendSystemPromptFile: relative(adir, state.persona.path) } : {}),
-      ...(d.settings.model ? { model: d.settings.model } : {}),
-      ...(d.settings.effort && ["low", "medium", "high", "xhigh", "max"].includes(d.settings.effort) ? { effort: d.settings.effort } : {}),
-      ...(d.settings.maxTurns ? { maxTurns: d.settings.maxTurns } : {}),
-      ...(d.settings.maxBudgetUsd ? { maxBudgetUsd: d.settings.maxBudgetUsd } : {}),
-      ...(d.settings.timeoutSeconds && d.settings.timeoutSeconds >= 10 ? { turnTimeoutSeconds: Math.min(d.settings.timeoutSeconds, 86_400) } : {}),
-      ...(d.builtinTools.proposed.length ? { builtinTools: d.builtinTools.proposed } : {}),
     };
     // F35: with --inbox buzz:<ch> the agent listens there; otherwise the serve-time auto inbox (joined Buzz channel →
     // Buzz DMs → the bot channel inbox only when a chat bot exists), re-resolved while serve runs
@@ -701,7 +483,6 @@ export const adopt: Handler = async (ctx) => {
     serve: serveCmd,
     started,
     running,
-    notCopied: d.notCopied.map((x) => x.path),
   };
   ctx.emit(
     report,

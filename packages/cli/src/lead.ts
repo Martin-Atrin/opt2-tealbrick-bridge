@@ -116,7 +116,7 @@ export interface AdoptSuggestion {
 export async function agentLogin(ctx: Ctx, extra: { adopt?: AdoptSuggestion } = {}): Promise<void> {
   if (ctx.v.code !== undefined) throw usageError("agent login takes no code (the owner approves in the browser)");
   const origin = ctx.portalOrigin();
-  // C96: Core 3230e69 lists the CLI harness option as `tealbrick-cli` (old spellings stay accepted as aliases)
+  // C96/C133: the canonical harness option id (Core accepts canonical ids only, no aliases of earlier dev spellings)
   const harness = ctx.v.harness ?? "tealbrick-cli";
   const label = (ctx.v.label ?? ctx.io.hostname ?? osHostname()).slice(0, 64) || "machine";
   // Every slot names an existing card (`id`) or asks for a new one (`create: true`): an approval must never

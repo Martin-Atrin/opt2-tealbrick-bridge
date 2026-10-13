@@ -1,10 +1,10 @@
 /**
- * `tealbrick adopt` phase 1 (C96/C106): dry-run on a fake v1 dir (nothing written, no network, no secret value in any
- * output), a real run + idempotent re-run (no second device flow, nothing rewritten), and harness wiring + --undo
- * (backups restored byte for byte, local key deleted). Fake Portal (device flow) + fake bridge (token, MCP).
+ * `tealbrick adopt` (C96/C106): dry-run of a Claude Agent SDK agent with a persona (nothing written, no network, no
+ * secret value in any output), a real run + idempotent re-run (no second device flow, nothing rewritten), and harness
+ * wiring + --undo (backups restored byte for byte, local key deleted). C132: there is no v1 import path any more. Fake Portal (device flow) + fake bridge (token, MCP).
  */
 import assert from "node:assert/strict";
-import { existsSync, readdirSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { mkdir, readFile, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:http";
 import type { AddressInfo } from "node:net";
@@ -18,7 +18,6 @@ const BRG = "brg_01HZZZZZZZZZZZZZZZZZZZZZZZ";
 const WS = "ws_01HZZZZZZZZZZZZZZZZZZZZZZZ";
 const AGT = "agt_01HADQPTADQPTADQPTADQPTADQ";
 const CON = "con_01HADQPTADQPTADQPTADQPTADQ";
-const SECRET_FILE_VALUE = "plantedsecretfilevalue0123456789";
 const SECRET_ENV_VALUE = "sk-ant-plantedsecretenvvalue0123456789";
 
 describe("tealbrick adopt (C96 phase 1)", () => {
@@ -60,33 +59,9 @@ describe("tealbrick adopt (C96 phase 1)", () => {
     // no harness binaries on PATH: detection must come from files only
     h.env.PATH = join(h.dir, "empty-bin");
     h.env.ANTHROPIC_API_KEY = SECRET_ENV_VALUE;
-    // a v1 agent dir: serve config, persona elsewhere, a credential file and a grants file
-    const v1 = join(h.home, "v1agent");
-    await mkdir(join(v1, ".tealbrick"), { recursive: true });
+    // a persona file under $HOME (tool references and an outward verb, listed for review)
     await mkdir(join(h.home, "personas"), { recursive: true });
-    await writeFile(join(h.home, "personas", "persona.md"), "# Research agent\nYou read papers.\nUse mcp__mail__send to send summaries.\nStore notes with `create_document`; search the web normally.\nNever call `delete_document`.\n");
-    await writeFile(join(v1, ".tealbrick", "agent.key"), SECRET_FILE_VALUE);
-    await writeFile(join(v1, "portal-grants.json"), JSON.stringify({ token: SECRET_FILE_VALUE }));
-    await writeFile(
-      join(v1, ".tealbrick", "native-serve.json"),
-      JSON.stringify({
-        version: 1,
-        agent: { id: "v1-agent", name: "Research agent", ownerId: "owner" },
-        claude: {
-          cwd: v1,
-          instructionsFile: join(h.home, "personas", "persona.md"),
-          model: "claude-opus-4-1",
-          effort: "high",
-          maxTurns: 30,
-          maxBudgetUsd: 5,
-          timeoutSeconds: 900,
-          defaultTools: ["WebSearch", "Bash", "Read"],
-          // the REAL v1 recipe shape (F28): tools keyed by name, effects a string
-          mcpServers: { mail: { command: "mail-mcp", tools: { mail_send: { effects: "outward" }, mail_read: { effects: "read-only" } } }, craft: { command: "craft-mcp", tools: { doc_write: { effects: "writes" } } }, notes: { command: "notes-mcp" } },
-          requireSubscription: true,
-        },
-      }),
-    );
+    await writeFile(join(h.home, "personas", "persona.md"), "# Research agent\nYou read papers.\nUse mcp__mail__send to send summaries.\nStore notes with `knowledge__document_create`; search the web normally.\n");
   });
   after(async () => {
     bridge.closeAllConnections();
@@ -95,34 +70,34 @@ describe("tealbrick adopt (C96 phase 1)", () => {
   });
 
   const adoptDir = () => join(h.home, ".config", "tealbrick", "adopt");
-  const v1 = () => join(h.home, "v1agent");
+  const persona = () => join(h.home, "personas", "persona.md");
+  const sdk = () => ["adopt", "--harness", "claude-sdk", "--name", "Research agent", "--persona", persona()];
 
-  test("--dry-run on a v1 dir: plan only — nothing written, no network, no secret value anywhere", async () => {
+  test("--dry-run: plan only — nothing written, no network, no secret value anywhere", async () => {
     const before = h.portal.requests.length;
-    const r = await h.run(["adopt", "--from-v1", v1(), "--dry-run", "--json"]);
+    const r = await h.run([...sdk(), "--dry-run", "--json"]);
     assert.equal(r.code, 0, r.err);
     const p = r.json.plan;
     assert.equal(p.harness, "claude-sdk");
     assert.equal(p.name, "Research agent");
     assert.equal(p.detection.modelAuth.anthropicKeyEnv, true, "presence only");
-    assert.deepEqual(p.detection.builtinTools, { proposed: ["WebSearch", "Read"], dropped: ["Bash"] });
-    assert.ok(p.detection.mcpServers.some((m: { name: string; reason: string }) => m.name === "mail" && /outward/.test(m.reason)), "F28: tools object + effects string");
-    assert.ok(p.detection.mcpServers.some((m: { name: string; reason: string }) => m.name === "craft" && /writes/.test(m.reason)));
-    assert.ok(p.detection.notCopied.some((x: { path: string }) => x.path.endsWith("agent.key") || x.path.endsWith(".tealbrick")));
-    assert.ok(p.detection.notCopied.some((x: { path: string }) => x.path.endsWith("portal-grants.json")));
+    assert.deepEqual(p.detection.persona.files, [persona()]);
+    assert.ok(r.json.personaReview.some((l: string) => /mcp__mail__send/.test(l)), "tool references listed for review");
     const all = r.out + r.err;
-    assert.ok(!all.includes(SECRET_FILE_VALUE) && !all.includes(SECRET_ENV_VALUE), "no secret value in any output");
+    assert.ok(!all.includes(SECRET_ENV_VALUE), "no secret value in any output");
     assert.equal(h.portal.requests.length, before, "no network call");
     assert.equal(existsSync(adoptDir()), false, "nothing written");
-    // F43: the persona is built in memory — rewrites and review lines show in the dry-run
-    assert.ok(r.json.personaReview.some((l: string) => /rewrote create_document → knowledge__document_create/.test(l)));
-    assert.ok(r.json.personaReview.some((l: string) => /mcp__mail__send/.test(l)));
-    // F46: no phantom product "mcp" from the v1 mcp__mail__send name
+    // F46: no phantom product "mcp" from mcp__mail__send
     assert.ok(!r.json.suggestion.grants.some((g: { product: string }) => g.product === "mcp"));
   });
 
+  test("C132: the v1 import flag is gone (opt2 is version 0)", async () => {
+    const r = await h.run(["adopt", ["--from", "v1"].join("-"), h.home, "--dry-run", "--json"]);
+    assert.equal(r.code, 2, "unknown option");
+  });
+
   test("real run, then a re-run: one device flow, persona + serve config written once, the re-run changes nothing", async () => {
-    const r = await h.run(["adopt", "--from-v1", v1(), "--yes", "--json"]);
+    const r = await h.run([...sdk(), "--yes", "--json"]);
     assert.equal(r.code, 0, r.err);
     assert.equal(r.json.agent, AGT);
     assert.equal(r.json.reused, false);
@@ -140,10 +115,7 @@ describe("tealbrick adopt (C96 phase 1)", () => {
     const dir = join(adoptDir(), AGT);
     const serve = JSON.parse(await readFile(join(dir, "serve.json"), "utf8"));
     assert.equal(serve.harness.appendSystemPromptFile, "persona/persona.md");
-    assert.deepEqual(serve.harness.builtinTools, ["WebSearch", "Read"]);
-    assert.equal(serve.harness.effort, "high");
-    assert.equal(serve.harness.maxBudgetUsd, 5);
-    assert.equal(serve.harness.turnTimeoutSeconds, 900);
+    assert.equal(serve.harness.builtinTools, undefined, "no built-in tools unless the owner adds them");
     assert.equal(serve.inboxes[0].wake, "mentions");
     assert.equal(serve.inboxes[0].auto, "connect", "F35: the default inbox is chosen at serve time");
     // F45: the harness works in <adopt dir>/work (0700), not in the shell's cwd
@@ -153,11 +125,7 @@ describe("tealbrick adopt (C96 phase 1)", () => {
     const persona = await readFile(join(dir, "persona", "persona.md"), "utf8");
     assert.match(persona, /adopted by tealbrick adopt/);
     assert.match(persona, /You read papers/);
-    assert.match(persona, /`knowledge__document_create`/, "code-span rewrite");
-    assert.match(persona, /search the web normally/, "prose is never rewritten");
-    assert.ok(r.json.personaReview.some((l: string) => /rewrote create_document → knowledge__document_create/.test(l)), "every rewrite is listed");
-    assert.ok(r.json.personaReview.some((l: string) => /delete_document \(no opt2 agent tool\)/.test(l)), "review-only names listed");
-    assert.ok(!readdirSync(dir, { recursive: true }).some((f) => String(f).includes("agent.key")), "credentials are never copied");
+    assert.match(persona, /`knowledge__document_create`; search the web normally/, "the persona text is kept as written");
     assert.ok(!(r.out + r.err).includes(SECRET_ENV_VALUE));
     const starts = deviceStarts;
     const { statSync } = await import("node:fs");
@@ -165,7 +133,7 @@ describe("tealbrick adopt (C96 phase 1)", () => {
     const stateBefore = await readFile(statePath, "utf8");
     const mtimeBefore = statSync(statePath).mtimeMs;
     h.clock += 60_000;
-    const again = await h.run(["adopt", "--from-v1", v1(), "--yes", "--json"]);
+    const again = await h.run([...sdk(), "--yes", "--json"]);
     assert.equal(again.code, 0, again.err);
     assert.equal(again.json.reused, true);
     assert.deepEqual(again.json.changed, [], "idempotent: nothing rewritten");
@@ -212,7 +180,7 @@ describe("tealbrick adopt (C96 phase 1)", () => {
   });
 
   test("F30: --inbox buzz:<channel> adds a Buzz inbox to the serve config; a bad value is refused", async () => {
-    const r = await h.run(["adopt", "--from-v1", v1(), "--inbox", "buzz:ch_research,buzz:ch_team", "--yes", "--json"]);
+    const r = await h.run([...sdk(), "--inbox", "buzz:ch_research,buzz:ch_team", "--yes", "--json"]);
     assert.equal(r.code, 0, r.err);
     const serve = JSON.parse(await readFile(join(adoptDir(), AGT, "serve.json"), "utf8"));
     const buzz = serve.inboxes.filter((i: { tool: string }) => i.tool === "connect__buzz_read");
@@ -222,39 +190,8 @@ describe("tealbrick adopt (C96 phase 1)", () => {
     );
     // F35: with Buzz channels the agent listens there only (no bot channel inbox under a read-only grant)
     assert.ok(!serve.inboxes.some((i: { tool: string }) => i.tool === "connect__channel_inbox"));
-    const bad = await h.run(["adopt", "--from-v1", v1(), "--inbox", "slack:x", "--dry-run", "--json"]);
+    const bad = await h.run([...sdk(), "--inbox", "slack:x", "--dry-run", "--json"]);
     assert.equal(bad.code, 2);
-  });
-
-  test("F28: an unknown recipe shape never crashes; the field is reported and adopt continues", async () => {
-    const odd = join(h.home, "v1odd");
-    await mkdir(join(odd, ".tealbrick"), { recursive: true });
-    await writeFile(join(odd, ".tealbrick", "native-serve.json"), JSON.stringify({ agent: { name: "Odd agent" }, claude: { model: 7, defaultTools: "WebSearch", mcpServers: [1, 2], maxTurns: "lots" } }));
-    const r = await h.run(["adopt", "--from-v1", odd, "--dry-run", "--json"]);
-    assert.equal(r.code, 0, r.err);
-    assert.ok(r.json.plan.detection.settings.unknown.includes("could not read recipe: mcpServers"));
-    assert.equal(r.json.plan.detection.settings.model, undefined);
-    assert.equal(r.json.plan.detection.settings.maxTurns, undefined);
-  });
-
-  test("F41/F42: top-level recipe defaults under the agent block; older .tealbrick* folders are one unread entry", async () => {
-    const base = join(h.home, "v1recipe");
-    await mkdir(join(base, ".tealbrick"), { recursive: true });
-    await mkdir(join(base, ".tealbrick.pre-reenroll-2026-09-01", "sessions"), { recursive: true });
-    await writeFile(join(base, ".tealbrick.pre-reenroll-2026-09-01", "kit.credentials.json"), "{}");
-    await writeFile(join(base, "recipe.json"), JSON.stringify({ model: "claude-opus-4-1", effort: "high", maxTurns: 40, maxBudgetUsd: 3, timeoutSeconds: 600, agents: { scout: { maxTurns: 12 } } }));
-    await writeFile(join(base, ".tealbrick", "native-serve.json"), JSON.stringify({ agent: { name: "Scout" }, claude: { recipe: { path: "../recipe.json", agent: "scout" } } }));
-    const r = await h.run(["adopt", "--from-v1", base, "--dry-run", "--json"]);
-    assert.equal(r.code, 0, r.err);
-    const st = r.json.plan.detection.settings;
-    assert.equal(st.model, "claude-opus-4-1", "top-level default kept");
-    assert.equal(st.effort, "high");
-    assert.equal(st.maxTurns, 12, "the agent block overrides the top level");
-    assert.equal(st.maxBudgetUsd, 3);
-    assert.equal(st.timeoutSeconds, 600);
-    const nc = r.json.plan.detection.notCopied.map((x: { path: string }) => x.path);
-    assert.ok(nc.includes(join(base, ".tealbrick.pre-reenroll-2026-09-01")), "the old identity folder is one entry");
-    assert.ok(!nc.some((x: string) => x.includes("kit.credentials.json")), "its files are not listed piecemeal");
   });
 
   test("F46: products from any identifier form or the product name in prose; no owner session; never a phantom", async () => {
@@ -272,16 +209,22 @@ describe("tealbrick adopt (C96 phase 1)", () => {
   test("F61: --persona replaces the detected instructions; --persona-append keeps both", async () => {
     const mine = join(h.home, "personas", "clean.md");
     await writeFile(mine, "You are the desk agent. You answer short.\n");
-    const detected = join(h.home, "personas", "persona.md");
-    const r = await h.run(["adopt", "--from-v1", v1(), "--persona", mine, "--dry-run", "--json"]);
-    assert.equal(r.code, 0, r.err);
-    assert.deepEqual(r.json.plan.detection.persona.files, [mine], "only the given persona");
-    assert.ok(r.json.plan.detection.persona.skipped.some((x: { path: string; reason: string }) => x.path === detected && /replaced by --persona/.test(x.reason)), "the replaced file is listed");
-    const both = await h.run(["adopt", "--from-v1", v1(), "--persona", mine, "--persona-append", "--dry-run", "--json"]);
-    assert.equal(both.code, 0, both.err);
-    assert.deepEqual(both.json.plan.detection.persona.files, [detected, mine]);
-    const bad = await h.run(["adopt", "--from-v1", v1(), "--persona-append", "--dry-run", "--json"]);
-    assert.equal(bad.code, 2, "--persona-append alone is a usage error");
+    const detected = join(h.cwd, "CLAUDE.md");
+    await writeFile(detected, "Project notes for a coding agent.\n");
+    try {
+      const base = ["adopt", "--harness", "claude-sdk", "--name", "Desk agent", "--dry-run", "--json"];
+      const r = await h.run([...base, "--persona", mine]);
+      assert.equal(r.code, 0, r.err);
+      assert.deepEqual(r.json.plan.detection.persona.files, [mine], "only the given persona");
+      assert.ok(r.json.plan.detection.persona.skipped.some((x: { path: string; reason: string }) => x.path === detected && /replaced by --persona/.test(x.reason)), "the replaced file is listed");
+      const both = await h.run([...base, "--persona", mine, "--persona-append"]);
+      assert.equal(both.code, 0, both.err);
+      assert.deepEqual(both.json.plan.detection.persona.files, [detected, mine]);
+      assert.equal((await h.run([...base, "--persona-append"])).code, 2, "--persona-append alone is a usage error");
+    } finally {
+      const { rm } = await import("node:fs/promises");
+      await rm(detected, { force: true });
+    }
   });
 
   test("F47: REUSE keeps a remote (OAuth) Codex entry unchanged; --switch-to-stdio is explicit and shown in the plan", async () => {

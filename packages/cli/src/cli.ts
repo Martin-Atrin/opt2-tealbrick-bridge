@@ -26,7 +26,7 @@ Owner mode (person session; reads and drafts only):
   register agents --file <agents.json> [--draft <drf>]
 Harness:
   connect <claude-desktop|codex|claude-code|generic> [--agent <agt>] [--remote|--local] [--write [--yes]] [--bridge <url>]
-  adopt [--harness auto|claude-sdk|claude-code|claude-desktop|codex|command] [--from-v1 <dir>] [--name <card>] [--purpose <text>]
+  adopt [--harness auto|claude-sdk|claude-code|claude-desktop|codex|command] [--name <card>] [--purpose <text>]
         [--persona <file> [--persona-append]] [--serve|--no-serve] [--wake mentions|all] [--inbox buzz:<channel>,…] [--keep-existing] [--switch-to-stdio] [--start] [--dry-run] [--yes] | adopt --undo [--name <card>|--agent <agt>] [--purge]
         onboard an agent already on this machine: one command, one owner approval (names and paths only, never secret values)
 Agent mode (agent items only):

@@ -38,7 +38,6 @@ export const OPTIONS = {
   /** agent login: suggested card purpose (spec 0.1.14, ≤ 280) */
   purpose: { type: "string" },
   /** adopt (C96/C106) */
-  "from-v1": { type: "string" },
   persona: { type: "string" },
   serve: { type: "boolean" },
   "no-serve": { type: "boolean" },
