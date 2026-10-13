@@ -1,6 +1,6 @@
 {
   "name": "@opt2-tealbrick/harness-claude",
-  "version": "0.1.12",
+  "version": "0.1.13",
   "private": true,
   "type": "module",
   "description": "Claude Agent SDK harness adapter. No policy.",
@@ -21,7 +21,9 @@
     "build": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
-    "@opt2-tealbrick/spec": "https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.25/opt2-tealbrick-spec-0.1.25.tgz",
+    "@opt2-tealbrick/spec": "https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.25/opt2-tealbrick-spec-0.1.25.tgz"
+  },
+  "devDependencies": {
     "@opt2-tealbrick/bridge": "workspace:*"
   }
 }

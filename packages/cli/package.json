@@ -1,6 +1,6 @@
 {
   "name": "@opt2-tealbrick/cli",
-  "version": "0.1.18",
+  "version": "0.1.19",
   "private": true,
   "type": "module",
   "description": "tealbrick CLI: owner mode (drafts, reads), agent mode, stdio relay, harness connection.",
@@ -25,6 +25,7 @@
     "build": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
+    "@anthropic-ai/claude-agent-sdk": "0.3.287",
     "@opt2-tealbrick/bridge": "workspace:*",
     "@opt2-tealbrick/harness-claude": "workspace:*",
     "@opt2-tealbrick/manifest": "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.17/opt2-tealbrick-manifest-0.1.17.tgz",

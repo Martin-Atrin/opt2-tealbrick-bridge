@@ -2,6 +2,7 @@
  * `tealbrick bridge serve --stdio` (C5, CLI.md §5): the local relay, loaded WITHOUT the rest of the CLI and
  * without the deployed bridge, so the relay process stays small. Reads agent items only (never the person item).
  */
+import { appendFileSync } from "node:fs";
 import { manifestApi, type RelayStatus, startRelay } from "@opt2-tealbrick/bridge/relay";
 import type { AgentId, BridgeId, ConnectionId, Ed25519PublicJwk } from "@opt2-tealbrick/spec/credentials";
 import { CliError, EXIT, usageError } from "./io.ts";
@@ -76,7 +77,7 @@ export function decodeOnBehalfOf(arg: string): OnBehalfOfClaim | undefined {
   }
 }
 
-export async function serveRelay(opts: { store: CredentialStore; agent: string | undefined; stderr: { write(s: string): unknown }; onBehalfOf?: OnBehalfOfClaim }): Promise<void> {
+export async function serveRelay(opts: { store: CredentialStore; agent: string | undefined; stderr: { write(s: string): unknown }; onBehalfOf?: OnBehalfOfClaim; logFile?: string }): Promise<void> {
   const item = await pickAgentItem(opts.store, opts.agent);
   const api = manifestApi();
   const key = await api.importKeyPair(new Uint8Array(Buffer.from(item.privateKey, "base64url")));
@@ -89,6 +90,18 @@ export async function serveRelay(opts: { store: CredentialStore; agent: string |
       publicJwk: () => item.publicJwk,
     },
     onStatus: (s: RelayStatus) => opts.stderr.write(`${JSON.stringify({ event: "relay.status", status: s, agent: item.agt })}\n`),
+    // F72: drain re-sends are logged to stderr and, with --log-file (agent serve passes its log), appended there
+    onEvent: (event, fields) => {
+      const line = `${JSON.stringify({ ts: new Date().toISOString(), event, agent: item.agt, ...fields })}\n`;
+      opts.stderr.write(line);
+      if (opts.logFile) {
+        try {
+          appendFileSync(opts.logFile, line, { mode: 0o600 });
+        } catch {
+          /* the log is best effort; the call itself goes on */
+        }
+      }
+    },
     ...(opts.onBehalfOf ? { toolCallMeta: { [ON_BEHALF_OF_META_KEY]: opts.onBehalfOf } } : {}),
   });
   await relay.done;
@@ -96,7 +109,7 @@ export async function serveRelay(opts: { store: CredentialStore; agent: string |
 
 /**
  * Standalone process entry used by main.ts for `bridge serve`: `[--stdio] [--agent <id>] [--store keychain|file]
- * [--config-dir <dir>] [--on-behalf-of <b64url>]`. `--store`/`--config-dir` carry the credential-store choice when a harness starts the relay with
+ * [--config-dir <dir>] [--on-behalf-of <b64url>] [--log-file <path>]`. `--store`/`--config-dir` carry the credential-store choice when a harness starts the relay with
  * a filtered env (harness-claude drops every TB_* name and XDG_CONFIG_HOME).
  */
 export async function relayMain(argv: string[]): Promise<number> {
@@ -105,9 +118,11 @@ export async function relayMain(argv: string[]): Promise<number> {
   let stdio = false;
   const storeArgs: { store?: string; configDir?: string } = {};
   let onBehalfOf: OnBehalfOfClaim | undefined;
+  let logFile: string | undefined;
   for (let i = 0; i < rest.length; i++) {
     const a = rest[i];
     if (a === "--stdio") stdio = true;
+    else if (a === "--log-file") logFile = rest[++i];
     else if (a === "--store") storeArgs.store = rest[++i];
     else if (a === "--config-dir") storeArgs.configDir = rest[++i];
     else if (a === "--on-behalf-of") {
@@ -129,7 +144,7 @@ export async function relayMain(argv: string[]): Promise<number> {
     return EXIT.usage;
   }
   try {
-    await serveRelay({ store: relayStore(process.env, storeArgs), agent, stderr: process.stderr, ...(onBehalfOf ? { onBehalfOf } : {}) });
+    await serveRelay({ store: relayStore(process.env, storeArgs), agent, stderr: process.stderr, ...(onBehalfOf ? { onBehalfOf } : {}), ...(logFile ? { logFile } : {}) });
     return EXIT.ok;
   } catch (e) {
     const err = e instanceof CliError ? e : new CliError(EXIT.unexpected, "internal", e instanceof Error ? e.message : "unexpected error");

@@ -50,6 +50,16 @@ export const OPTIONS = {
   "keep-existing": { type: "boolean" },
   "switch-to-stdio": { type: "boolean" },
   start: { type: "boolean" },
+  /** F61: keep the detected instructions and add --persona to them (default: --persona replaces them) */
+  "persona-append": { type: "boolean" },
+  /** F63: agent login --create: suggest app access in the same owner approval (`<product>[:crud,…]`) */
+  grant: { type: "string", multiple: true },
+  /** F63/F64: agent login --create: the channel the agent joins (`buzz:<channel id>` or `new:<name>`) */
+  channel: { type: "string" },
+  /** F66: agent serve: start supervised in the background (pidfile; log next to the config or --log) */
+  detach: { type: "boolean" },
+  /** F66/F72: agent serve: append the serve log (and the harness relay's retry lines) to this file */
+  log: { type: "string" },
   /** agent serve: restart after a crash with backoff (own pidfile) */
   supervise: { type: "boolean" },
   /** internal: the process a supervisor started */

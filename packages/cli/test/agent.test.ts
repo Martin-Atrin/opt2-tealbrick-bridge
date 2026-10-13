@@ -21,6 +21,8 @@ describe("agent mode (key connections)", () => {
   let accepted = 0;
   let known = false;
   let lastStart: any;
+  let buzz = false;
+  let buzzChannels: { id: string; name: string }[] = [];
 
   before(async () => {
     await h.setup();
@@ -40,7 +42,14 @@ describe("agent mode (key connections)", () => {
       if (req.url === "/mcp" && req.method === "POST") {
         assert.equal(req.headers.authorization, "Bearer k5-access");
         const m = JSON.parse(body);
-        const result = m.method === "initialize" ? { protocolVersion: "2025-06-18", instructions: "Teal Brick apps…" } : { tools: [{ name: "notes__notes_list" }, { name: "notes__tb_skills" }] };
+        const buzzTools = buzz ? [{ name: "connect__buzz_identity", annotations: { readOnlyHint: true } }, { name: "connect__buzz_channels", annotations: { readOnlyHint: true } }] : [];
+        const call = m.method === "tools/call" ? (m.params.name === "connect__buzz_identity" ? { npub: "npub1testagentkey" } : { channels: buzzChannels }) : undefined;
+        const result =
+          m.method === "initialize"
+            ? { protocolVersion: "2025-06-18", instructions: "Teal Brick apps…" }
+            : call
+              ? { content: [{ type: "text", text: JSON.stringify(call) }], structuredContent: call }
+              : { tools: [{ name: "notes__notes_list" }, { name: "notes__tb_skills" }, ...buzzTools] };
         return res.writeHead(200, { "content-type": "application/json", "mcp-session-id": "s1" }).end(JSON.stringify({ jsonrpc: "2.0", id: m.id, result }));
       }
       res.writeHead(204).end();
@@ -116,6 +125,50 @@ describe("agent mode (key connections)", () => {
     assert.equal(tooLong.code, 2, "names are 1-60 characters");
     const two = await h.run(["agent", "login", "--agent", AGT, "--agent", "agt_01HAAAAAAAAAAAAAAAAAAAAAAA", "--name", "x", "--json"]);
     assert.equal(two.code, 2, "--name names one agent");
+  });
+
+  test("F63: agent login --create asks for app access and a channel in the SAME approval (one form, like adopt)", async () => {
+    h.clock = Date.now();
+    const plain = await h.run(["agent", "login", "--create", "--name", "Desk agent", "--json"]);
+    assert.equal(plain.code, 0, plain.err);
+    assert.deepEqual(lastStart.agents[0].adopt, { grants: [], channel: { kind: "buzz_channel" }, wake: "serve" }, "the owner sees every deployed app and a channel field");
+    const r = await h.run(["agent", "login", "--create", "--name", "Desk agent", "--grant", "knowledge,kanban:read+create", "--grant", "connect", "--channel", "buzz:ch_team", "--json"]);
+    assert.equal(r.code, 0, r.err);
+    assert.deepEqual(lastStart.agents[0].adopt, {
+      grants: [
+        { product: "knowledge", crud: ["read"] },
+        { product: "kanban", crud: ["read", "create"] },
+        { product: "connect", crud: ["read"] },
+      ],
+      channel: { kind: "buzz_channel", id: "ch_team" },
+      wake: "serve",
+    });
+    const named = await h.run(["agent", "login", "--create", "--channel", "new:Desk team", "--json"]);
+    assert.equal(named.code, 0, named.err);
+    assert.deepEqual(lastStart.agents[0].adopt.channel, { kind: "buzz_channel", createName: "Desk team" });
+    const existing = await h.run(["agent", "login", "--agent", AGT, "--json"]);
+    assert.equal(existing.code, 0, existing.err);
+    assert.equal(lastStart.agents[0].adopt, undefined, "an existing card keeps its grants: no suggestion");
+    for (const bad of [["--grant", "Bad!"], ["--grant", "kanban:write"], ["--channel", "slack:x"], ["--grant", "kanban,kanban"]]) {
+      const b = await h.run(["agent", "login", "--create", ...bad, "--json"]);
+      assert.equal(b.code, 2, `refused: ${bad.join(" ")}`);
+    }
+    assert.equal((await h.run(["agent", "login", "--agent", AGT, "--grant", "kanban", "--json"])).code, 2, "--grant needs --create");
+  });
+
+  test("F64: after approval the CLI checks channel membership and names the npub the owner must add (quiet when a member)", async () => {
+    h.clock = Date.now();
+    buzz = true;
+    buzzChannels = [];
+    const r = await h.run(["agent", "login", "--create", "--grant", "connect", "--channel", "buzz:ch_team"]);
+    assert.equal(r.code, 0, r.err);
+    assert.match(r.err, /NOT a member of Buzz channel ch_team yet\. Owner: add npub1testagentkey to that channel/);
+    buzzChannels = [{ id: "ch_team", name: "Team" }];
+    const ok = await h.run(["agent", "login", "--create", "--grant", "connect", "--channel", "buzz:ch_team"]);
+    assert.equal(ok.code, 0, ok.err);
+    assert.doesNotMatch(ok.err, /NOT a member|Owner: add/);
+    assert.match(ok.err, /is a member of Buzz channel ch_team/);
+    buzz = false;
   });
 
   test("agent login without --agent, --file or --create is refused", async () => {

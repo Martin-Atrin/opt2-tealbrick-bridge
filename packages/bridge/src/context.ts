@@ -13,7 +13,7 @@ import type { Rejection, Table } from "./table.ts";
 import type { Logger } from "./util.ts";
 import { nowS } from "./util.ts";
 
-export const BRIDGE_VERSION = "0.1.23";
+export const BRIDGE_VERSION = "0.1.24";
 export const SDK_MAJORS = [1];
 /** F57a / L21: Retry-After (seconds) on tool and companion calls refused while the bridge drains (nothing ran) */
 export const DRAIN_RETRY_AFTER_S = 2;

@@ -269,6 +269,21 @@ describe("tealbrick adopt (C96 phase 1)", () => {
     assert.ok(r.json.suggestion.grants.every((g: { crud: string[]; operations?: string[] }) => g.crud.join() === "read" && !g.operations));
   });
 
+  test("F61: --persona replaces the detected instructions; --persona-append keeps both", async () => {
+    const mine = join(h.home, "personas", "clean.md");
+    await writeFile(mine, "You are the desk agent. You answer short.\n");
+    const detected = join(h.home, "personas", "persona.md");
+    const r = await h.run(["adopt", "--from-v1", v1(), "--persona", mine, "--dry-run", "--json"]);
+    assert.equal(r.code, 0, r.err);
+    assert.deepEqual(r.json.plan.detection.persona.files, [mine], "only the given persona");
+    assert.ok(r.json.plan.detection.persona.skipped.some((x: { path: string; reason: string }) => x.path === detected && /replaced by --persona/.test(x.reason)), "the replaced file is listed");
+    const both = await h.run(["adopt", "--from-v1", v1(), "--persona", mine, "--persona-append", "--dry-run", "--json"]);
+    assert.equal(both.code, 0, both.err);
+    assert.deepEqual(both.json.plan.detection.persona.files, [detected, mine]);
+    const bad = await h.run(["adopt", "--from-v1", v1(), "--persona-append", "--dry-run", "--json"]);
+    assert.equal(bad.code, 2, "--persona-append alone is a usage error");
+  });
+
   test("F47: REUSE keeps a remote (OAuth) Codex entry unchanged; --switch-to-stdio is explicit and shown in the plan", async () => {
     const cfg = join(h.home, ".codex", "config.toml");
     await mkdir(join(h.home, ".codex"), { recursive: true });

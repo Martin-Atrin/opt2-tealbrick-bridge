@@ -8,6 +8,7 @@ import type { Io } from "./io.ts";
 import { type CliError, EXIT, envelope, usageError } from "./io.ts";
 import { leadGroups } from "./lead.ts";
 import { agents, audit, canvas, catalog, harness, instances, keys, licences, login, logout, sessions, skills, whoami, workspaces } from "./owner.ts";
+import { tool } from "./tool.ts";
 import { BRIDGE_VERSION, CLI_VERSION } from "./version.ts";
 
 export type { Io } from "./io.ts";
@@ -26,12 +27,15 @@ Owner mode (person session; reads and drafts only):
 Harness:
   connect <claude-desktop|codex|claude-code|generic> [--agent <agt>] [--remote|--local] [--write [--yes]] [--bridge <url>]
   adopt [--harness auto|claude-sdk|claude-code|claude-desktop|codex|command] [--from-v1 <dir>] [--name <card>] [--purpose <text>]
-        [--persona <file>] [--serve|--no-serve] [--wake mentions|all] [--inbox buzz:<channel>,…] [--keep-existing] [--switch-to-stdio] [--start] [--dry-run] [--yes] | adopt --undo [--name <card>|--agent <agt>] [--purge]
+        [--persona <file> [--persona-append]] [--serve|--no-serve] [--wake mentions|all] [--inbox buzz:<channel>,…] [--keep-existing] [--switch-to-stdio] [--start] [--dry-run] [--yes] | adopt --undo [--name <card>|--agent <agt>] [--purge]
         onboard an agent already on this machine: one command, one owner approval (names and paths only, never secret values)
 Agent mode (agent items only):
-  agent login (--agent <agt>... | --file <agents.json> | --create) [--name <card name>] [--purpose <text>] [--harness <id>] [--label <machine>] | status | logout | list
-  agent serve --file <agent-serve.json> [--agent <agt>] [--supervise]   answer inbox items with the agent's own harness
+  agent login (--agent <agt>... | --file <agents.json> | --create [--grant <product>[:read+create+…],…] [--channel buzz:<id>|new:<name>])
+        [--name <card name>] [--purpose <text>] [--harness <id>] [--label <machine>] | status | logout | list
+  agent serve --file <agent-serve.json> [--agent <agt>] [--supervise | --detach] [--log <file>]   answer inbox items with the agent's own harness
+  agent stop [--agent <agt>]   stop the serve loop started by --detach or --supervise (own pidfile only)
   (owner) agents export [--file <agents.json>]   writes card ids so agent login --file connects existing cards
+  tool list | tool call <name> [--input <json|@file>] [--yes]   call one tool as the agent (read-only tools; writes need --yes)
 Local bridge: bridge serve --stdio [--agent <agt>] [--store file --config-dir <d>]   Own infrastructure: bridge enrol --code - [--data-dir <d>] | bridge run [--data-dir <d>]
 Standalone: standalone owner-key --ws <ws>   admin pause|resume [--agent] | revoke-connection <con> | ticket launch <product>|keys  --ws <ws> --bridge <url>
 Global flags: --json  --portal <url>  --ws <ws_...>  --agent <agt_...>  --yes  --code -
@@ -61,7 +65,7 @@ const ownerGroups: Record<string, Handler> = {
 };
 
 /** Harness connection: reads agent items (never the person item). */
-const harnessGroups: Record<string, Handler> = { connect, adopt };
+const harnessGroups: Record<string, Handler> = { connect, adopt, tool };
 
 function dispatch(ctx: Ctx): Handler {
   const group = ctx.pos[0];

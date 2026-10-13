@@ -14,7 +14,7 @@ import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } fro
 import { confirm, desktopConfigPath, mergeJsonConfig, mergeTomlConfig, planConnect, readExisting, writeAtomic } from "./connect.ts";
 import type { Ctx, Handler } from "./ctx.ts";
 import { CliError, EXIT, usageError } from "./io.ts";
-import { type AdoptSuggestion, agentLogin, probeAgent, selfRevoke } from "./lead.ts";
+import { type AdoptSuggestion, agentLogin, probeAgent, selfRevoke, startDetached } from "./lead.ts";
 import { pickAgentItem } from "./relay-main.ts";
 import { AGENT_ITEM_PREFIX } from "./store.ts";
 import { heartbeatPath, isAlive, pidPath, readHeartbeat, readPid, stopLoop } from "./supervise.ts";
@@ -156,7 +156,7 @@ async function credentialNames(dir: string): Promise<{ path: string; reason: str
 }
 
 /** §2 detect: read-only. Reads the v1 serve config and persona text; everything credential-like by NAME only. */
-export async function detect(env: Record<string, string | undefined>, cwd: string, o: { harness?: string; fromV1?: string; persona?: string }): Promise<Detection> {
+export async function detect(env: Record<string, string | undefined>, cwd: string, o: { harness?: string; fromV1?: string; persona?: string; personaAppend?: boolean }): Promise<Detection> {
   const home = env.HOME ?? "";
   const modelAuth = {
     anthropicKeyEnv: !!env.ANTHROPIC_API_KEY,
@@ -263,7 +263,14 @@ export async function detect(env: Record<string, string | undefined>, cwd: strin
     const p = resolve(cwd, o.persona);
     if (!existsSync(p)) throw usageError(`--persona: ${p} does not exist`);
     if (!(await insideHome(home, p))) throw usageError("--persona must be under $HOME (links are not followed)");
+    // F61: --persona IS the persona; the detected instructions are kept only with --persona-append
+    if (!o.personaAppend) {
+      for (const f of d.persona.files) d.persona.skipped.push({ path: f, reason: "replaced by --persona (add --persona-append to keep it)" });
+      d.persona.files = [];
+    }
     d.persona.files.push(p);
+  } else if (o.personaAppend) {
+    throw usageError("--persona-append needs --persona <file>");
   } else if (!o.fromV1) {
     for (const n of ["CLAUDE.md", "AGENTS.md"]) if (existsSync(join(cwd, n))) d.persona.files.push(join(cwd, n));
   }
@@ -305,6 +312,7 @@ export function planText(p: AdoptPlan, files: string[]): string {
     `  harness        ${p.harness} (${d.harness.reason})`,
     `  model auth     ${auth || "NONE FOUND — set ANTHROPIC_API_KEY or sign in to the harness first"}`,
     `  persona        ${d.persona.files.length ? d.persona.files.join(", ") : "none"}`,
+    ...d.persona.skipped.map((x) => `  persona skip   ${x.path} (${x.reason})`),
     ...(d.settings.model || d.settings.maxTurns ? [`  settings       ${[d.settings.model && `model ${d.settings.model}`, d.settings.effort && `effort ${d.settings.effort}`, d.settings.maxTurns && `maxTurns ${d.settings.maxTurns}`, d.settings.maxBudgetUsd && `budget $${d.settings.maxBudgetUsd}`, d.settings.timeoutSeconds && `timeout ${d.settings.timeoutSeconds}s`].filter(Boolean).join(", ")}`] : []),
     ...(d.builtinTools.proposed.length || d.builtinTools.dropped.length ? [`  built-in tools ${d.builtinTools.proposed.join(", ") || "none"}${d.builtinTools.dropped.length ? ` (dropped: ${d.builtinTools.dropped.join(", ")})` : ""}`] : []),
     ...d.mcpServers.map((m) => `  MCP not wired  ${m.name}: ${m.reason}`),
@@ -501,7 +509,7 @@ export const adopt: Handler = async (ctx) => {
   if (ctx.v.undo === true) return adoptUndo(ctx);
   const home = ctx.io.env.HOME ?? "";
   if (!home) throw usageError("HOME is not set");
-  const d = await detect(ctx.io.env, ctx.cwd(), { ...(ctx.v.harness ? { harness: String(ctx.v.harness) } : {}), ...(ctx.v["from-v1"] ? { fromV1: resolve(ctx.cwd(), String(ctx.v["from-v1"])) } : {}), ...(ctx.v.persona ? { persona: String(ctx.v.persona) } : {}) });
+  const d = await detect(ctx.io.env, ctx.cwd(), { ...(ctx.v.harness ? { harness: String(ctx.v.harness) } : {}), ...(ctx.v["from-v1"] ? { fromV1: resolve(ctx.cwd(), String(ctx.v["from-v1"])) } : {}), ...(ctx.v.persona ? { persona: String(ctx.v.persona) } : {}), ...(ctx.v["persona-append"] === true ? { personaAppend: true } : {}) });
   if (!d.harness.chosen) {
     const why: Record<string, string> = { codex: "~/.codex/config.toml found", "claude-desktop": "Claude Desktop config found", "claude-code": "`claude` on PATH" };
     const choices: AdoptHarness[] = [...d.harness.candidates, ...(d.harness.candidates.includes("claude-sdk") ? [] : (["claude-sdk"] as AdoptHarness[]))];
@@ -672,15 +680,7 @@ export const adopt: Handler = async (ctx) => {
   let started: { pid: number | null; log: string } | null = null;
   if (ctx.v.start === true && state.serve) {
     const held = await readPid(pidPath(ctx.configDir(), state.con));
-    if (!held || !isAlive(held.pid)) {
-      const { openSync } = await import("node:fs");
-      const { spawn } = await import("node:child_process");
-      const log = join(adir, "serve.log");
-      const fd = openSync(log, "a", 0o600);
-      const child = spawn(process.execPath, [process.argv[1] ?? "tealbrick", "agent", "serve", "--file", state.serve.path, "--agent", item.agt, "--supervise"], { detached: true, cwd: adir, stdio: ["ignore", fd, fd], env: ctx.io.env as NodeJS.ProcessEnv });
-      child.unref();
-      started = { pid: child.pid ?? null, log };
-    }
+    if (!held || !isAlive(held.pid)) started = await startDetached(ctx, { file: state.serve.path, agt: item.agt, con: item.con, log: join(adir, "serve.log"), cwd: adir });
   }
 
   // §9 verify (reads only; writes need the owner's write grant)

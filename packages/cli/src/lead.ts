@@ -5,6 +5,7 @@
 import { chmod, mkdtemp, writeFile } from "node:fs/promises";
 import { hostname as osHostname, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
+import { fileURLToPath } from "node:url";
 import {
   enrolBridge,
   type ManifestApi,
@@ -151,6 +152,10 @@ export async function agentLogin(ctx: Ctx, extra: { adopt?: AdoptSuggestion } = 
   for (const s of slots) {
     if (s.name !== undefined && (s.name.trim().length === 0 || s.name.length > CARD_NAME_MAX)) throw usageError(`agent name must be 1–${CARD_NAME_MAX} characters: ${s.name.slice(0, 80)}`);
   }
+  // F63/F64: a NEW agent gets the same one-form approval as adopt: app access (pre-ticked reads for --grant products,
+  // every other deployed app listed unticked) and the channel it joins, so it does not start with 0 tools
+  const suggestion = extra.adopt ?? (ctx.v.create === true && slots.length === 1 && !ctx.v.file ? createSuggestion(ctx) : undefined);
+  if (!extra.adopt && (ctx.v.grant !== undefined || ctx.v.channel !== undefined) && !suggestion) throw usageError("--grant/--channel belong to agent login --create (one new agent)");
   const ids = slots.map((x) => x.agt).filter((x): x is AgentId => !!x);
   if (new Set(ids).size !== ids.length) throw new CliError(EXIT.validation, "input_invalid", "the same agent id appears twice");
   if (slots.length > MAX_AGENTS) throw new CliError(EXIT.validation, "input_invalid", `at most ${MAX_AGENTS} agents per request`);
@@ -165,7 +170,7 @@ export async function agentLogin(ctx: Ctx, extra: { adopt?: AdoptSuggestion } = 
     // C96: the slot's suggested card name, so the owner approves a NAMED card in one click (GUI prefills it).
     // Placeholder names of unnamed file entries (`#3`) are never sent.
     agents: slots.map((s, i) => ({
-      ...(extra.adopt && i === 0 ? { adopt: extra.adopt } : {}),
+      ...(suggestion && i === 0 ? { adopt: suggestion } : {}),
       ...(s.agt ? { agt: s.agt } : {}),
       ...(s.name && !/^#\d+$/.test(s.name) ? { name: s.name.trim() } : {}),
       ...((s as { purpose?: string }).purpose ? { purpose: ((s as { purpose?: string }).purpose as string).trim() } : {}),
@@ -222,8 +227,67 @@ export async function agentLogin(ctx: Ctx, extra: { adopt?: AdoptSuggestion } = 
       }
     }
   }
-  ctx.say(`Connected ${created.length} agent(s). Next: tealbrick connect <harness> --agent <agt> --local`);
+  // F64: the owner named a Buzz channel: is the agent a member? Membership is the Buzz relay's (the channel admin adds
+  // the agent's npub); when it is missing, say exactly which npub to add. Never blocks the login.
+  const asked = suggestion?.channel?.kind === "buzz_channel" ? suggestion.channel : undefined;
+  if (!extra.adopt && asked && created.length === 1 && ready.length === 1) {
+    const item = (await readAgentItems(ctx)).find((i) => i.con === created[0]?.con);
+    if (item) await channelMembership(ctx, item, asked).then((line) => line && ctx.say(line));
+  }
+  ctx.say(`Connected ${created.length} agent(s). Next: tealbrick connect <harness> --agent <agt> --local${ctx.v.create === true ? ", or write an agent-serve.json (assets/agent-serve.example.json) and run tealbrick agent serve --file <it> --detach" : ""}`);
   ctx.emit({ workspace: result.workspace_id, bridgeId: result.bridge_id, mcpUrl: result.mcp_url, connections: created.map((c) => ({ ...c, ready: ready.includes(c.con) })) }, created.map((c) => `${c.agt}  ${c.con}${ready.includes(c.con) ? "" : "  (not ready yet)"}`).join("\n"));
+}
+
+const CRUD = ["create", "read", "update", "delete"] as const;
+
+/** F63: `--grant <product>[:read+create+…],…` (repeatable) and `--channel buzz:<id>|new:<name>`. */
+export function createSuggestion(ctx: Ctx): AdoptSuggestion {
+  const grants: AdoptSuggestion["grants"] = [];
+  for (const raw of ctx.v.grant ?? []) {
+    for (const part of String(raw).split(",").map((x) => x.trim()).filter(Boolean)) {
+      const [product, verbs] = part.split(":") as [string, string | undefined];
+      if (!/^[a-z][a-z0-9-]{0,39}$/.test(product)) throw usageError(`--grant takes <product>[:read+create+update+delete],…: ${part}`);
+      const crud = verbs ? verbs.split("+").filter(Boolean) : ["read"];
+      if (!crud.every((c) => (CRUD as readonly string[]).includes(c))) throw usageError(`--grant ${part}: access must be read, create, update or delete`);
+      if (grants.some((g) => g.product === product)) throw usageError(`--grant names ${product} twice`);
+      grants.push({ product, crud: crud as AdoptSuggestion["grants"][number]["crud"] });
+    }
+  }
+  if (grants.length > 16) throw usageError("--grant: at most 16 products");
+  const ch = ctx.v.channel === undefined ? undefined : String(ctx.v.channel);
+  let channel: AdoptSuggestion["channel"] = { kind: "buzz_channel" };
+  if (ch !== undefined) {
+    const m = /^(buzz|new):(.{1,200})$/.exec(ch);
+    if (!m) throw usageError("--channel takes buzz:<channel id> or new:<name>");
+    channel = m[1] === "buzz" ? { kind: "buzz_channel", id: m[2] as string } : { kind: "buzz_channel", createName: (m[2] as string).slice(0, 60) };
+  }
+  return { grants, channel, wake: "serve" };
+}
+
+/** F64: one owner line when the agent is not a member of the asked Buzz channel (or its npub when that is unknown). */
+async function channelMembership(ctx: Ctx, item: AgentItem, asked: NonNullable<AdoptSuggestion["channel"]>): Promise<string | null> {
+  const { withAgentMcp } = await import("./tool.ts");
+  try {
+    return await withAgentMcp(
+      ctx,
+      async (mcp) => {
+        const tools = new Set((await mcp.listTools()).map((t) => t.name));
+        if (!tools.has("connect__buzz_identity")) return "The agent has no Connect read access, so it cannot use Buzz yet (owner: tick Connect on the card).";
+        const id = (await mcp.callTool("connect__buzz_identity", {})).structuredContent as { npub?: string | null } | undefined;
+        const npub = id?.npub ?? null;
+        if (!npub) return null;
+        const list = tools.has("connect__buzz_channels") ? ((await mcp.callTool("connect__buzz_channels", {})).structuredContent as { channels?: { id?: string; name?: string }[] } | undefined) : undefined;
+        const channels = list?.channels ?? [];
+        const member = channels.some((c) => (asked.id ? c.id === asked.id : c.name === asked.createName));
+        if (member) return `The agent is a member of Buzz channel ${asked.id ?? asked.createName}.`;
+        if (!asked.id && !asked.createName) return channels.length ? null : `The agent is in no Buzz channel yet. Owner: add ${npub} to a channel in Buzz.`;
+        return `The agent is NOT a member of Buzz channel ${asked.id ?? asked.createName} yet. Owner: add ${npub} to that channel in Buzz (channel admin).`;
+      },
+      item,
+    );
+  } catch {
+    return null;
+  }
 }
 
 async function pollAgent(ctx: Ctx, client: ReturnType<Ctx["client"]>, start: DeviceStart): Promise<DeviceAgentTokenResult> {
@@ -331,11 +395,25 @@ async function agentServe(ctx: Ctx): Promise<void> {
   const item = await pickAgent(ctx);
   const sup = await import("./supervise.ts");
   const pidfile = sup.pidPath(ctx.configDir(), item.con);
+  // F66: --detach starts `agent serve --supervise` in the background (same as adopt --start) and returns
+  if (ctx.v.detach === true) {
+    const file = resolve(ctx.v.file as string);
+    const started = await startDetached(ctx, { file, agt: item.agt, con: item.con, log: ctx.v.log ? resolve(ctx.v.log) : join(dirname(file), "serve.log") });
+    if (!started.pid) throw new CliError(EXIT.unexpected, "internal", "agent serve did not start");
+    ctx.emit({ agent: item.agt, connection: item.con, started }, `started agent serve for ${item.agt} (supervisor pid ${started.pid}), log ${started.log}; stop: tealbrick agent stop --agent ${item.agt}`);
+    return;
+  }
+  // F72: --log <file>: the serve log goes there (appended), and the harness's relay appends its retry lines to it
+  const logFile = ctx.v.log ? resolve(ctx.v.log) : undefined;
+  const { appendFileSync } = await import("node:fs");
+  // synchronous appends: a line written just before an exit (stall, stop) is never lost
+  const logOut: { write(s: string): unknown } = logFile ? { write: (line: string) => appendFileSync(logFile, line, { mode: 0o600 }) } : ctx.io.stderr;
+  const logLine = (event: string, fields: Record<string, unknown> = {}) => logOut.write(`${JSON.stringify({ ts: new Date().toISOString(), event, agent: item.agt, ...fields })}\n`);
   // C96 §8: `--supervise` runs this same command as a child and restarts it (own pidfile, own child only, L20)
   if (ctx.v.supervise === true && ctx.v["supervised-child"] !== true) {
     const args = [process.argv[1] ?? "tealbrick", ...process.argv.slice(2).filter((a) => a !== "--supervise"), "--supervised-child"];
     ctx.say(`supervising agent serve for ${item.agt} (restart with backoff); Ctrl-C to stop`);
-    await sup.supervise({ command: process.execPath, args, pidfile, log: (event, fields = {}) => ctx.io.stderr.write(`${JSON.stringify({ ts: new Date().toISOString(), event, agent: item.agt, ...fields })}\n`) });
+    await sup.supervise({ command: process.execPath, args, pidfile, log: logLine });
     return;
   }
   // one loop per connection: a plain serve takes the pidfile (a supervised child runs under its supervisor's)
@@ -354,19 +432,20 @@ async function agentServe(ctx: Ctx): Promise<void> {
       sign: async (input) => Buffer.from(await crypto.subtle.sign("Ed25519", key.privateKey, new TextEncoder().encode(input))).toString("base64url"),
       publicJwk: () => item.publicJwk,
     },
-    onStatus: (s) => ctx.say(JSON.stringify({ event: "serve.relay", status: s })),
+    onStatus: (s) => logLine("serve.relay", { status: s }),
+    // F72: a re-send during a bridge drain is one log line (tool name, code, Retry-After, attempt)
+    onEvent: (event, fields) => logLine(event, fields),
     stdin: toRelay,
     stdout: fromRelay,
   });
   const mcp = connectMcp({ streams: { input: fromRelay, output: toRelay } });
   await mcp.initialize("tealbrick-agent-serve");
   // the harness starts this relay with a filtered env (no TB_*, no XDG_CONFIG_HOME): the store choice travels as argv
-  const relayCmd = { command: process.execPath, args: [process.argv[1] ?? "tealbrick", "bridge", "serve", "--stdio", "--agent", item.agt, ...relayStoreArgs(ctx.io.env)] };
+  const relayCmd = { command: process.execPath, args: [process.argv[1] ?? "tealbrick", "bridge", "serve", "--stdio", "--agent", item.agt, ...relayStoreArgs(ctx.io.env), ...(logFile ? ["--log-file", logFile] : [])] };
   const runTurn =
     cfg.harness.kind === "claude"
       ? await serve.claudeRunner(cfg.harness, item.agt, relayCmd, dirname(resolve(ctx.v.file as string)))
       : await serve.commandRunner(cfg.harness, [relayCmd.command, ...relayCmd.args].map((a) => (/\s/.test(a) ? JSON.stringify(a) : a)).join(" "));
-  const { join } = await import("node:path");
   const abort = new AbortController();
   for (const sig of ["SIGINT", "SIGTERM"] as const)
     process.once(sig, () => {
@@ -385,7 +464,7 @@ async function agentServe(ctx: Ctx): Promise<void> {
     // F38: a supervised child names its supervisor (the pidfile holder), so --undo can confirm and stop it
     ...(ctx.v["supervised-child"] === true ? { supervisorPid: process.ppid } : {}),
     onStall: () => {
-      ctx.io.stderr.write(`${JSON.stringify({ ts: new Date().toISOString(), event: "serve.stalled", agent: item.agt })}\n`);
+      logLine("serve.stalled");
       void releasePid().finally(() => process.exit(sup.EXIT_STALLED));
     },
   });
@@ -397,7 +476,7 @@ async function agentServe(ctx: Ctx): Promise<void> {
       mcp,
       runTurn,
       ...serve.fileState(join(ctx.configDir(), `agent-serve-${item.con}.json`)),
-      log: (event, fields = {}) => ctx.io.stderr.write(`${JSON.stringify({ ts: new Date().toISOString(), event, agent: item.agt, ...fields })}\n`),
+      log: logLine,
       sleep: (ms, signal) =>
         new Promise<void>((r) => {
           const t = setTimeout(r, ms);
@@ -422,9 +501,41 @@ async function agentServe(ctx: Ctx): Promise<void> {
   setTimeout(() => process.exit(0), 200).unref();
 }
 
+/**
+ * F66 (and adopt --start): start `agent serve --supervise` detached, its output appended to `log` (0600). One loop per
+ * connection: refuses while the connection's pidfile names a live process.
+ */
+export async function startDetached(ctx: Ctx, o: { file: string; agt: string; con: string; log: string; cwd?: string }): Promise<{ pid: number | null; log: string }> {
+  const sup = await import("./supervise.ts");
+  const held = await sup.readPid(sup.pidPath(ctx.configDir(), o.con));
+  if (held && sup.isAlive(held.pid)) throw new CliError(EXIT.conflict, "already_running", `agent serve already runs for ${o.agt} (pid ${held.pid}); stop it with tealbrick agent stop --agent ${o.agt}`);
+  const { openSync, closeSync } = await import("node:fs");
+  const { spawn } = await import("node:child_process");
+  const fd = openSync(o.log, "a", 0o600);
+  try {
+    // this package's own entry (dist/main.js next to this file; main.ts when run from source), never argv[1]
+    const entry = fileURLToPath(new URL(import.meta.url.endsWith(".ts") ? "./main.ts" : "./main.js", import.meta.url));
+    const child = spawn(process.execPath, [entry, "agent", "serve", "--file", o.file, "--agent", o.agt, "--supervise", "--log", o.log], { detached: true, cwd: o.cwd ?? dirname(o.file), stdio: ["ignore", fd, fd], env: ctx.io.env as NodeJS.ProcessEnv });
+    child.unref();
+    return { pid: child.pid ?? null, log: o.log };
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** F66: stop this connection's serve loop via its own pidfile (L20), and report it only when the process is gone (L28). */
+async function agentStop(ctx: Ctx): Promise<void> {
+  const item = await pickAgent(ctx);
+  const sup = await import("./supervise.ts");
+  const r = await sup.stopLoop({ pidfile: sup.pidPath(ctx.configDir(), item.con), heartbeat: sup.heartbeatPath(ctx.configDir(), item.con), nowMs: ctx.now() });
+  if (r.left) throw new CliError(EXIT.conflict, "still_running", r.left);
+  ctx.emit({ agent: item.agt, connection: item.con, stopped: r.stopped }, r.stopped ? `stopped agent serve of ${item.agt} (pid ${r.stopped})` : `agent serve was not running for ${item.agt}`);
+}
+
 export const agent: Handler = async (ctx) => {
-  const cmd = requirePos(ctx, 1, "agent command (login|status|serve|logout|list)");
+  const cmd = requirePos(ctx, 1, "agent command (login|status|serve|stop|logout|list)");
   if (cmd === "serve") return agentServe(ctx);
+  if (cmd === "stop") return agentStop(ctx);
   if (cmd === "login") return agentLogin(ctx);
   if (cmd === "status") return agentStatus(ctx);
   if (cmd === "logout") return agentLogout(ctx);

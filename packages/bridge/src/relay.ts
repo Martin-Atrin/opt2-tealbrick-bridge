@@ -34,6 +34,11 @@ export interface RelayOptions {
    * validates the claim and treats it as unverified.
    */
   toolCallMeta?: Record<string, unknown>;
+  /**
+   * F72: one line per re-send of a tool call during a bridge drain (`relay.retry` {tool, code, retryAfter, attempt}) and
+   * when the window ends (`relay.retry_gave_up`). The tool name only, never the arguments.
+   */
+  onEvent?: (event: "relay.retry" | "relay.retry_gave_up", fields: Record<string, unknown>) => void;
 }
 
 export type SignWithSigner = (typ: (typeof TYP)[keyof typeof TYP], claims: object, signer: { kid: string; sign(input: string): Promise<string> | string }) => Promise<string>;
@@ -190,21 +195,35 @@ export function startRelay(o: RelayOptions): RunningRelay {
   async function postToolCall(m: RpcMessage): Promise<RpcMessage[]> {
     let deadline = 0;
     let waitS = 2;
+    let attempt = 0;
+    const tool = typeof (m.params as { name?: unknown } | undefined)?.name === "string" ? (m.params as { name: string }).name : "?";
+    const event = (e: "relay.retry" | "relay.retry_gave_up", fields: Record<string, unknown>) => o.onEvent?.(e, { tool, attempt, ...fields });
     for (;;) {
       const meta: { retryAfterS?: number } = {};
       let out: RpcMessage[];
       try {
         out = await post(m, true, meta);
       } catch (e) {
-        if (!deadline || Date.now() >= deadline || !(e instanceof RelayError && e.nothingRan)) throw e;
+        if (!deadline || !(e instanceof RelayError && e.nothingRan)) throw e;
+        if (Date.now() >= deadline) {
+          event("relay.retry_gave_up", { code: "bridge_unreachable" });
+          throw e;
+        }
+        attempt += 1;
+        event("relay.retry", { code: "bridge_unreachable", retryAfter: waitS });
         await sleepS(waitS, abort.signal);
         continue;
       }
       // the bridge's drain refusal = this code AND Retry-After (an app's own look-alike code carries no Retry-After)
       if (meta.retryAfterS === undefined || !out.some((r) => r.id === m.id && drainingResult(r))) return out;
       if (!deadline) deadline = Date.now() + RELAY_DRAIN_WINDOW_MS;
-      if (Date.now() >= deadline || abort.signal.aborted) return out;
+      if (Date.now() >= deadline || abort.signal.aborted) {
+        event("relay.retry_gave_up", { code: "temporarily_unavailable" });
+        return out;
+      }
       waitS = Math.min(Math.max(meta.retryAfterS ?? 2, 1), 10);
+      attempt += 1;
+      event("relay.retry", { code: "temporarily_unavailable", retryAfter: waitS });
       await sleepS(waitS, abort.signal);
     }
   }

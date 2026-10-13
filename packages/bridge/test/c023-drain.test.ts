@@ -21,10 +21,11 @@ const now = () => Math.floor(Date.now() / 1000);
 type Line = { id?: number | string; result?: { isError?: boolean; content?: { text?: string }[]; structuredContent?: { error?: { code?: string; message?: string } } }; error?: unknown };
 
 /** a CLI relay (stdio) on the world's bridge; collects answers by id */
-function relayOn(w: World): { relay: RunningRelay; lines: Line[]; rpc(m: object): void; answer(id: number): Line | undefined } {
+function relayOn(w: World): { relay: RunningRelay; lines: Line[]; events: { event: string; fields: Record<string, unknown> }[]; rpc(m: object): void; answer(id: number): Line | undefined } {
   const stdin = new PassThrough();
   const stdout = new PassThrough();
-  const relay = startRelay({ api: w.api, bridgeUrl: w.publicUrl, connection: { con: CON as never, agt: AGT as never, bridgeId: BRG as never }, signer: { sign: (i) => w.signRaw(i), publicJwk: () => w.agentKey.publicJwk }, stdin, stdout });
+  const relay = startRelay({ api: w.api, bridgeUrl: w.publicUrl, connection: { con: CON as never, agt: AGT as never, bridgeId: BRG as never }, signer: { sign: (i) => w.signRaw(i), publicJwk: () => w.agentKey.publicJwk }, stdin, stdout, onEvent: (event, fields) => events.push({ event, fields }) });
+  const events: { event: string; fields: Record<string, unknown> }[] = [];
   const lines: Line[] = [];
   let buf = "";
   stdout.on("data", (d: Buffer) => {
@@ -34,7 +35,7 @@ function relayOn(w: World): { relay: RunningRelay; lines: Line[]; rpc(m: object)
     for (const l of parts.filter(Boolean)) lines.push(JSON.parse(l) as Line);
   });
   const rpc = (m: object) => stdin.write(`${JSON.stringify({ jsonrpc: "2.0", ...m })}\n`);
-  return { relay, lines, rpc, answer: (id) => lines.find((l) => l.id === id) };
+  return { relay, lines, events, rpc, answer: (id) => lines.find((l) => l.id === id) };
 }
 
 async function initRelay(r: ReturnType<typeof relayOn>): Promise<void> {
@@ -103,6 +104,7 @@ describe("F57a (real process): SIGTERM drains — in-flight calls finish, new ca
     assert.equal(r.answer(3)?.result?.isError, true);
     await new Promise((res) => setTimeout(res, 2_500));
     assert.equal(calls.filter((t) => t === "fails").length, 1, "the relay re-sends only drain refusals");
+    assert.deepEqual(r.events, [], "F72 quiet: no retry line without a drain");
     r.relay.stop();
   });
 
@@ -162,6 +164,11 @@ describe("F57a (real process): SIGTERM drains — in-flight calls finish, new ca
     await w.restart();
     await waitFor(() => !!r.answer(11), 30_000);
     assert.notEqual(r.answer(11)?.result?.isError, true, JSON.stringify(r.answer(11)));
+    // F72: every re-send is one visible line (tool name, code, Retry-After, attempt), never the arguments
+    const first = r.events[0];
+    assert.equal(first?.event, "relay.retry");
+    assert.deepEqual(first?.fields, { tool: "notes__notes_list", attempt: 1, code: "temporarily_unavailable", retryAfter: 2 });
+    assert.ok(r.events.every((e) => e.event === "relay.retry" && !JSON.stringify(e.fields).includes("late")), JSON.stringify(r.events));
     assert.deepEqual(
       calls.filter((t) => t !== "quiet"),
       ["slow", "late"],
@@ -220,6 +227,7 @@ describe("F57a: the drain bound — every open request id is answered (agent and
     await w.restart();
     await new Promise((res) => setTimeout(res, 3_000));
     assert.equal(calls.filter((t) => t === "stuck").length, 1, "a cut-off call is never re-sent (it may have run)");
+    assert.deepEqual(r.events, [], "no retry line for a cut-off call");
     r.relay.stop();
   });
 });
