@@ -40,12 +40,14 @@ describe("C62: bridge state, channel and proof hardening (real manifest crypto)"
     assert.ok([...w.bridge.ctx.rejected.keys()].some((k) => k.startsWith("config|")));
   });
 
-  test("BSD-03: plaintext state files are refused once the sealed format exists (no downgrade)", async () => {
+  test("BSD-03 / C133: a plaintext state file is refused (never read)", async () => {
     const { BridgeState, keksFromEnv } = await import("../src/state.ts");
     const dir = join(w.dataDir, "bridge");
     writeFileSync(join(dir, "claims.json"), JSON.stringify([{ ins: INS, kind: "instance" }]));
     const st = new BridgeState(w.dataDir, w.api, keksFromEnv({ TB_KEK: "11".repeat(32) }, w.api));
-    assert.throws(() => st.load(), /plaintext state is not accepted/);
+    assert.throws(() => st.load(), /plaintext state \(a bridge before 0\.1\.12\) is not accepted; re-enrol/);
+    const { rmSync } = await import("node:fs");
+    rmSync(join(dir, "claims.json"));
   });
 
 });
@@ -153,14 +155,14 @@ describe("C62 BSD-07: internalUrl allow-list", () => {
   });
 });
 
-describe("C62 BSD-03: migration from pre-0.1.12 plaintext state", () => {
-  test("a 0.1.11 data dir (plaintext identity with a sealed key, plaintext S4/S6) loads once and is resealed", async () => {
+describe("C133: plaintext state of a bridge before 0.1.12 is refused, never read or resealed", () => {
+  test("a 0.1.11 data dir fails with a clear error; nothing is read or rewritten; sealed state alone loads (quiet)", async () => {
     const { mkdtempSync, rmSync, mkdirSync } = await import("node:fs");
     const { tmpdir } = await import("node:os");
     const { manifestApi } = await import("../src/manifest-adapter.ts");
     const { BridgeState, keksFromEnv } = await import("../src/state.ts");
     const api = manifestApi();
-    const data = mkdtempSync(join(tmpdir(), "tb-migrate-"));
+    const data = mkdtempSync(join(tmpdir(), "tb-plain-"));
     try {
       const dir = join(data, "bridge");
       mkdirSync(dir, { recursive: true });
@@ -170,14 +172,15 @@ describe("C62 BSD-03: migration from pre-0.1.12 plaintext state", () => {
       writeFileSync(join(dir, "identity.json"), JSON.stringify({ bridgeId: BRG, workspaceId: WS, kid: key.kid, publicKey: key.publicJwk, sealedPrivateKey: api.seal(pkcs8, keks.current, `tb:seal:bridge-key:${key.kid}`), portalKeys: [], enrolCodeDigest: "sha256:00", configPath: "/c", ackPath: "/a" }));
       writeFileSync(join(dir, "jtis.json"), JSON.stringify({ J1: now() + 600 }));
       const st = new BridgeState(data, api, keks);
-      st.load();
-      const id = await st.loadIdentity();
-      assert.equal(id?.bridgeId, BRG);
-      assert.equal(id?.key.kid, key.kid);
-      assert.ok(st.usedJtis.has("J1"));
-      const files = readdirSync(dir);
-      assert.ok(files.includes("identity.sealed.json") && files.includes("jtis.sealed.json") && files.includes("format.sealed.json"));
-      assert.ok(!files.includes("identity.json") && !files.includes("jtis.json"), "plaintext removed");
+      assert.throws(() => st.load(), /jtis\.json: plaintext state \(a bridge before 0\.1\.12\) is not accepted; re-enrol this bridge/);
+      await assert.rejects(st.loadIdentity(), /identity\.json: plaintext state/);
+      assert.deepEqual(readdirSync(dir).sort(), ["identity.json", "jtis.json"], "nothing resealed, nothing removed");
+      // quiet on the good case: a fresh sealed state saves and loads without any error
+      rmSync(join(dir, "identity.json"));
+      rmSync(join(dir, "jtis.json"));
+      const fresh = new BridgeState(data, api, keks);
+      fresh.load();
+      await fresh.saveIdentity({ bridgeId: BRG as never, workspaceId: WS as never, key, portalKeys: [], enrolCodeDigest: "sha256:00" as never, configPath: "/c", ackPath: "/a" });
       const again = new BridgeState(data, api, keks);
       again.load();
       assert.equal((await again.loadIdentity())?.bridgeId, BRG, "sealed state reloads");
@@ -186,4 +189,3 @@ describe("C62 BSD-03: migration from pre-0.1.12 plaintext state", () => {
     }
   });
 });
-

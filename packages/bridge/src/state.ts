@@ -4,8 +4,8 @@
  *
  * Integrity (C62 BSD-03): every record except S2 is sealed with TB_KEK (AES-256-GCM, AAD = purpose + file),
  * so a planted or edited file is refused instead of trusted; S2 is a Portal-signed JWS and is verified on
- * boot. Files written by bridges before 0.1.12 (plaintext) are accepted ONCE and resealed; after that a
- * `format` marker makes plaintext files invalid (no downgrade).
+ * boot. Plaintext state (bridges before 0.1.12) is refused with a clear error (C133: earlier opt2 dev formats are
+ * not read; such a bridge is re-enrolled). A `format` marker records the sealed format.
  * Writes are crash-safe (BSD-13): unique temp name, file fsync, rename, directory fsync, temp removed on error.
  */
 import { randomBytes } from "node:crypto";
@@ -37,9 +37,7 @@ interface IdentityFile {
   workspaceId: WorkspaceId;
   kid: string;
   publicKey: Ed25519PublicJwk;
-  /** pre-0.1.12 files only (the whole record is sealed now) */
-  sealedPrivateKey?: SealedBlob;
-  privateKey?: string;
+  privateKey: string;
   portalKeys: PortalKeyEntry[];
   pinnedKeySet?: PinnedKeySet;
   enrolCodeDigest: Sha256Digest;
@@ -121,8 +119,6 @@ export class BridgeState {
   keyStore: KeyStore = { keysRev: 0, values: {} };
   standalone: StandaloneOverlay | undefined;
   reports: PendingReports = { revoked: [], pairingJtis: {} };
-  /** true when plaintext files of an older bridge were read (they are resealed on the next save) */
-  private migrating = false;
 
   constructor(dataDir: string, api: ManifestApi, keks: { current: Kek; previous?: Kek }) {
     this.dir = join(dataDir, "bridge");
@@ -146,28 +142,21 @@ export class BridgeState {
     return (v.v ?? 0) >= FORMAT;
   }
 
-  /** Reads a sealed record; plaintext only before the format marker exists (one-time migration). */
-  private readRecord<T>(name: string, legacyName: string): T | undefined {
+  /** Reads a sealed record. A plaintext file of a bridge before 0.1.12 is refused (C133), never read. */
+  private readRecord<T>(name: string, plaintextName: string): T | undefined {
     const sealedPath = this.path(`${name}.sealed.json`);
     if (existsSync(sealedPath)) {
       const blob = JSON.parse(readFileSync(sealedPath, "utf8")) as SealedBlob;
       if (!isSealed(blob)) throw new BridgeError("state_corrupt", 500, `${name} is not a sealed record`);
       return JSON.parse(Buffer.from(this.api.unseal(blob, this.keks, this.aad(name))).toString("utf8")) as T;
     }
-    const legacy = this.path(legacyName);
-    if (!existsSync(legacy)) return undefined;
-    if (this.formatMarked()) throw new BridgeError("state_corrupt", 500, `${legacyName}: plaintext state is not accepted any more`);
-    this.migrating = true;
-    return JSON.parse(readFileSync(legacy, "utf8")) as T;
+    if (existsSync(this.path(plaintextName))) throw new BridgeError("state_corrupt", 500, `${plaintextName}: plaintext state (a bridge before 0.1.12) is not accepted; re-enrol this bridge with a new enrolment code`);
+    return undefined;
   }
 
-  private writeRecord(name: string, value: unknown, legacyName?: string): void {
+  private writeRecord(name: string, value: unknown): void {
     const blob = this.api.seal(Buffer.from(JSON.stringify(value), "utf8"), this.keks.current, this.aad(name));
     atomicWrite(this.path(`${name}.sealed.json`), JSON.stringify(blob));
-    if (legacyName && existsSync(this.path(legacyName))) {
-      unlinkSync(this.path(legacyName));
-      syncDir(this.dir);
-    }
   }
 
   private markFormat(): void {
@@ -175,7 +164,7 @@ export class BridgeState {
     atomicWrite(this.path("format.sealed.json"), JSON.stringify(blob));
   }
 
-  /** Loads S3–S6, S9 and pending reports; S1 and S2 are read on demand. Reseals with the current KEK / migrates. */
+  /** Loads S3–S6, S9 and pending reports; S1 and S2 are read on demand. Reseals with the current KEK after a rotation. */
   load(): void {
     for (const r of this.readRecord<PairingConnectionRecord[]>("connections", "connections.json") ?? []) this.connections.set(r.con, r);
     this.claims = this.readRecord<PendingClaim[]>("claims", "claims.json") ?? [];
@@ -185,7 +174,7 @@ export class BridgeState {
     if (sealed) this.keyStore = JSON.parse(Buffer.from(this.api.unseal(sealed, this.keks, "tb:seal:bridge-keys:store")).toString("utf8")) as KeyStore;
     this.standalone = this.readRecord<StandaloneOverlay>("standalone", "standalone.json");
     this.reports = this.readRecord<PendingReports>("reports", "reports.json") ?? { revoked: [], pairingJtis: {} };
-    if (this.keks.previous || this.migrating) {
+    if (this.keks.previous) {
       this.saveConnections();
       this.saveClaims();
       this.saveJtis();
@@ -198,18 +187,12 @@ export class BridgeState {
   async loadIdentity(): Promise<Identity | undefined> {
     const f = this.readRecord<IdentityFile>("identity", "identity.json");
     if (!f) return undefined;
-    let pkcs8: Uint8Array;
-    if (typeof f.privateKey === "string") pkcs8 = new Uint8Array(Buffer.from(f.privateKey, "base64url"));
-    else if (f.sealedPrivateKey) pkcs8 = this.api.unseal(f.sealedPrivateKey, this.keks, `tb:seal:bridge-key:${f.kid}`);
-    else throw new BridgeError("identity_corrupt", 500, "bridge identity has no key");
+    if (typeof f.privateKey !== "string") throw new BridgeError("identity_corrupt", 500, "bridge identity has no key");
+    const pkcs8 = new Uint8Array(Buffer.from(f.privateKey, "base64url"));
     const key = await this.api.importKeyPair(pkcs8);
     if (key.kid !== f.kid) throw new BridgeError("identity_corrupt", 500, "bridge key does not match its record");
     const id: Identity = { bridgeId: f.bridgeId, workspaceId: f.workspaceId, key, portalKeys: f.portalKeys, ...(isPinned(f.pinnedKeySet) ? { pinnedKeySet: f.pinnedKeySet } : {}), enrolCodeDigest: f.enrolCodeDigest, configPath: f.configPath, ackPath: f.ackPath };
-    if (this.keks.previous || this.migrating) await this.saveIdentity(id);
-    if (this.migrating) {
-      this.markFormat();
-      this.migrating = false;
-    }
+    if (this.keks.previous) await this.saveIdentity(id);
     return id;
   }
 
@@ -228,7 +211,7 @@ export class BridgeState {
       ackPath: id.ackPath,
     };
     // the WHOLE record is sealed (portalKeys = trust anchor, workspaceId, enrolCodeDigest included)
-    this.writeRecord("identity", f, "identity.json");
+    this.writeRecord("identity", f);
     if (!this.formatMarked()) this.markFormat();
   }
 
@@ -254,15 +237,15 @@ export class BridgeState {
   }
 
   saveConnections(): void {
-    this.writeRecord("connections", [...this.connections.values()], "connections.json");
+    this.writeRecord("connections", [...this.connections.values()]);
   }
 
   saveClaims(): void {
-    this.writeRecord("claims", this.claims, "claims.json");
+    this.writeRecord("claims", this.claims);
   }
 
   private saveJtis(): void {
-    this.writeRecord("jtis", Object.fromEntries(this.usedJtis), "jtis.json");
+    this.writeRecord("jtis", Object.fromEntries(this.usedJtis));
   }
 
   saveKeyStore(): void {
@@ -271,11 +254,11 @@ export class BridgeState {
   }
 
   saveStandalone(): void {
-    if (this.standalone) this.writeRecord("standalone", this.standalone, "standalone.json");
+    if (this.standalone) this.writeRecord("standalone", this.standalone);
   }
 
   saveReports(): void {
-    this.writeRecord("reports", this.reports, "reports.json");
+    this.writeRecord("reports", this.reports);
   }
 
   /** One-time use of a jti (pairing code, keys ticket). Returns false when already used. */
