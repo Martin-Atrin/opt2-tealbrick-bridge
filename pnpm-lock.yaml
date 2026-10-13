@@ -234,7 +234,7 @@ packages:
         optional: true
 
   '@opt2-tealbrick/spec@https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.24/opt2-tealbrick-spec-0.1.24.tgz':
-    resolution: {tarball: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.24/opt2-tealbrick-spec-0.1.24.tgz}
+    resolution: {integrity: sha512-C9B/AbXJjsRmekxkzGM5aykXTmF09WGlsJSAOcA2couwl1hlLCfpLsHh/jxIuf6npgQRh1IEorwIG8uqxvuz5w==, tarball: https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.24/opt2-tealbrick-spec-0.1.24.tgz}
     version: 0.1.24
 
   '@opt2-tealbrick/spec@https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.25/opt2-tealbrick-spec-0.1.25.tgz':
