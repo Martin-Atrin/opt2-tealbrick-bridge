@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildOptions, runTurn, sessionEnv } from "../src/index.ts";
+import { buildOptions, type HarnessEvent, runTurn, sessionEnv, usageOf } from "../src/index.ts";
 
 test("session env is allow-listed: no Teal Brick or person credentials", () => {
   const env = sessionEnv({ PATH: "/bin", HOME: "/h", TB_PORTAL_URL: "x", TEALBRICK_OWNER: "y", CLERK_SESSION: "z", GH_TOKEN: "t", ANTHROPIC_API_KEY: "k" }, { passthrough: ["GH_TOKEN"], modelKeyEnv: "ANTHROPIC_API_KEY" });
@@ -39,4 +39,28 @@ test("a held result adds guidance and raises a held event; nothing is retried", 
   };
   await runTurn(sdk, "hi", { bridge: { agentId: "agt_X" }, cwd: "/w", env: {} }, (e) => events.push(e.type));
   assert.deepEqual(events, ["session", "held", "result"]);
+});
+
+test("tool search: MCP tools stay deferrable — the session env never carries a host ENABLE_TOOL_SEARCH and the relay is not alwaysLoad", () => {
+  const o = buildOptions({ bridge: { agentId: "agt_X" }, cwd: "/w", env: { PATH: "/bin", HOME: "/h", ENABLE_TOOL_SEARCH: "false" } });
+  assert.equal((o.env as Record<string, string>).ENABLE_TOOL_SEARCH, undefined, "a host setting cannot turn tool search off for the agent");
+  assert.equal(((o.mcpServers as Record<string, Record<string, unknown>>).tealbrick as Record<string, unknown>).alwaysLoad, undefined);
+});
+
+test("usage: a result carries tokens (modelUsage summed), cost, turns and the init model; is_error makes ok false", async () => {
+  const events: HarnessEvent[] = [];
+  const sdk = {
+    query() {
+      return (async function* () {
+        yield { type: "system", subtype: "init", session_id: "s1", model: "claude-main" };
+        yield { type: "result", subtype: "success", is_error: true, result: "Login expired", num_turns: 1, total_cost_usd: 0, usage: { input_tokens: 0, output_tokens: 0 }, modelUsage: {} };
+      })();
+    },
+  };
+  await runTurn(sdk, "hi", { bridge: { agentId: "agt_X" }, cwd: "/w", env: {} }, (e) => events.push(e));
+  const r = events.find((e) => e.type === "result");
+  assert.equal(r?.type === "result" && r.ok, false, "an error result is not ok");
+  assert.deepEqual(usageOf({ num_turns: 4, total_cost_usd: 0.3, usage: { input_tokens: 1, cache_creation_input_tokens: 2, cache_read_input_tokens: 3, output_tokens: 4 } }), { inputTokens: 1, cacheCreationInputTokens: 2, cacheReadInputTokens: 3, outputTokens: 4, costUsd: 0.3, numTurns: 4 });
+  assert.deepEqual(usageOf({ modelUsage: { a: { inputTokens: 1, outputTokens: 2, cacheReadInputTokens: 3, cacheCreationInputTokens: 4 }, b: { inputTokens: 10, outputTokens: 20, cacheReadInputTokens: 30, cacheCreationInputTokens: 40 } } }), { inputTokens: 11, cacheCreationInputTokens: 44, cacheReadInputTokens: 33, outputTokens: 22, model: "a,b" });
+  assert.equal(usageOf({ result: "text only" }), undefined);
 });

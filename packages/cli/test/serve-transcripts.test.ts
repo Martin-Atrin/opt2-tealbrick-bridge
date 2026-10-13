@@ -26,7 +26,8 @@ describe("F48: serve transcripts stay inside the agent folder", () => {
     mkdirSync(join(adopt, "work"), { recursive: true });
     process.env.FAKE_SDK_HOME = home;
     const before = new Set(listAll(home));
-    const run = await claudeRunner({ kind: "claude", cwd: "work", transcripts: "transcripts", sdkModule: FAKE }, "agt_x", { command: "tealbrick", args: ["bridge", "serve"] }, adopt);
+    const logs: { event: string; fields?: Record<string, unknown> }[] = [];
+    const run = await claudeRunner({ kind: "claude", cwd: "work", transcripts: "transcripts", sdkModule: FAKE }, "agt_x", { command: "tealbrick", args: ["bridge", "serve"] }, adopt, { log: (event, fields) => logs.push({ event, ...(fields ? { fields } : {}) }) });
     const r = await run("hello agent", { onHeld: () => undefined });
     assert.equal(r.ok, true);
     const opts = JSON.parse(readFileSync(join(home, "options.json"), "utf8")) as Record<string, unknown>;
@@ -48,6 +49,10 @@ describe("F48: serve transcripts stay inside the agent folder", () => {
     assert.ok(lines.some((l) => l.type === "tool_result" && l.name === "mcp__tealbrick__connect__buzz_post" && l.isError === true && l.code === "hook_failed"));
     assert.ok(lines.some((l) => l.type === "tool_result" && l.name === "mcp__tealbrick__knowledge__recall" && l.isError === false && l.code === undefined));
     assert.ok(!readFileSync(file, "utf8").includes("items"), "no tool payload in the transcript");
+    // usage per turn (coordinator 2026-10-13): modelUsage summed over models (main + helper), cost, turns, main model
+    const usage = { inputTokens: 5, cacheCreationInputTokens: 40, cacheReadInputTokens: 400, outputTokens: 9, costUsd: 0.05, numTurns: 2, model: "claude-test-model" };
+    assert.deepEqual(lines.find((l) => l.type === "result")?.usage, usage, "the transcript result line carries the usage");
+    assert.deepEqual(logs, [{ event: "serve.turn.result", fields: { harness: "claude", ok: true, ...usage } }], "one serve log line per turn, no payload");
   });
 
   it("F54: harness.memory keeps auto-memory inside the agent folder", async () => {

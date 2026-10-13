@@ -15,8 +15,9 @@
  * a turn; the server marks ambiguous runs `uncertain`. Due times and cron live on the server, not here.
  */
 import { spawn } from "node:child_process";
-import { mkdir, readFile, rename, writeFile } from "node:fs/promises";
-import { dirname, resolve as resolvePath } from "node:path";
+import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { dirname, join, resolve as resolvePath } from "node:path";
 import type { HeldResult, McpClient, McpToolResult } from "@opt2-tealbrick/bridge";
 import { channelSenderId } from "@opt2-tealbrick/manifest";
 import { TOOL_NAME_RULE } from "@opt2-tealbrick/spec/bridge";
@@ -121,7 +122,34 @@ export type HarnessSpec =
       turnTimeoutSeconds?: number;
     }
   /** any harness CLI: the prompt arrives on stdin; `{mcpCommand}` in an argument is replaced by the relay command */
-  | { kind: "command"; command: string[]; cwd?: string; passthroughEnv?: string[]; turnTimeoutSeconds?: number };
+  | { kind: "command"; command: string[]; cwd?: string; passthroughEnv?: string[]; turnTimeoutSeconds?: number }
+  /**
+   * F79: a Claude Code project folder (CLAUDE.md, .claude/) woken by serve: one headless `claude -p` per turn with
+   * ONLY this turn's relay as MCP server (temp config, strict) and only Teal Brick tools allowed by default.
+   */
+  | ClaudeCodeHarness;
+
+export interface ClaudeCodeHarness {
+  kind: "claude-code";
+  /** the Claude Code project folder (relative to the config file) */
+  cwd: string;
+  /** default CLAUDE_CODE_MAX_TURNS */
+  maxTurns?: number;
+  /** extra tools to allow next to `mcp__tealbrick` (e.g. ["Read"]); the always-disallowed tools cannot be added */
+  allowedTools?: string[];
+  model?: string;
+  /** default CLAUDE_CODE_TURN_TIMEOUT_S; SIGTERM to the own child, SIGKILL after a grace */
+  turnTimeoutSeconds?: number;
+  /** extra env names for the turn (the allow-list of the command harness applies; HOME and USER are in it) */
+  passthroughEnv?: string[];
+}
+
+export const CLAUDE_CODE_MAX_TURNS = 20;
+export const CLAUDE_CODE_TURN_TIMEOUT_S = 600;
+/** Tools a claude-code serve turn never gets (the turn acts through Teal Brick tools; config may only ADD allowed tools). */
+export const CLAUDE_CODE_DISALLOWED = ["Bash", "WebFetch", "WebSearch", "Write", "Edit"] as const;
+const CLAUDE_CODE_KILL_GRACE_MS = 10_000;
+const CLAUDE_CODE_MAX_STDOUT = 4 * 1024 * 1024;
 
 export interface ServeConfig {
   format: "tealbrick.agent-serve/1";
@@ -201,7 +229,7 @@ export function validateServeConfig(raw: unknown): ServeConfig {
     for (const f of ["due", "claim", "report"] as const) if (!isToolName(r?.[f])) throw new Error(`routine ${f} must be a <product>__<op> name: ${String(r?.[f])}`);
   }
   const h = c.harness as HarnessSpec | undefined;
-  if (!h || (h.kind !== "claude" && h.kind !== "command")) throw new Error("harness.kind must be claude or command");
+  if (!h || (h.kind !== "claude" && h.kind !== "command" && h.kind !== "claude-code")) throw new Error("harness.kind must be claude, command or claude-code");
   if (h.kind === "command" && (!Array.isArray(h.command) || h.command.length === 0 || !h.command.every((x) => typeof x === "string"))) throw new Error("harness.command: non-empty string array");
   if (h.turnTimeoutSeconds !== undefined && (!Number.isInteger(h.turnTimeoutSeconds) || h.turnTimeoutSeconds < 10 || h.turnTimeoutSeconds > 86_400)) throw new Error("harness.turnTimeoutSeconds: integer 10..86400");
   if (h.kind === "claude") {
@@ -210,6 +238,17 @@ export function validateServeConfig(raw: unknown): ServeConfig {
     if (h.builtinTools !== undefined && (!Array.isArray(h.builtinTools) || !h.builtinTools.every((t) => typeof t === "string" && /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(t)))) throw new Error("harness.builtinTools: tool names");
     if (h.appendSystemPromptFile !== undefined && typeof h.appendSystemPromptFile !== "string") throw new Error("harness.appendSystemPromptFile: a path");
   }
+  if (h.kind === "claude-code") {
+    if (typeof h.cwd !== "string" || h.cwd.length === 0) throw new Error("harness.cwd: the Claude Code project folder (relative to the config file)");
+    if (h.maxTurns !== undefined && (!Number.isInteger(h.maxTurns) || h.maxTurns < 1 || h.maxTurns > 200)) throw new Error("harness.maxTurns: integer 1..200");
+    if (h.model !== undefined && !(typeof h.model === "string" && /^[A-Za-z0-9][A-Za-z0-9._:[\]-]{0,99}$/.test(h.model))) throw new Error("harness.model: a model name");
+    if (h.allowedTools !== undefined) {
+      if (!Array.isArray(h.allowedTools) || h.allowedTools.length > 32 || !h.allowedTools.every((t) => typeof t === "string" && /^[A-Za-z][A-Za-z0-9_-]{0,127}$/.test(t))) throw new Error("harness.allowedTools: up to 32 tool names");
+      const no = h.allowedTools.filter((t) => (CLAUDE_CODE_DISALLOWED as readonly string[]).includes(t));
+      if (no.length) throw new Error(`harness.allowedTools: ${no.join(", ")} cannot be allowed (claude-code serve turns always disallow ${CLAUDE_CODE_DISALLOWED.join(", ")})`);
+    }
+  }
+  if ("passthroughEnv" in h && h.passthroughEnv !== undefined && (!Array.isArray(h.passthroughEnv) || !h.passthroughEnv.every((n) => typeof n === "string" && /^[A-Za-z_][A-Za-z0-9_]{0,127}$/.test(n)))) throw new Error("harness.passthroughEnv: env names");
   return c;
 }
 
@@ -666,7 +705,7 @@ export async function systemPromptOf(h: Extract<HarnessSpec, { kind: "claude" }>
   return parts.length ? parts.join("\n\n") : undefined;
 }
 
-export async function claudeRunner(h: Extract<HarnessSpec, { kind: "claude" }>, agentId: string, relay: { command: string; args: string[] }, configDir = process.cwd()): Promise<HarnessRunner> {
+export async function claudeRunner(h: Extract<HarnessSpec, { kind: "claude" }>, agentId: string, relay: { command: string; args: string[] }, configDir = process.cwd(), opts: { log?: ServeDeps["log"] } = {}): Promise<HarnessRunner> {
   const { runTurn } = await import("@opt2-tealbrick/harness-claude");
   const systemPrompt = await systemPromptOf(h, configDir);
   const spec = h.sdkModule ?? "@anthropic-ai/claude-agent-sdk";
@@ -679,6 +718,7 @@ export async function claudeRunner(h: Extract<HarnessSpec, { kind: "claude" }>, 
   return async (prompt, events, turnOpts) => {
     let ok = false;
     let summary: string | undefined;
+    let usage: Record<string, unknown> | undefined;
     const relayArgs = turnOpts?.onBehalfOf ? [...relay.args, "--on-behalf-of", encodeOnBehalfOf(turnOpts.onBehalfOf)] : relay.args;
     const transcript: Record<string, unknown>[] | null = h.transcripts ? [{ at: new Date().toISOString(), type: "prompt", text: prompt, ...(turnOpts?.onBehalfOf ? { onBehalfOf: turnOpts.onBehalfOf } : {}) }] : null;
     try {
@@ -708,11 +748,14 @@ export async function claudeRunner(h: Extract<HarnessSpec, { kind: "claude" }>, 
         if (e.type === "result") {
           ok = e.ok;
           if (e.text) summary = e.text;
+          if (e.usage) usage = { ...e.usage };
         }
       },
     );
     } finally {
       if (transcript && h.transcripts) await writeTranscript(resolvePath(configDir, h.transcripts), transcript).catch(() => undefined);
+      // usage per turn (tokens, cost, turns, model; never the prompt or the reply) in the serve log too
+      opts.log?.("serve.turn.result", { harness: "claude", ok, ...(usage ?? {}) });
     }
     return { ok, ...(summary ? { summary } : {}) };
   };
@@ -745,4 +788,145 @@ export async function commandRunner(h: Extract<HarnessSpec, { kind: "command" }>
       });
       child.stdin.end(prompt);
     });
+}
+
+/** The argv of one claude-code serve turn (F79): MCP-only by default; the config may only ADD allowed tools. */
+export function claudeCodeArgs(h: ClaudeCodeHarness, mcpConfig: string): string[] {
+  return [
+    "-p",
+    "--output-format",
+    "json",
+    "--max-turns",
+    String(h.maxTurns ?? CLAUDE_CODE_MAX_TURNS),
+    ...(h.model ? ["--model", h.model] : []),
+    "--mcp-config",
+    mcpConfig,
+    "--strict-mcp-config",
+    "--allowedTools",
+    "mcp__tealbrick",
+    ...(h.allowedTools ?? []).filter((t) => t !== "mcp__tealbrick"),
+    "--disallowedTools",
+    ...CLAUDE_CODE_DISALLOWED,
+  ];
+}
+
+/** The fields of Claude Code's `--output-format json` result that serve logs (never the result text or a prompt). */
+export function claudeCodeResult(stdout: string, usageOf?: (r: Record<string, unknown>) => Record<string, unknown> | undefined): { isError: boolean; subtype?: string; numTurns?: number; durationMs?: number; costUsd?: number; permissionDenials?: number; result?: string; [usage: string]: unknown } | null {
+  let v: unknown;
+  try {
+    v = JSON.parse(stdout.trim());
+  } catch {
+    // stream-like output: the last line that parses as the result
+    const last = stdout.trim().split("\n").reverse().find((l) => l.trim().startsWith("{"));
+    try {
+      v = last ? JSON.parse(last) : undefined;
+    } catch {
+      return null;
+    }
+  }
+  if (Array.isArray(v)) v = v.findLast((x) => x && typeof x === "object" && (x as { type?: unknown }).type === "result");
+  if (!v || typeof v !== "object") return null;
+  const r = v as Record<string, unknown>;
+  const num = (x: unknown) => (typeof x === "number" && Number.isFinite(x) ? x : undefined);
+  const out = {
+    isError: r.is_error === true,
+    ...(typeof r.subtype === "string" ? { subtype: r.subtype.slice(0, 40) } : {}),
+    ...(num(r.num_turns) !== undefined ? { numTurns: num(r.num_turns) } : {}),
+    ...(num(r.duration_ms) !== undefined ? { durationMs: num(r.duration_ms) } : {}),
+    ...(num(r.total_cost_usd) !== undefined ? { costUsd: num(r.total_cost_usd) } : {}),
+    ...(Array.isArray(r.permission_denials) ? { permissionDenials: r.permission_denials.length } : {}),
+    ...(typeof r.result === "string" ? { result: r.result } : {}),
+    // tokens + model (shared rule with the claude harness, harness-claude usageOf)
+    ...(usageOf?.(r) ?? {}),
+  };
+  return out;
+}
+
+/**
+ * F79: Claude Code harness. Per turn: a private temp dir (0700) with an MCP config (0600) whose ONLY server is this
+ * turn's relay (with `--on-behalf-of` when the turn has a sender: the claim may only narrow, L13), `claude -p` in the
+ * project folder with the prompt on stdin and the command harness's env allow-list, the result fields logged as
+ * `serve.turn.result` (no payload), the temp dir removed after the turn. A turn that runs past turnTimeoutSeconds
+ * gets SIGTERM, then SIGKILL — sent to the child this runner started, never to anything else (L20/L28).
+ */
+export async function claudeCodeRunner(
+  h: ClaudeCodeHarness,
+  relay: { command: string; args: string[] },
+  configDir: string,
+  opts: { log?: ServeDeps["log"]; env?: NodeJS.ProcessEnv; turnTimeoutMs?: number; killGraceMs?: number } = {},
+): Promise<HarnessRunner> {
+  const { sessionEnv, usageOf } = await import("@opt2-tealbrick/harness-claude");
+  const cwd = resolvePath(configDir, h.cwd);
+  const st = await stat(cwd).catch(() => null);
+  if (!st?.isDirectory()) throw new Error(`harness.cwd: ${cwd} is not a folder`);
+  const log = opts.log ?? (() => undefined);
+  const timeoutMs = opts.turnTimeoutMs ?? (h.turnTimeoutSeconds ?? CLAUDE_CODE_TURN_TIMEOUT_S) * 1000;
+  const graceMs = opts.killGraceMs ?? CLAUDE_CODE_KILL_GRACE_MS;
+  const source = opts.env ?? process.env;
+  return async (prompt, _events, turnOpts) => {
+    const args = turnOpts?.onBehalfOf ? [...relay.args, "--on-behalf-of", encodeOnBehalfOf(turnOpts.onBehalfOf)] : relay.args;
+    const env = sessionEnv(source, { ...(h.passthroughEnv ? { passthrough: h.passthroughEnv } : {}) });
+    const dir = await mkdtemp(join(env.TMPDIR || tmpdir(), "tealbrick-cc-"));
+    const mcpConfig = join(dir, "mcp.json");
+    const started = Date.now();
+    try {
+      await writeFile(mcpConfig, JSON.stringify({ mcpServers: { tealbrick: { type: "stdio", command: relay.command, args } } }), { mode: 0o600 });
+      const r = await new Promise<{ code: number | null; signal: NodeJS.Signals | null; timedOut: boolean; stdout: string; stderrBytes: number; spawnError?: boolean }>((done) => {
+        const child = spawn("claude", claudeCodeArgs(h, mcpConfig), { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+        let stdout = "";
+        let stderrBytes = 0;
+        let timedOut = false;
+        let killer: NodeJS.Timeout | undefined;
+        child.stdout.setEncoding("utf8");
+        child.stdout.on("data", (d: string) => {
+          if (stdout.length < CLAUDE_CODE_MAX_STDOUT) stdout += d;
+        });
+        child.stderr.on("data", (d: Buffer) => {
+          stderrBytes += d.length;
+        });
+        const timer = setTimeout(() => {
+          timedOut = true;
+          child.kill("SIGTERM");
+          killer = setTimeout(() => {
+            if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
+          }, graceMs);
+        }, timeoutMs);
+        let settled = false;
+        const finish = (v: { code: number | null; signal: NodeJS.Signals | null; spawnError?: boolean }) => {
+          if (settled) return;
+          settled = true;
+          clearTimeout(timer);
+          if (killer) clearTimeout(killer);
+          done({ ...v, timedOut, stdout, stderrBytes });
+        };
+        child.on("error", () => finish({ code: null, signal: null, spawnError: true }));
+        // "close" waits for the pipes; a process Claude Code started may keep one open, so "exit" ends the turn
+        // after a short drain at the latest
+        child.on("exit", (code, signal) => {
+          setTimeout(() => finish({ code, signal }), 2_000).unref();
+        });
+        child.on("close", (code, signal) => finish({ code, signal }));
+        child.stdin.on("error", () => undefined);
+        child.stdin.end(prompt);
+      });
+      const res = r.spawnError ? null : claudeCodeResult(r.stdout, (x) => usageOf(x) as Record<string, unknown> | undefined);
+      const ok = !r.spawnError && !r.timedOut && r.code === 0 && res !== null && !res.isError;
+      const { result: text, ...fields } = res ?? { isError: true };
+      log("serve.turn.result", {
+        harness: "claude-code",
+        ok,
+        exitCode: r.code,
+        ...(r.signal ? { signal: r.signal } : {}),
+        ...(r.timedOut ? { timedOut: true } : {}),
+        ...(r.spawnError ? { error: "claude did not start (is claude on PATH?)" } : res === null ? { error: "no JSON result on stdout" } : {}),
+        ...fields,
+        wallMs: Date.now() - started,
+        stderrBytes: r.stderrBytes,
+      });
+      const summary = r.spawnError ? "harness did not start" : r.timedOut ? "turn timed out" : (text ?? `exit code ${r.code ?? "none"}`);
+      return { ok, summary };
+    } finally {
+      await rm(dir, { recursive: true, force: true });
+    }
+  };
 }

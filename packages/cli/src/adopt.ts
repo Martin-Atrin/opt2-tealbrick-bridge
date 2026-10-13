@@ -11,7 +11,7 @@ import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
 import { chmod, copyFile, lstat, mkdir, readdir, readFile, realpath, rename, rm, stat, writeFile } from "node:fs/promises";
 import { basename, delimiter, dirname, join, relative, resolve } from "node:path";
-import { confirm, desktopConfigPath, mergeJsonConfig, mergeTomlConfig, planConnect, readExisting, writeAtomic } from "./connect.ts";
+import { claudeCodeScope, confirm, desktopConfigPath, mergeJsonConfig, mergeTomlConfig, planConnect, readExisting, writeAtomic } from "./connect.ts";
 import type { Ctx, Handler } from "./ctx.ts";
 import { CliError, EXIT, usageError } from "./io.ts";
 import { type AdoptSuggestion, agentLogin, probeAgent, selfRevoke, startDetached } from "./lead.ts";
@@ -102,6 +102,8 @@ export interface AdoptPlan {
   wake: "mentions" | "all";
   /** F30: Buzz channel ids to listen on (connect__buzz_read) */
   buzzChannels: string[];
+  /** F78 (claude-code): where the MCP entry goes */
+  scope?: { scope: "project" | "user"; dir: string };
 }
 
 /** §3: the one-screen plan (names and paths only). */
@@ -118,6 +120,7 @@ export function planText(p: AdoptPlan, files: string[]): string {
     `  persona        ${d.persona.files.length ? d.persona.files.join(", ") : "none"}`,
     ...d.persona.skipped.map((x) => `  persona skip   ${x.path} (${x.reason})`),
     `  connection     one owner approval in Portal (device flow); card "${p.name}"`,
+    ...(p.scope ? [p.scope.scope === "project" ? `  MCP scope      project: ${join(p.scope.dir, ".mcp.json")} (only Claude Code sessions in ${p.scope.dir} get this agent's tools)` : "  MCP scope      user (--scope user): every Claude Code session on this machine gets this agent's tools; adopt prints the claude mcp add command and writes no file"] : []),
     `  inbox          ${p.serve ? `${p.buzzChannels.length ? `Buzz ${p.buzzChannels.join(", ")}` : "auto: the Buzz channel you choose at approval, else Buzz DMs, else the chat-bot inbox (or --inbox buzz:<channel>)"}, wake: ${p.wake}` : "none (this harness runs itself)"}`,
     `  files to write ${files.join(", ") || "none"} (each existing file is backed up first)`,
   ];
@@ -297,7 +300,8 @@ export const adopt: Handler = async (ctx) => {
   if (ctx.v.undo === true) return adoptUndo(ctx);
   const home = ctx.io.env.HOME ?? "";
   if (!home) throw usageError("HOME is not set");
-  const d = await detect(ctx.io.env, ctx.cwd(), { ...(ctx.v.harness ? { harness: String(ctx.v.harness) } : {}), ...(ctx.v.persona ? { persona: String(ctx.v.persona) } : {}), ...(ctx.v["persona-append"] === true ? { personaAppend: true } : {}) });
+  // F78: the agent's Claude Code folder (--project) is where its CLAUDE.md and .mcp.json live
+  const d = await detect(ctx.io.env, ctx.v.project ? resolve(ctx.cwd(), ctx.v.project) : ctx.cwd(), { ...(ctx.v.harness ? { harness: String(ctx.v.harness) } : {}), ...(ctx.v.persona ? { persona: String(ctx.v.persona) } : {}), ...(ctx.v["persona-append"] === true ? { personaAppend: true } : {}) });
   if (!d.harness.chosen) {
     const why: Record<string, string> = { codex: "~/.codex/config.toml found", "claude-desktop": "Claude Desktop config found", "claude-code": "`claude` on PATH" };
     const choices: AdoptHarness[] = [...d.harness.candidates, ...(d.harness.candidates.includes("claude-sdk") ? [] : (["claude-sdk"] as AdoptHarness[]))];
@@ -318,7 +322,10 @@ export const adopt: Handler = async (ctx) => {
   if (ctx.v.wake !== undefined && ctx.v.wake !== "all" && ctx.v.wake !== "mentions") throw usageError("--wake must be mentions or all");
   const serveDefault = harness === "claude-sdk";
   const serve = ctx.v["no-serve"] === true ? false : ctx.v.serve === true ? true : serveDefault;
-  if (serve && harness !== "claude-sdk") throw usageError("--serve (agent serve config) is for the claude-sdk harness in phase 1; other harnesses run themselves");
+  // F79: claude-code gets a serve config only when asked (--serve): its own sessions run without serve
+  if (serve && harness !== "claude-sdk" && harness !== "claude-code") throw usageError("--serve (agent serve config) is for the claude-sdk and claude-code harnesses; other harnesses run themselves");
+  if (harness !== "claude-code" && (ctx.v.scope !== undefined || ctx.v.project !== undefined)) throw usageError("--scope and --project are for --harness claude-code");
+  const scope = harness === "claude-code" ? claudeCodeScope(ctx) : undefined;
   // F30: Buzz inboxes in addition to (or instead of) Connect's bot channel inbox
   const buzzChannels = String(ctx.v.inbox ?? "")
     .split(",")
@@ -329,11 +336,11 @@ export const adopt: Handler = async (ctx) => {
       if (!m) throw usageError(`--inbox takes buzz:<channel id> (comma-separated): ${x}`);
       return m[1] as string;
     });
-  const plan: AdoptPlan = { name, purpose: ctx.v.purpose ? String(ctx.v.purpose) : null, harness, detection: d, serve, wake, buzzChannels };
+  const plan: AdoptPlan = { name, purpose: ctx.v.purpose ? String(ctx.v.purpose) : null, harness, detection: d, serve, wake, buzzChannels, ...(scope ? { scope } : {}) };
   const prior = await findState(ctx, name, harness);
   // F32: the target config and the Teal Brick entries it already has. One existing entry → adopt REUSES it: the same
   // entry name and, when known, the same card (no second entry, no second card).
-  const target = harness === "codex" ? join(home, ".codex", "config.toml") : harness === "claude-desktop" ? desktopConfigPath(ctx) : null;
+  const target = harness === "codex" ? join(home, ".codex", "config.toml") : harness === "claude-desktop" ? desktopConfigPath(ctx) : scope?.scope === "project" ? join(scope.dir, ".mcp.json") : null;
   const existing = target ? await existingTealbrickEntries(harness, target) : [];
   const reuse = existing.length === 1 ? existing[0] : undefined;
   const entryName = reuse?.name ?? "tealbrick";
@@ -343,7 +350,7 @@ export const adopt: Handler = async (ctx) => {
   // --switch-to-stdio (that ends the harness's own OAuth login for the entry)
   const switchToStdio = ctx.v["switch-to-stdio"] === true;
   const keepRemote = !!reuse?.remote && !switchToStdio;
-  const wires = (harness === "claude-code" || harness === "claude-desktop" || harness === "codex") && !keepRemote;
+  const wires = ((harness === "claude-code" && scope?.scope === "project") || harness === "claude-desktop" || harness === "codex") && !keepRemote;
   const planned = [...(serve ? ["<adopt>/serve.json"] : []), ...(d.persona.files.length ? ["<adopt>/persona/persona.md"] : []), ...(wires ? [`${target ?? `${harness} MCP config`} (entry "${entryName}")`] : [])];
   const transport = (e: ExistingEntry) => (e.remote ? (switchToStdio ? "remote/OAuth → switched to the local stdio relay (--switch-to-stdio)" : "kept: remote OAuth (pass --switch-to-stdio to use the local relay)") : "kept: local stdio relay");
   const existingLines = existing.map((e) => `  EXISTING       ${target}: Teal Brick entry "${e.name}" (${e.remote ? "remote/OAuth" : "local relay"}${e.agt ? `, card ${e.agt}` : ""})${reuse ? ` → adopt REUSES it${reuseCard ? ` and card ${reuseCard}` : " (card unknown: pass --agent <agt_…> to keep the same card)"}; ${transport(e)}` : ""}`);
@@ -358,7 +365,7 @@ export const adopt: Handler = async (ctx) => {
     const preview = d.persona.files.length ? await buildPersona(d.persona.files, plan) : { review: [] as string[] };
     const reviewText = preview.review.length ? ["", "persona rewrites and lines to review:", ...preview.review.map((l) => `  ${l}`)] : [];
     ctx.emit(
-      { dryRun: true, plan: { ...plan, files: planned }, existing: prior ? { agent: prior.state.agt, connection: prior.state.con } : null, existingEntries: existing, target, entry: entryName, card: reuseCard, transport: reuse ? (keepRemote ? "remote" : "stdio") : null, suggestion, personaReview: preview.review },
+      { dryRun: true, plan: { ...plan, files: planned }, ...(scope ? { scope: scope.scope } : {}), existing: prior ? { agent: prior.state.agt, connection: prior.state.con } : null, existingEntries: existing, target, entry: entryName, card: reuseCard, transport: reuse ? (keepRemote ? "remote" : "stdio") : null, suggestion, personaReview: preview.review },
       `${text}${reviewText.length ? `\n${reviewText.join("\n")}` : ""}\n\n--dry-run: nothing was written.`,
     );
     return;
@@ -417,17 +424,21 @@ export const adopt: Handler = async (ctx) => {
     }
   }
 
-  // §8 serve config (claude-sdk): persona by file, wake
+  // §8 serve config: claude-sdk (persona by file) or claude-code (F79: the project folder; Claude Code reads its own
+  // CLAUDE.md there), wake
   if (serve) {
-    const harnessCfg: Record<string, unknown> = {
-      kind: "claude",
-      // F45: the harness works in <adopt dir>/work (0700), never in the shell's cwd
-      cwd: "work",
-      // F48: no SDK transcript under ~/.claude/projects/; turns are logged inside the adopt dir instead
-      transcripts: "transcripts",
-      modelKeyEnv: "ANTHROPIC_API_KEY",
-      ...(state.persona ? { appendSystemPromptFile: relative(adir, state.persona.path) } : {}),
-    };
+    const harnessCfg: Record<string, unknown> =
+      harness === "claude-code"
+        ? { kind: "claude-code", cwd: (scope as { dir: string }).dir }
+        : {
+            kind: "claude",
+            // F45: the harness works in <adopt dir>/work (0700), never in the shell's cwd
+            cwd: "work",
+            // F48: no SDK transcript under ~/.claude/projects/; turns are logged inside the adopt dir instead
+            transcripts: "transcripts",
+            modelKeyEnv: "ANTHROPIC_API_KEY",
+            ...(state.persona ? { appendSystemPromptFile: relative(adir, state.persona.path) } : {}),
+          };
     // F35: with --inbox buzz:<ch> the agent listens there; otherwise the serve-time auto inbox (joined Buzz channel →
     // Buzz DMs → the bot channel inbox only when a chat bot exists), re-resolved while serve runs
     const inboxes = [
@@ -435,8 +446,10 @@ export const adopt: Handler = async (ctx) => {
       ...plan.buzzChannels.map((channel) => ({ tool: "connect__buzz_read", args: { channel }, cursor: { param: "since", from: "max:createdAt" }, items: "messages", id: "id", skipIf: { fromSelf: true }, wake })),
     ];
     const cfg = { format: "tealbrick.agent-serve/1", harness: harnessCfg, pollSeconds: 30, holds: true, inboxes };
-    await mkdir(join(adir, "work"), { recursive: true, mode: 0o700 });
-    await chmod(join(adir, "work"), 0o700);
+    if (harness !== "claude-code") {
+      await mkdir(join(adir, "work"), { recursive: true, mode: 0o700 });
+      await chmod(join(adir, "work"), 0o700);
+    }
     const text2 = `${JSON.stringify(cfg, null, 2)}\n`;
     const path = join(adir, "serve.json");
     if (state.serve?.digest !== digestOf(text2) || !existsSync(path)) {
@@ -468,7 +481,9 @@ export const adopt: Handler = async (ctx) => {
   // §9 verify (reads only; writes need the owner's write grant)
   const probe = await probeAgent(ctx, item);
   const running = started ? null : await serveRunning(ctx, item.con);
-  const serveCmd = state.serve ? `tealbrick agent serve --file ${state.serve.path} --agent ${item.agt} --supervise` : null;
+  const serveCmd = state.serve ? `tealbrick agent serve --file ${state.serve.path} --agent ${item.agt} --detach` : null;
+  // F78: user scope is never written by adopt; the owner runs the printed command (Claude Code's own file)
+  const userScopeCmd = scope?.scope === "user" ? (await planConnect({ ...ctx, v: { ...ctx.v, local: true, remote: undefined }, g: { ...ctx.g, agent: item.agt, agents: [item.agt] } }, "claude-code")).text.split("\n").find((l) => l.startsWith("claude mcp add")) ?? null : null;
   const report = {
     agent: item.agt,
     connection: item.con,
@@ -483,6 +498,7 @@ export const adopt: Handler = async (ctx) => {
     serve: serveCmd,
     started,
     running,
+    ...(scope ? { scope: scope.scope, ...(userScopeCmd ? { mcpAdd: userScopeCmd } : {}) } : {}),
   };
   ctx.emit(
     report,
@@ -491,6 +507,7 @@ export const adopt: Handler = async (ctx) => {
       `bridge ${probe.state}, tools ${probe.tools ?? "-"}${probe.tools === 0 ? " — NO TOOLS: the approval granted no operations (owner: tick the grants on the card)" : ""}`,
       changes.length ? `changed: ${changes.join(", ")}` : "nothing changed (already adopted)",
       ...(report.backups.length ? [`backups: ${report.backups.join(", ")}`] : []),
+      ...(userScopeCmd ? [`user scope: run this yourself (adopt does not edit ~/.claude.json): ${userScopeCmd}`] : []),
       ...(personaReview.length ? ["review these persona lines (tool or channel references):", ...personaReview.map((l) => `  ${l}`)] : []),
       ...(started ? [`started agent serve (supervisor pid ${started.pid ?? "?"}), log ${started.log}`] : running ? [`serve running (supervisor pid ${running.pid}, last poll ${running.lastPollAt ?? "never"})`] : serveCmd ? [`run: ${serveCmd}  (or re-run adopt with --start)`] : []),
       "test: ask the owner to send the agent a message in the Teal Brick inbox; writes need the owner's write grant.",

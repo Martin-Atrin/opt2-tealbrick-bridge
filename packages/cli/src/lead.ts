@@ -5,7 +5,6 @@
 import { chmod, mkdtemp, writeFile } from "node:fs/promises";
 import { hostname as osHostname, tmpdir } from "node:os";
 import { dirname, join, resolve } from "node:path";
-import { fileURLToPath } from "node:url";
 import {
   enrolBridge,
   type ManifestApi,
@@ -15,13 +14,14 @@ import {
 } from "@opt2-tealbrick/bridge";
 import type { AgentId, Ed25519PublicJwk } from "@opt2-tealbrick/spec/credentials";
 import type { DeviceAgentTokenResult, DeviceStart, DeviceStartAgentInput, DeviceTokenInput } from "@opt2-tealbrick/spec/routes";
+import { cliEntry, relayCommand } from "./connect.ts";
 import type { Ctx, Handler } from "./ctx.ts";
 import { requirePos } from "./ctx.ts";
 import { CliError, EXIT, isRecord, usageError } from "./io.ts";
 import { defaultOpenUrl } from "./owner.ts";
 import { type AgentItem, pickAgentItem, readAgentItems as readItems, serveRelay } from "./relay-main.ts";
 import { requireSession } from "./session.ts";
-import { AGENT_ITEM_PREFIX, relayStoreArgs } from "./store.ts";
+import { AGENT_ITEM_PREFIX } from "./store.ts";
 import { CLIENT_ID } from "./version.ts";
 
 let apiCache: ManifestApi | undefined;
@@ -441,11 +441,16 @@ async function agentServe(ctx: Ctx): Promise<void> {
   const mcp = connectMcp({ streams: { input: fromRelay, output: toRelay } });
   await mcp.initialize("tealbrick-agent-serve");
   // the harness starts this relay with a filtered env (no TB_*, no XDG_CONFIG_HOME): the store choice travels as argv
-  const relayCmd = { command: process.execPath, args: [process.argv[1] ?? "tealbrick", "bridge", "serve", "--stdio", "--agent", item.agt, ...relayStoreArgs(ctx.io.env), ...(logFile ? ["--log-file", logFile] : [])] };
+  // F77: this install's own node + main.js (absolute), never a bare `tealbrick` or argv[1]
+  const base = relayCommand(item.agt, ctx.io.env);
+  const relayCmd = { command: base.command, args: [...base.args, ...(logFile ? ["--log-file", logFile] : [])] };
+  const configDir = dirname(resolve(ctx.v.file as string));
   const runTurn =
     cfg.harness.kind === "claude"
-      ? await serve.claudeRunner(cfg.harness, item.agt, relayCmd, dirname(resolve(ctx.v.file as string)))
-      : await serve.commandRunner(cfg.harness, [relayCmd.command, ...relayCmd.args].map((a) => (/\s/.test(a) ? JSON.stringify(a) : a)).join(" "));
+      ? await serve.claudeRunner(cfg.harness, item.agt, relayCmd, configDir, { log: logLine })
+      : cfg.harness.kind === "claude-code"
+        ? await serve.claudeCodeRunner(cfg.harness, relayCmd, configDir, { log: logLine })
+        : await serve.commandRunner(cfg.harness, [relayCmd.command, ...relayCmd.args].map((a) => (/\s/.test(a) ? JSON.stringify(a) : a)).join(" "));
   const abort = new AbortController();
   for (const sig of ["SIGINT", "SIGTERM"] as const)
     process.once(sig, () => {
@@ -514,7 +519,7 @@ export async function startDetached(ctx: Ctx, o: { file: string; agt: string; co
   const fd = openSync(o.log, "a", 0o600);
   try {
     // this package's own entry (dist/main.js next to this file; main.ts when run from source), never argv[1]
-    const entry = fileURLToPath(new URL(import.meta.url.endsWith(".ts") ? "./main.ts" : "./main.js", import.meta.url));
+    const entry = cliEntry();
     const child = spawn(process.execPath, [entry, "agent", "serve", "--file", o.file, "--agent", o.agt, "--supervise", "--log", o.log], { detached: true, cwd: o.cwd ?? dirname(o.file), stdio: ["ignore", fd, fd], env: ctx.io.env as NodeJS.ProcessEnv });
     child.unref();
     return { pid: child.pid ?? null, log: o.log };

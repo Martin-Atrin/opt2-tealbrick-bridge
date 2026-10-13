@@ -3,6 +3,7 @@ import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import type { Readable } from "node:stream";
+import { fileURLToPath } from "node:url";
 import type { Ctx, Handler } from "./ctx.ts";
 import { requirePos } from "./ctx.ts";
 import { unifiedDiff } from "./diff.ts";
@@ -81,6 +82,8 @@ export interface ConnectPlan {
   toml: string[] | null;
   /** Where --write would write, or null. */
   target: string | null;
+  /** claude-code only (F78): project (.mcp.json in the agent folder) or user */
+  scope?: "project" | "user";
   text: string;
 }
 
@@ -106,10 +109,44 @@ export function stdioArgs(agt: string, env: Record<string, string | undefined> =
   return ["bridge", "serve", "--stdio", "--agent", agt, ...relayStoreArgs(env)];
 }
 
+/** This package's own entry: dist/main.js next to this file (main.ts when run from source), absolute. */
+export function cliEntry(): string {
+  return fileURLToPath(new URL(import.meta.url.endsWith(".ts") ? "./main.ts" : "./main.js", import.meta.url));
+}
+
+/**
+ * F77: the relay command a harness config gets: THIS node binary + THIS install's main.js, both absolute, so a
+ * folder-local install works without `tealbrick` on PATH. The relay needs no Portal URL (the agent item names the
+ * bridge); the credential-store choice travels as argv (harness env filters drop TB_* and XDG_CONFIG_HOME).
+ */
+export function relayCommand(agt: string, env: Record<string, string | undefined> = {}): { command: string; args: string[] } {
+  return { command: process.execPath, args: [cliEntry(), ...stdioArgs(agt, env)] };
+}
+
+/** POSIX shell quoting for a printed command (paths may contain spaces, e.g. "Application Support"). */
+export function shellQuote(a: string): string {
+  return /^[A-Za-z0-9_@%+=:,./-]+$/.test(a) ? a : `'${a.replaceAll("'", "'\\''")}'`;
+}
+
+/** F78: where a Claude Code entry goes: the agent's project folder (.mcp.json, default) or the user scope. */
+export interface ClaudeCodeScope {
+  scope: "project" | "user";
+  /** the project folder (absolute); the .mcp.json target is <dir>/.mcp.json */
+  dir: string;
+}
+
+export function claudeCodeScope(ctx: Ctx): ClaudeCodeScope {
+  const s = ctx.v.scope ?? "project";
+  if (s !== "project" && s !== "user") throw usageError("--scope must be project or user");
+  if (s === "user" && ctx.v.project !== undefined) throw usageError("--project is for --scope project");
+  return { scope: s, dir: resolve(ctx.cwd(), ctx.v.project ?? ".") };
+}
+
 export async function planConnect(ctx: Ctx, harness: Harness): Promise<ConnectPlan> {
   if (ctx.v.remote === true && ctx.v.local === true) throw usageError("pass --remote or --local, not both");
   const info = await readAgentInfo(ctx);
-  const stdio = (): Record<string, unknown> => ({ command: "tealbrick", args: stdioArgs(needAgent(info.agt), ctx.io.env) });
+  if (harness !== "claude-code" && (ctx.v.scope !== undefined || ctx.v.project !== undefined)) throw usageError("--scope and --project are for claude-code");
+  const stdio = (): { command: string; args: string[] } => relayCommand(needAgent(info.agt), ctx.io.env);
   switch (harness) {
     case "claude-desktop": {
       if (ctx.v.local !== true) {
@@ -139,27 +176,27 @@ export async function planConnect(ctx: Ctx, harness: Harness): Promise<ConnectPl
       return { harness, mode: "local", url: null, entry: null, toml, target, text: `[mcp_servers.tealbrick]\n${toml.join("\n")}` };
     }
     case "claude-code": {
-      const target = resolve(ctx.cwd(), ".mcp.json");
+      // F78: project scope (<dir>/.mcp.json) by default: only Claude Code sessions in that folder get this agent's
+      // tools and key. User scope (every session on the machine) only with an explicit --scope user, and it is
+      // printed as a `claude mcp add` command: Claude Code's own ~/.claude.json is never edited here.
+      const sc = claudeCodeScope(ctx);
+      const target = sc.scope === "project" ? join(sc.dir, ".mcp.json") : null;
+      const where = sc.scope === "project" ? `scope project: ${target} (only Claude Code sessions in ${sc.dir} get these tools)` : "scope user: every Claude Code session on this machine gets these tools";
       if (ctx.v.remote === true) {
         const url = mcpUrl(info.bridgeUrl);
         const entry = { type: "http", url };
-        return { harness, mode: "remote", url, entry, toml: null, target, text: `${JSON.stringify({ mcpServers: { tealbrick: entry } }, null, 2)}\n\nOr: claude mcp add --transport http --scope user tealbrick ${url}` };
+        const add = `claude mcp add --transport http --scope ${sc.scope} tealbrick ${shellQuote(url)}`;
+        const text = sc.scope === "project" ? `${where}\n${JSON.stringify({ mcpServers: { tealbrick: entry } }, null, 2)}\n\nOr, in ${sc.dir}: ${add}` : `${where}\n${add}`;
+        return { harness, mode: "remote", url, entry, toml: null, target, scope: sc.scope, text };
       }
-      const agt = needAgent(info.agt);
       const entry = stdio();
-      return {
-        harness,
-        mode: "local",
-        url: null,
-        entry,
-        toml: null,
-        target,
-        text: `claude mcp add --scope user tealbrick -- tealbrick ${stdioArgs(agt, ctx.io.env).join(" ")}\n\nOr put this in ./.mcp.json:\n${JSON.stringify({ mcpServers: { tealbrick: entry } }, null, 2)}`,
-      };
+      const add = `claude mcp add --scope ${sc.scope} tealbrick -- ${[entry.command, ...entry.args].map(shellQuote).join(" ")}`;
+      const text = sc.scope === "project" ? `${where}\n${JSON.stringify({ mcpServers: { tealbrick: entry } }, null, 2)}\n\nWrite it: tealbrick connect claude-code --write${ctx.v.project ? ` --project ${shellQuote(sc.dir)}` : ""}\nOr, in ${sc.dir}: ${add}` : `${where}\n${add}`;
+      return { harness, mode: "local", url: null, entry, toml: null, target, scope: sc.scope, text };
     }
     case "generic": {
       const out: Record<string, unknown> = {};
-      if (info.agt) out.stdio = { command: "tealbrick", args: stdioArgs(needAgent(info.agt), ctx.io.env) };
+      if (info.agt) out.stdio = stdio();
       if (info.bridgeUrl) out.remote = { url: mcpUrl(info.bridgeUrl) };
       if (Object.keys(out).length === 0) throw usageError("nothing to print: pass --agent <agt_…> and/or --bridge <url>");
       return { harness, mode: "print", url: info.bridgeUrl ? mcpUrl(info.bridgeUrl) : null, entry: out, toml: null, target: null, text: JSON.stringify(out, null, 2) };
@@ -271,11 +308,12 @@ export const connect: Handler = async (ctx) => {
   const write = ctx.v.write === true;
 
   if (!write) {
-    ctx.emit({ harness, mode: plan.mode, url: plan.url, entry: plan.entry ?? undefined, toml: plan.toml ? `[mcp_servers.tealbrick]\n${plan.toml.join("\n")}` : undefined, target: plan.target, written: false }, plan.text);
+    ctx.emit({ harness, mode: plan.mode, ...(plan.scope ? { scope: plan.scope } : {}), url: plan.url, entry: plan.entry ?? undefined, toml: plan.toml ? `[mcp_servers.tealbrick]\n${plan.toml.join("\n")}` : undefined, target: plan.target, written: false }, plan.text);
     return;
   }
 
   if (plan.target === null || (harness === "claude-desktop" && plan.mode === "remote")) {
+    if (plan.scope === "user") throw usageError("--scope user is not written by tealbrick (Claude Code keeps it in its own ~/.claude.json): run the printed claude mcp add command, or drop --scope user to write <folder>/.mcp.json");
     throw usageError(harness === "claude-desktop" ? "claude-desktop --write needs --local (the remote form has no file)" : `${harness} has no file to write; it prints only`);
   }
   const target = plan.target;
@@ -294,6 +332,6 @@ export const connect: Handler = async (ctx) => {
   }
   const backup = await writeAtomic(ctx, target, old, next);
   ctx.say(`Wrote ${target}${backup ? ` (backup: ${backup})` : ""}.`);
-  ctx.emit({ harness, target, written: true, backup }, `wrote ${target}`);
+  ctx.emit({ harness, ...(plan.scope ? { scope: plan.scope } : {}), target, written: true, backup }, `wrote ${target}`);
 };
 

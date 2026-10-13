@@ -65,6 +65,10 @@ export const OPTIONS = {
   "supervised-child": { type: "boolean" },
   // connect
   write: { type: "boolean" },
+  /** F78: connect/adopt claude-code: project (default, <dir>/.mcp.json) or user */
+  scope: { type: "string" },
+  /** F78: connect/adopt claude-code: the agent's project folder (default: the current folder) */
+  project: { type: "string" },
   remote: { type: "boolean" },
   local: { type: "boolean" },
   bridge: { type: "string" },

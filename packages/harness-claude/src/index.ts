@@ -150,8 +150,50 @@ export type HarnessEvent =
   /** F57: the outcome of one tool call (error code from the Teal Brick error envelope when there is one; no payload) */
   | { type: "tool_result"; name: string; isError: boolean; code?: string }
   | { type: "held"; tool: string; holdId: string; checkWith: string; expiresAt: string }
-  | { type: "result"; ok: boolean; text?: string }
+  /** `usage`: token and cost totals of the turn (no payload), see usageOf */
+  | { type: "result"; ok: boolean; text?: string; usage?: TurnUsage }
   | { type: "error"; code: string };
+
+/** Token and cost totals of one turn (Claude Agent SDK result message, or `claude -p --output-format json`). */
+export interface TurnUsage {
+  inputTokens: number;
+  cacheCreationInputTokens: number;
+  cacheReadInputTokens: number;
+  outputTokens: number;
+  costUsd?: number;
+  numTurns?: number;
+  /** the main model (system init), else the model(s) named in modelUsage */
+  model?: string;
+}
+
+const num = (x: unknown): number | undefined => (typeof x === "number" && Number.isFinite(x) ? x : undefined);
+
+/**
+ * The usage of a result message: per-model totals (`modelUsage`, which also counts subagent and internal calls)
+ * summed, else the main-loop `usage`. Numbers and model names only, never content.
+ */
+export function usageOf(result: Record<string, unknown>, model?: string): TurnUsage | undefined {
+  const mu = result.modelUsage && typeof result.modelUsage === "object" ? (result.modelUsage as Record<string, Record<string, unknown>>) : undefined;
+  const u = result.usage && typeof result.usage === "object" ? (result.usage as Record<string, unknown>) : undefined;
+  let t: Omit<TurnUsage, "costUsd" | "numTurns" | "model"> | undefined;
+  if (mu && Object.keys(mu).length) {
+    t = { inputTokens: 0, cacheCreationInputTokens: 0, cacheReadInputTokens: 0, outputTokens: 0 };
+    for (const m of Object.values(mu)) {
+      t.inputTokens += num(m?.inputTokens) ?? 0;
+      t.cacheCreationInputTokens += num(m?.cacheCreationInputTokens) ?? 0;
+      t.cacheReadInputTokens += num(m?.cacheReadInputTokens) ?? 0;
+      t.outputTokens += num(m?.outputTokens) ?? 0;
+    }
+  } else if (u) {
+    t = { inputTokens: num(u.input_tokens) ?? 0, cacheCreationInputTokens: num(u.cache_creation_input_tokens) ?? 0, cacheReadInputTokens: num(u.cache_read_input_tokens) ?? 0, outputTokens: num(u.output_tokens) ?? 0 };
+  }
+  if (!t) return undefined;
+  const names = mu ? Object.keys(mu).map((k) => k.slice(0, 80)) : [];
+  const m = model ?? (names.length ? names.join(",") : undefined);
+  const cost = num(result.total_cost_usd);
+  const turns = num(result.num_turns);
+  return { ...t, ...(cost !== undefined ? { costUsd: cost } : {}), ...(turns !== undefined ? { numTurns: turns } : {}), ...(m ? { model: m } : {}) };
+}
 
 /** Runs one turn and maps SDK messages to a small event stream for the host UI (TBD chat). */
 export async function runTurn(sdk: ClaudeSdk, prompt: string, o: SessionOptions & { resume?: string }, onEvent: (e: HarnessEvent) => void): Promise<void> {
@@ -164,7 +206,9 @@ export async function runTurn(sdk: ClaudeSdk, prompt: string, o: SessionOptions 
   options.abortController = abort;
   try {
     const toolNames = new Map<string, string>();
+    let model: string | undefined;
     for await (const m of sdk.query({ prompt, options })) {
+      if (m.type === "system" && m.subtype === "init" && typeof m.model === "string") model = m.model.slice(0, 80);
       if (m.type === "system" && m.subtype === "init" && typeof m.session_id === "string") onEvent({ type: "session", sessionId: m.session_id });
       if (m.type === "assistant" && Array.isArray(m.message?.content)) {
         for (const block of m.message.content as { type: string; text?: string; name?: string }[]) {
@@ -185,7 +229,11 @@ export async function runTurn(sdk: ClaudeSdk, prompt: string, o: SessionOptions 
           onEvent({ type: "tool_result", name, isError, ...(code ? { code } : {}) });
         }
       }
-      if (m.type === "result") onEvent({ type: "result", ok: m.subtype === "success", ...(typeof m.result === "string" ? { text: m.result } : {}) });
+      if (m.type === "result") {
+        const usage = usageOf(m, model);
+        // an error result can carry subtype "success" (e.g. "Login expired"): is_error decides too
+        onEvent({ type: "result", ok: m.subtype === "success" && m.is_error !== true, ...(typeof m.result === "string" ? { text: m.result } : {}), ...(usage ? { usage } : {}) });
+      }
     }
   } catch (e) {
     onEvent({ type: "error", code: abort.signal.aborted ? "turn_timeout" : e instanceof Error ? e.name : "error" });

@@ -26,8 +26,9 @@ Owner mode (person session; reads and drafts only):
   register agents --file <agents.json> [--draft <drf>]
 Harness:
   connect <claude-desktop|codex|claude-code|generic> [--agent <agt>] [--remote|--local] [--write [--yes]] [--bridge <url>]
+        claude-code: [--scope project|user] [--project <dir>]   default project scope: <dir>/.mcp.json (dir = current folder)
   adopt [--harness auto|claude-sdk|claude-code|claude-desktop|codex|command] [--name <card>] [--purpose <text>]
-        [--persona <file> [--persona-append]] [--serve|--no-serve] [--wake mentions|all] [--inbox buzz:<channel>,…] [--keep-existing] [--switch-to-stdio] [--start] [--dry-run] [--yes] | adopt --undo [--name <card>|--agent <agt>] [--purge]
+        [--persona <file> [--persona-append]] [--serve|--no-serve] [--wake mentions|all] [--scope project|user] [--project <dir>] [--inbox buzz:<channel>,…] [--keep-existing] [--switch-to-stdio] [--start] [--dry-run] [--yes] | adopt --undo [--name <card>|--agent <agt>] [--purge]
         onboard an agent already on this machine: one command, one owner approval (names and paths only, never secret values)
 Agent mode (agent items only):
   agent login (--agent <agt>... | --file <agents.json> | --create [--grant <product>[:read+create+…],…] [--channel buzz:<id>|new:<name>])

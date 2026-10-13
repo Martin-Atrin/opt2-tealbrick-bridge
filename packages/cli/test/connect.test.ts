@@ -2,10 +2,14 @@ import assert from "node:assert/strict";
 import { mkdir, readdir, readFile, stat, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { afterEach, beforeEach, describe, it } from "node:test";
+import { fileURLToPath } from "node:url";
 import { Harness } from "./fixtures.ts";
 
 const AGT = "agt_01HXYZ";
 const BRIDGE = "https://bridge.example.test";
+// F77: the relay command is THIS node + THIS install's main (absolute), never a bare `tealbrick`
+const MAIN = fileURLToPath(new URL("../src/main.ts", import.meta.url));
+const RELAY = { command: process.execPath, args: [MAIN, "bridge", "serve", "--stdio", "--agent", AGT] };
 
 async function put(path: string, text: string): Promise<void> {
   await mkdir(dirname(path), { recursive: true });
@@ -37,19 +41,30 @@ describe("connect", () => {
     assert.equal(dsk.json.url, `${BRIDGE}/mcp`);
 
     const dskLocal = await h.run(["connect", "claude-desktop", "--local", "--agent", AGT, "--json"]);
-    assert.deepEqual(dskLocal.json.entry, { command: "tealbrick", args: ["bridge", "serve", "--stdio", "--agent", AGT] });
+    assert.deepEqual(dskLocal.json.entry, RELAY);
 
     const cx = await h.run(["connect", "codex", "--agent", AGT]);
-    assert.match(cx.out, /\[mcp_servers\.tealbrick\]\ncommand = "tealbrick"\nargs = \["bridge", "serve", "--stdio", "--agent", "agt_01HXYZ"\]/);
+    assert.ok(cx.out.includes(`[mcp_servers.tealbrick]\ncommand = ${JSON.stringify(process.execPath)}\nargs = [${RELAY.args.map((a) => JSON.stringify(a)).join(", ")}]`), cx.out);
     const cxRemote = await h.run(["connect", "codex", "--remote", "--bridge", BRIDGE]);
     assert.match(cxRemote.out, /url = "https:\/\/bridge\.example\.test\/mcp"/);
 
+    // F78: project scope by default (<cwd>/.mcp.json); the printed command uses --scope project
     const cc = await h.run(["connect", "claude-code", "--agent", AGT]);
-    assert.match(cc.out, /claude mcp add --scope user tealbrick -- tealbrick bridge serve --stdio --agent agt_01HXYZ/);
+    assert.match(cc.out, /scope project: .*\.mcp\.json/);
+    assert.ok(cc.out.includes(`claude mcp add --scope project tealbrick -- ${process.execPath} ${MAIN} bridge serve --stdio --agent agt_01HXYZ`), cc.out);
+    assert.ok(!/--scope user/.test(cc.out), "user scope never by default");
+    const ccJson = await h.run(["connect", "claude-code", "--agent", AGT, "--json"]);
+    assert.equal(ccJson.json.scope, "project");
+    assert.equal(ccJson.json.target, mcpJson);
+    const ccDir = await h.run(["connect", "claude-code", "--agent", AGT, "--project", "agents/goobo", "--json"]);
+    assert.equal(ccDir.json.target, join(h.cwd, "agents", "goobo", ".mcp.json"), "--project <dir> names the agent folder");
+    const ccUser = await h.run(["connect", "claude-code", "--agent", AGT, "--scope", "user", "--json"]);
+    assert.equal(ccUser.json.scope, "user");
+    assert.equal(ccUser.json.target, null, "user scope has no file tealbrick writes");
 
     const gen = await h.run(["connect", "generic", "--agent", AGT, "--bridge", BRIDGE, "--json"]);
     assert.equal(gen.json.entry.remote.url, `${BRIDGE}/mcp`);
-    assert.equal(gen.json.entry.stdio.command, "tealbrick");
+    assert.deepEqual(gen.json.entry.stdio, RELAY);
 
     assert.equal(h.portal.requests.length, 0);
     for (const p of [desktop, codex, mcpJson]) await assert.rejects(stat(p));
@@ -81,7 +96,7 @@ describe("connect", () => {
     const after = JSON.parse(await readFile(desktop, "utf8"));
     assert.equal(after.theme, "dark");
     assert.deepEqual(after.mcpServers.other, { command: "x" });
-    assert.deepEqual(after.mcpServers.tealbrick, { command: "tealbrick", args: ["bridge", "serve", "--stdio", "--agent", AGT] });
+    assert.deepEqual(after.mcpServers.tealbrick, RELAY);
     const bak = await baks(desktop);
     assert.equal(bak.length, 1);
     assert.match(bak[0] as string, /\.bak-20261011T120000Z$/);
@@ -130,7 +145,7 @@ describe("connect", () => {
     assert.equal(r1.code, 0, r1.err);
     const t1 = await readFile(codex, "utf8");
     assert.ok(t1.startsWith(original), "existing content untouched");
-    assert.match(t1, /\n\n\[mcp_servers\.tealbrick\]\ncommand = "tealbrick"\nargs = \["bridge", "serve", "--stdio", "--agent", "agt_01HXYZ"\]\n$/);
+    assert.ok(t1.endsWith(`\n\n[mcp_servers.tealbrick]\ncommand = ${JSON.stringify(process.execPath)}\nargs = [${RELAY.args.map((a) => JSON.stringify(a)).join(", ")}]\n`), t1);
     assert.equal((await baks(codex)).length, 1);
 
     // replace: now with another table after it and a stale tealbrick body

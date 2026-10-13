@@ -11,6 +11,7 @@ import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 import { manifestApi } from "@opt2-tealbrick/bridge";
+import { validateServeConfig } from "../src/serve.ts";
 import { Harness } from "./fixtures.ts";
 
 const api = manifestApi();
@@ -242,5 +243,40 @@ describe("tealbrick adopt (C96 phase 1)", () => {
     const real = await h.run(["adopt", "--harness", "codex", "--name", "Codex agent", "--agent", AGT, "--yes", "--json"]);
     assert.equal(real.code, 0, real.err);
     assert.equal(await readFile(cfg, "utf8"), original, "the remote entry is not rewritten");
+  });
+  test("F78/F79: claude-code — project scope by default (the plan says which), --serve writes a claude-code serve config; --scope user writes no file", async () => {
+    const proj = join(h.home, "agents", "goobo");
+    await mkdir(proj, { recursive: true });
+    await writeFile(join(proj, "CLAUDE.md"), "You are Goobo. You answer in the Buzz channel.\n");
+    const base = ["adopt", "--harness", "claude-code", "--name", "Goobo", "--project", proj];
+    const dry = await h.run([...base, "--serve", "--dry-run"]);
+    assert.equal(dry.code, 0, dry.err);
+    assert.match(dry.out + dry.err, /MCP scope\s+project: .*agents\/goobo\/\.mcp\.json \(only Claude Code sessions in /);
+    const dryJ = await h.run([...base, "--serve", "--dry-run", "--json"]);
+    assert.equal(dryJ.json.scope, "project");
+    assert.equal(dryJ.json.target, join(proj, ".mcp.json"));
+    assert.deepEqual(dryJ.json.plan.detection.persona.files, [join(proj, "CLAUDE.md")], "--project is where the agent's CLAUDE.md is");
+    assert.equal(existsSync(join(proj, ".mcp.json")), false, "dry-run writes nothing");
+    const r = await h.run([...base, "--serve", "--yes", "--json"]);
+    assert.equal(r.code, 0, r.err);
+    const entry = JSON.parse(await readFile(join(proj, ".mcp.json"), "utf8")).mcpServers.tealbrick;
+    assert.equal(entry.command, process.execPath, "F77: absolute node, no bare tealbrick");
+    assert.deepEqual(entry.args.slice(1, 6), ["bridge", "serve", "--stdio", "--agent", AGT]);
+    const serve = JSON.parse(await readFile(join(adoptDir(), AGT, "serve.json"), "utf8"));
+    assert.deepEqual(serve.harness, { kind: "claude-code", cwd: proj });
+    assert.equal(validateServeConfig(serve).harness.kind, "claude-code");
+    assert.match(r.json.serve, /agent serve --file .*serve\.json --agent agt_\w+ --detach$/);
+    assert.equal(r.json.scope, "project");
+    const u = await h.run(["adopt", "--undo", "--name", "Goobo", "--json"]);
+    assert.equal(u.code, 0, u.err);
+    assert.equal(existsSync(join(proj, ".mcp.json")), false, "undo removes the .mcp.json adopt created");
+    // explicit user scope: printed only (Claude Code's own ~/.claude.json is never edited)
+    const usr = await h.run(["adopt", "--harness", "claude-code", "--name", "Goobo user", "--scope", "user", "--yes", "--json"]);
+    assert.equal(usr.code, 0, usr.err);
+    assert.equal(usr.json.scope, "user");
+    assert.match(usr.json.mcpAdd, /^claude mcp add --scope user tealbrick -- \S+ \S+main\.ts bridge serve --stdio --agent agt_/);
+    assert.equal(existsSync(join(h.cwd, ".mcp.json")), false);
+    assert.equal(existsSync(join(h.home, ".claude.json")), false);
+    assert.equal((await h.run(["adopt", "--harness", "codex", "--name", "x", "--scope", "user", "--dry-run"])).code, 2, "--scope is for claude-code");
   });
 });
