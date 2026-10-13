@@ -131,10 +131,10 @@ export function fakeApi(): ManifestApi {
       const input = `${b64({ alg: "EdDSA", typ, kid: signer.kid })}.${b64(claims)}`;
       return `${input}.${await signer.sign(input)}`;
     },
-    // the key-set rule needs real signatures: the double only knows the 0.1.11 legacy path (no statement on the wire)
+    // the double pins no build roots (worlds pass a test root as the start option); the key-set rule is the REAL one
+    // (L1, C133): statements are real root signatures over the double's portal keys, so no transition path exists here
     portalRootKeys: () => [],
-    trustedPortalKeys: (body, pinned) =>
-      body.portalKeySet === undefined && !pinned ? { ok: true, legacy: true, reason: "test double: no statement" } : { ok: false, code: "keyset_invalid", reason: "test double cannot verify statements" },
+    trustedPortalKeys: (body, pinned, roots) => realManifest.trustedPortalKeys(body, pinned, roots),
     isPrivateInternalUrl: (url, opts) => realIsPrivateInternalUrl(url, opts),
     // shared rules are pure: the double uses the real implementations (L1)
     bridgeOpProofClaims: (bop, body) => realManifest.bridgeOpProofClaims(bop, body),

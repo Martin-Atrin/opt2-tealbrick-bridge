@@ -179,24 +179,33 @@ describe("BSD-08 C63a: re-enrolment needs a valid statement once one is pinned",
   });
 });
 
-describe("BSD-08 spec 0.1.12: the build refuses a first enrolment without a statement", () => {
-  test("a real bridge with the build's strict rule and no statement on the wire does not enrol", async () => {
-    await assert.rejects(makeWorld({ real: true, keySet: true, enrolWithoutKeySet: true }), /enrolment refused: keyset_missing|enrol_failed/);
-  });
-});
+describe("BSD-08 C133: no transition path (manifest 0.1.18 trustedPortalKeys)", () => {
+  const keysetRejections = (w: World) => [...w.bridge.ctx.rejected.keys()].filter((k) => k.includes("keyset"));
 
-describe("BSD-08 strict (spec 0.1.12 behaviour, harness keysetRequired)", () => {
-  test("B20.kss_enrol_missing: a first enrolment without a statement is refused; nothing is written", async () => {
-    await assert.rejects(makeWorld({ real: true, keySet: true, enrolWithoutKeySet: true, keysetRequired: true }), /enrolment refused: keyset_missing|enrol_failed/);
+  test("B20.kss_enrol_missing: a first enrolment without a statement is refused (keyset_missing); nothing is written", async () => {
+    await assert.rejects(makeWorld({ real: true, enrolWithoutKeySet: true }), /enrolment refused: keyset_missing/);
   });
 
-  test("with a statement the strict bridge enrols and pins as usual", async () => {
-    const w = await makeWorld({ real: true, keySet: true, keysetRequired: true });
-    try {
-      await applied(w);
-      assert.equal(w.bridge.ctx.identity?.pinnedKeySet?.seq, 1);
-    } finally {
-      await w.close();
+  test("the test double runs the same rule: no statement → keyset_missing", async () => {
+    await assert.rejects(makeWorld({ enrolWithoutKeySet: true }), /enrolment refused: keyset_missing/);
+  });
+
+  test("a build without pinned roots refuses a valid statement (keyset_invalid)", async () => {
+    await assert.rejects(makeWorld({ real: true, portalRoots: [] }), /enrolment refused: keyset_invalid/);
+  });
+
+  test("L34 quiet case: with a valid statement the bridge enrols, pins and applies configs with no key-set alarm", async () => {
+    for (const real of [true, false]) {
+      const w = await makeWorld({ real });
+      try {
+        await applied(w);
+        assert.equal(w.bridge.ctx.identity?.pinnedKeySet?.seq, 1, `pinned (real=${real})`);
+        await w.publish();
+        await applied(w);
+        assert.deepEqual(keysetRejections(w), [], `no key-set refusal on the good case (real=${real})`);
+      } finally {
+        await w.close();
+      }
     }
   });
 });

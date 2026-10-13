@@ -3,7 +3,7 @@
  * Test harness process entry ONLY (conformance CONFORMANCE §7; the c023 real-process drain test): `tb-conformance bridge --cmd "node <this>" --test-roots`.
  * Starts the BUILT bridge (`@opt2-tealbrick/bridge` → dist) the way bridge-server does and passes the suite's test
  * roots (`TBCONF_PORTAL_ROOT_KEYS`, a harness-only env name) to the programmatic `portalRootKeys` start option, so the
- * B20 key-set checks run under the build's strict rule (KEYSET_REQUIRED, spec 0.1.12). A process (`--cmd`) instead of
+ * B20 key-set checks run under the one key-set rule (manifest trustedPortalKeys, no transition path, C133). A process (`--cmd`) instead of
  * a `--start` module, so the suite captures stdout/stderr and B11.no_log runs in the same single pass.
  * The production entry (bridge-server src/server.ts) never reads that name and never passes the option. Not shipped:
  * the image and the package contain dist/ only.

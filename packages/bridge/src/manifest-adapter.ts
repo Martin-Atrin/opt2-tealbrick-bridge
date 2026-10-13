@@ -58,7 +58,7 @@ export function manifestApi(): ManifestApi {
     },
     signJwsWithSigner: (typ, claims, signer) => m.signJwsWithSigner(typ, claims, signer),
     portalRootKeys: (channel) => m.portalRootKeys(channel),
-    trustedPortalKeys: (body, pinned, roots, opts) => m.trustedPortalKeys(body, pinned, roots, opts),
+    trustedPortalKeys: (body, pinned, roots) => m.trustedPortalKeys(body, pinned, roots),
     isPrivateInternalUrl: (url, opts) => m.isPrivateInternalUrl(url, opts),
     bridgeOpProofClaims: (bop, body) => m.bridgeOpProofClaims(bop, body),
     deriveIdempotencyKey: (i) => m.deriveIdempotencyKey(i),

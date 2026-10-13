@@ -157,12 +157,12 @@ export interface WorldOptions {
   /** extra key connections of the first agent */
   extraConnections?: string[];
   /** BSD-08: a test root signs key-set statements; the bridge pins it (start option) and Portal sends them.
-   * Default: on for real-crypto worlds (spec 0.1.12 strict rule), off for the test double. */
+   * Default on: every bridge needs a root-signed statement (C133, no transition path). */
   keySet?: boolean;
   /** the first enrolment response carries no statement */
   enrolWithoutKeySet?: boolean;
-  /** spec 0.1.12 strict key-set rule (harness start option) */
-  keysetRequired?: boolean;
+  /** replaces the roots the bridge pins (default: the test root); `[]` = a build without pinned roots */
+  portalRoots?: Ed25519KeyPair["publicJwk"][];
   /** further own-infrastructure origins for TB_OWN_INFRA_ORIGINS (e.g. a real SDK app started by a test) */
   extraOwnInfraOrigins?: string[];
 }
@@ -203,11 +203,11 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
   let signingKey = portalKey;
   let keyEntries: { key: Ed25519KeyPair; status: "pending" | "active" | "retired" }[] = [{ key: portalKey, status: "active" }];
   const sign = (typ: string, claims: object) => api.signJws(typ as never, claims, signingKey);
-  // spec 0.1.12: a real bridge refuses an enrolment without a root-signed statement, so real worlds run with a test
-  // root by default (keySet: false only for a world that must have none). The test double has no key-set crypto.
-  const keySetOn = opts.keySet ?? real;
-  if (keySetOn && !real) throw new Error("keySet worlds need real crypto");
-  const root = keySetOn ? await api.generateKeyPair() : undefined;
+  // C133: a bridge refuses any body without a root-signed statement, so every world runs with a test root by default
+  // (keySet: false only for a world that must have none). The root is a real Ed25519 key also in test-double worlds:
+  // the double applies the real key-set rule (L1) to statements that list its portal keys.
+  const keySetOn = opts.keySet ?? true;
+  const root = keySetOn ? await (real ? api : manifestApi()).generateKeyPair() : undefined;
   let kssSeq = 0;
   let kss: string | undefined;
   let enrolKss: "current" | "none" | { jws: string } = opts.enrolWithoutKeySet ? "none" : "current";
@@ -387,7 +387,8 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
 
   const dir = mkdtempSync(join(tmpdir(), "tb-bridge-test-"));
   const bridgeEnv = (): NodeJS.ProcessEnv => ({ TB_DATA_DIR: dir, TB_PORTAL_URL: portal.url, TB_PUBLIC_URL: "http://127.0.0.1", TB_KEYS_PUBLIC_URL: "http://localhost", TB_ENROL_CODE: ENROL, TB_KEK: "11".repeat(32), TB_OWN_INFRA_ORIGINS: [app.url, hookApp.url, ...(opts.extraOwnInfraOrigins ?? [])].join(","), ...opts.env, ...envOverrides });
-  const rootOpt = { ...(root ? { portalRootKeys: [root.publicJwk] } : {}), ...(opts.keysetRequired ? { keysetRequired: true } : {}) };
+  const roots = opts.portalRoots ?? (root ? [root.publicJwk] : undefined);
+  const rootOpt = roots ? { portalRootKeys: roots } : {};
   let bridge: RunningBridge;
   try {
     bridge = await startBridge({

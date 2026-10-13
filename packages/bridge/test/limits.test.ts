@@ -271,7 +271,9 @@ describe("bridge limits (https public URL, short timeouts)", () => {
       assert.ok(Date.now() - started < 10_000);
       const ok = await w.mcp(s.token, callBody("notes__notes_list", { q: "after" }), s.sid);
       assert.equal(ok.json.result.isError, undefined, "next call works");
-      assert.equal((await fetch(`${w.publicUrl}/healthz`)).status, 200);
+      const health = await fetch(`${w.publicUrl}/healthz`);
+      assert.equal(health.status, 200);
+      assert.deepEqual(await health.json(), { status: "ok" }, "BRIDGE §12: {status} only");
     } finally {
       w.appOps.override = undefined;
     }

@@ -5,6 +5,7 @@
 
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
+import { readFileSync } from "node:fs";
 import type { AppStatus, } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, Ed25519PublicJwk, InstanceId } from "@opt2-tealbrick/spec/credentials";
 import type { KeySet, ManifestApi } from "./api.ts";
@@ -13,7 +14,8 @@ import type { Rejection, Table } from "./table.ts";
 import type { Logger } from "./util.ts";
 import { nowS } from "./util.ts";
 
-export const BRIDGE_VERSION = "0.1.24";
+/** This package's version, read from its package.json (the one place; `src/` and `dist/` both sit beside it). */
+export const BRIDGE_VERSION: string = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
 export const SDK_MAJORS = [1];
 /** F57a / L21: Retry-After (seconds) on tool and companion calls refused while the bridge drains (nothing ran) */
 export const DRAIN_RETRY_AFTER_S = 2;
@@ -23,9 +25,6 @@ export const DRAIN_RETRY_AFTER_S = 2;
  * deploy). 0.1.x bridges are dev-channel builds; the cutover release switches to "prod".
  */
 export const PORTAL_ROOT_CHANNEL: "dev" | "prod" = "dev";
-
-/** spec 0.1.12 (C63a): the no-statement fallback is gone; a first enrolment without a valid statement is refused */
-export const KEYSET_REQUIRED = true;
 
 /** The SDK major this bridge is built for; `sdkMajorServed` (manifest, C44) also serves the one before. */
 export const SDK_CURRENT_MAJOR = 1;
@@ -46,8 +45,6 @@ export interface BridgeOptions {
   ownInfraOrigins?: string[];
   /** BSD-08: Portal Root Keys; default = this build's channel. Only a test harness replaces them (start option). */
   portalRoots?: Ed25519PublicJwk[];
-  /** spec 0.1.12 strict key-set rule; default = the build constant. Only a test harness overrides it. */
-  keysetRequired?: boolean;
   fetch?: typeof fetch;
 }
 
@@ -67,7 +64,6 @@ export class BridgeContext extends EventEmitter {
   readonly form: "deployed" | "own_infra";
   readonly ownInfraOrigins: string[];
   readonly portalRoots: Ed25519PublicJwk[];
-  readonly keysetRequired: boolean;
   readonly fetch: typeof fetch;
   readonly boot = randomUUID();
   /** F57a / L21: set on SIGTERM. New calls get `temporarily_unavailable` + Retry-After; in-flight calls finish. */
@@ -104,7 +100,6 @@ export class BridgeContext extends EventEmitter {
     this.form = o.form;
     this.ownInfraOrigins = o.ownInfraOrigins ?? [];
     this.portalRoots = o.portalRoots ?? o.api.portalRootKeys(PORTAL_ROOT_CHANNEL);
-    this.keysetRequired = o.keysetRequired ?? KEYSET_REQUIRED;
     this.fetch = o.fetch ?? fetch;
   }
 

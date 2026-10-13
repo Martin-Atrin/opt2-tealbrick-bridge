@@ -37,8 +37,6 @@ export interface BridgeServerOptions {
    * the production entry (bridge-server) never passes it.
    */
   portalRootKeys?: Ed25519PublicJwk[];
-  /** test harness only: run the spec 0.1.12 strict key-set rule (default: the build constant KEYSET_REQUIRED) */
-  keysetRequired?: boolean;
 }
 
 /** Listener limits against slow-body and connection exhaustion (BSD-01). */
@@ -158,7 +156,6 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
     form: o.form ?? "deployed",
     ownInfraOrigins: (env.TB_OWN_INFRA_ORIGINS ?? "").split(",").map((h) => h.trim()).filter(Boolean),
     ...(o.portalRootKeys ? { portalRoots: o.portalRootKeys } : {}),
-    ...(o.keysetRequired !== undefined ? { keysetRequired: o.keysetRequired } : {}),
     ...(o.fetch ? { fetch: o.fetch } : {}),
   });
   await ensureEnrolled(ctx, env.TB_ENROL_CODE);
