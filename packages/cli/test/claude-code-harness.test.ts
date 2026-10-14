@@ -140,7 +140,10 @@ describe("Claude Code plug-in recipe (F77, F79)", () => {
     assert.throws(() => validateServeConfig({ ...base, harness: { kind: "claude-code", cwd: ".", passthroughEnv: ["A B"] } }), /passthroughEnv/);
     const ex = validateServeConfig(JSON.parse(readFileSync(EXAMPLE, "utf8")));
     assert.equal(ex.harness.kind, "claude-code");
-    assert.deepEqual(claudeCodeArgs({ kind: "claude-code", cwd: "." }, "/t/mcp.json"), ["-p", "--output-format", "json", "--max-turns", "20", "--mcp-config", "/t/mcp.json", "--strict-mcp-config", "--allowedTools", "mcp__tealbrick", "--disallowedTools", ...CLAUDE_CODE_DISALLOWED]);
+    assert.deepEqual(claudeCodeArgs({ kind: "claude-code", cwd: "." }, "/t/mcp.json"), ["-p", "--output-format", "json", "--max-turns", "20", "--no-session-persistence", "--mcp-config", "/t/mcp.json", "--strict-mcp-config", "--allowedTools", "mcp__tealbrick", "--disallowedTools", ...CLAUDE_CODE_DISALLOWED]);
+    // F104 (L29): no session transcript under ~/.claude/projects/ by default; persistSession: true is Claude Code's default
+    assert.ok(!claudeCodeArgs({ kind: "claude-code", cwd: ".", persistSession: true }, "/t/mcp.json").includes("--no-session-persistence"));
+    assert.throws(() => validateServeConfig({ ...base, harness: { kind: "claude-code", cwd: ".", persistSession: "yes" } }), /persistSession/);
   });
 
   test("F79: one turn — exact argv, MCP config 0600 with only the relay (+ onBehalfOf), env allow-list, real relay answers, temp removed, result logged without payload", async () => {
@@ -153,7 +156,7 @@ describe("Claude Code plug-in recipe (F77, F79)", () => {
     const r = await runTurn("PROMPT_TEXT mention", { onHeld: () => undefined }, { onBehalfOf: claim });
     const rec = JSON.parse(readFileSync(hostEnv.FAKE_CLAUDE_RECORD as string, "utf8"));
     assert.equal(r.ok, true);
-    assert.deepEqual(rec.argv, ["-p", "--output-format", "json", "--max-turns", "7", "--model", "sonnet", "--mcp-config", rec.mcpConfigPath, "--strict-mcp-config", "--allowedTools", "mcp__tealbrick", "Read", "--disallowedTools", "Bash", "WebFetch", "WebSearch", "Write", "Edit"]);
+    assert.deepEqual(rec.argv, ["-p", "--output-format", "json", "--max-turns", "7", "--model", "sonnet", "--no-session-persistence", "--mcp-config", rec.mcpConfigPath, "--strict-mcp-config", "--allowedTools", "mcp__tealbrick", "Read", "--disallowedTools", "Bash", "WebFetch", "WebSearch", "Write", "Edit"]);
     assert.equal(rec.cwd, project, "runs in the project folder (relative to the config)");
     assert.equal(rec.prompt, "PROMPT_TEXT mention", "prompt on stdin");
     assert.equal(rec.mcpConfigMode, 0o600);

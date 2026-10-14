@@ -152,7 +152,18 @@ export type HarnessEvent =
   | { type: "held"; tool: string; holdId: string; checkWith: string; expiresAt: string }
   /** `usage`: token and cost totals of the turn (no payload), see usageOf */
   | { type: "result"; ok: boolean; text?: string; usage?: TurnUsage }
-  | { type: "error"; code: string };
+  /**
+   * BRG-02 (C151): `started` is the typed "did the turn start" marker. It is false ONLY when the SDK threw before the
+   * first message of the stream (module/binary load, start-up refused) and the turn was not aborted: then no model call
+   * and no tool call happened, and a host may retry the turn. Any throw after the first message (or after a tool call,
+   * or on a timeout) is `started: true`, and the host must never re-run that turn.
+   */
+  | { type: "error"; code: string; started: boolean };
+
+/** BRG-02: true only for the typed not-started case of runTurn (safe to retry; nothing ran). */
+export function turnNotStarted(e: HarnessEvent): boolean {
+  return e.type === "error" && e.started === false;
+}
 
 /** Token and cost totals of one turn (Claude Agent SDK result message, or `claude -p --output-format json`). */
 export interface TurnUsage {
@@ -204,10 +215,13 @@ export async function runTurn(sdk: ClaudeSdk, prompt: string, o: SessionOptions 
   const timer = o.turnTimeoutMs && o.turnTimeoutMs > 0 ? setTimeout(() => abort.abort(), o.turnTimeoutMs) : undefined;
   timer?.unref?.();
   options.abortController = abort;
+  // BRG-02: set at the FIRST message of the stream, before it is handled; a throw while it is false = not started
+  let started = false;
   try {
     const toolNames = new Map<string, string>();
     let model: string | undefined;
     for await (const m of sdk.query({ prompt, options })) {
+      started = true;
       if (m.type === "system" && m.subtype === "init" && typeof m.model === "string") model = m.model.slice(0, 80);
       if (m.type === "system" && m.subtype === "init" && typeof m.session_id === "string") onEvent({ type: "session", sessionId: m.session_id });
       if (m.type === "assistant" && Array.isArray(m.message?.content)) {
@@ -236,7 +250,7 @@ export async function runTurn(sdk: ClaudeSdk, prompt: string, o: SessionOptions 
       }
     }
   } catch (e) {
-    onEvent({ type: "error", code: abort.signal.aborted ? "turn_timeout" : e instanceof Error ? e.name : "error" });
+    onEvent({ type: "error", code: abort.signal.aborted ? "turn_timeout" : e instanceof Error ? e.name : "error", started: started || abort.signal.aborted });
     if (abort.signal.aborted) onEvent({ type: "result", ok: false, text: "turn timed out" });
   } finally {
     if (timer) clearTimeout(timer);

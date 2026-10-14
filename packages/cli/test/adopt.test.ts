@@ -29,6 +29,9 @@ describe("tealbrick adopt (C96 phase 1)", () => {
   let deviceStarts = 0;
   const harnessIds: unknown[] = [];
   const revokes: string[] = [];
+  /** F115: the next N token requests are refused like a revoked connection (or a deleted card) */
+  let refuseTokens = 0;
+  const lastStart = () => h.portal.requests.filter((q) => q.path.endsWith("/device/authorize")).at(-1)?.body as { agents: { agt?: string; name?: string; adopt?: { grants: { product: string; crud?: string[] }[] } }[] };
 
   before(async () => {
     await h.setup();
@@ -37,6 +40,10 @@ describe("tealbrick adopt (C96 phase 1)", () => {
       const chunks: Buffer[] = [];
       for await (const c of req) chunks.push(c as Buffer);
       const body = Buffer.concat(chunks).toString("utf8");
+      if (req.url === "/oauth/token" && refuseTokens > 0) {
+        refuseTokens -= 1;
+        return res.writeHead(400, { "content-type": "application/json" }).end(JSON.stringify({ error: "invalid_grant", error_description: "connection_revoked" }));
+      }
       if (req.url === "/oauth/token") return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ access_token: "k5-access", token_type: "Bearer", expires_in: 900 }));
       if (req.url === "/agent/connection/revoke" && req.method === "POST") {
         revokes.push(JSON.parse(body).assertion);
@@ -182,11 +189,46 @@ describe("tealbrick adopt (C96 phase 1)", () => {
     assert.equal(JSON.parse(Buffer.from(revokes[0]?.split(".")[1] ?? "", "base64url").toString("utf8")).con, CON);
     assert.equal(u.json.revoked, true);
     assert.equal(u.json.revokeNeeded, false);
-    // F40: re-adopt after undo = SAME card, NEW connection (not "reused")
+    // F115: undo removes the local adopt state of the card, so a re-adopt never re-uses that card id by itself
+    assert.equal(existsSync(join(adoptDir(), AGT, "adopt.json")), false, "adopt state removed");
+    assert.ok(u.json.done.some((l: string) => /removed the adopt state/.test(l)));
     const again = await h.run(["adopt", "--harness", "claude-desktop", "--name", "Desk agent", "--yes", "--json"]);
     assert.equal(again.code, 0, again.err);
     assert.equal(again.json.reused, false);
-    assert.equal(again.json.sameCard, true);
+    assert.equal(again.json.sameCard, false);
+    assert.equal(lastStart().agents[0]?.agt, undefined, "a NEW card is requested (no dead id)");
+    assert.equal(lastStart().agents[0]?.name, "Desk agent", "the owner approves a named new card");
+    // F114: claude-desktop has no persona, yet the approval form gets the reads of every app ticked (Core pre-ticks
+    // the read ops of the suggested, deployed apps); never a write
+    const grants = lastStart().agents[0]?.adopt?.grants ?? [];
+    assert.deepEqual(
+      grants.map((g) => g.product),
+      ["connect", "evolution", "fleet", "inbox", "kanban", "knowledge", "rules"],
+    );
+    assert.ok(grants.every((g) => g.crud?.join() === "read"), "read only");
+    const u2 = await h.run(["adopt", "--undo", "--name", "Desk agent", "--json"]);
+    assert.equal(u2.code, 0, u2.err);
+  });
+
+  test("F115: a re-run whose stored connection the bridge refuses (card deleted in Portal) asks for a NEW card, never the dead id", async () => {
+    const r = await h.run([...sdk(), "--yes", "--json"]);
+    assert.equal(r.code, 0, r.err);
+    const starts = deviceStarts;
+    // quiet case (L34): a valid stored connection is reused, no device flow, the card id stays
+    const ok = await h.run([...sdk(), "--yes", "--json"]);
+    assert.equal(ok.code, 0, ok.err);
+    assert.equal(ok.json.reused, true);
+    assert.equal(deviceStarts, starts);
+    // the owner deleted the card: the bridge refuses the stored connection
+    refuseTokens = 1;
+    const again = await h.run([...sdk(), "--yes", "--json"]);
+    assert.equal(again.code, 0, again.err);
+    assert.equal(deviceStarts, starts + 1, "one new device flow");
+    assert.equal(lastStart().agents[0]?.agt, undefined, "the dead card id is not sent");
+    assert.equal(lastStart().agents[0]?.name, "Research agent");
+    assert.match(again.err, /card agt_\w+: its stored connection is refused by the bridge .* offers a NEW card/);
+    assert.equal(again.json.reused, false);
+    assert.equal(refuseTokens, 0);
   });
 
   test("F30: --inbox buzz:<channel> adds a Buzz inbox to the serve config; a bad value is refused", async () => {
@@ -209,9 +251,10 @@ describe("tealbrick adopt (C96 phase 1)", () => {
     await writeFile(persona, "Plan work on the Kanban board.\nUse mcp__tealbrick__evolution__routines_due and `knowledge__recall`.\nSend with mcp__mail__send.\n");
     const r = await h.run(["adopt", "--harness", "claude-sdk", "--name", "Heinz", "--persona", persona, "--dry-run", "--json"]);
     assert.equal(r.code, 0, r.err);
+    // F114: every Teal Brick app is asked read (the persona's references are a subset of them)
     assert.deepEqual(
       r.json.suggestion.grants.map((g: { product: string }) => g.product),
-      ["connect", "evolution", "kanban", "knowledge"],
+      ["connect", "evolution", "fleet", "inbox", "kanban", "knowledge", "rules"],
     );
     assert.ok(r.json.suggestion.grants.every((g: { crud: string[]; operations?: string[] }) => g.crud.join() === "read" && !g.operations));
   });

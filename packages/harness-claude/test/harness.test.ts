@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { buildOptions, type HarnessEvent, runTurn, sessionEnv, usageOf } from "../src/index.ts";
+import { buildOptions, type HarnessEvent, runTurn, sessionEnv, turnNotStarted, usageOf } from "../src/index.ts";
 
 test("session env is allow-listed: no Teal Brick or person credentials", () => {
   const env = sessionEnv({ PATH: "/bin", HOME: "/h", TB_PORTAL_URL: "x", TEALBRICK_OWNER: "y", CLERK_SESSION: "z", GH_TOKEN: "t", ANTHROPIC_API_KEY: "k" }, { passthrough: ["GH_TOKEN"], modelKeyEnv: "ANTHROPIC_API_KEY" });
@@ -63,4 +63,62 @@ test("usage: a result carries tokens (modelUsage summed), cost, turns and the in
   assert.deepEqual(usageOf({ num_turns: 4, total_cost_usd: 0.3, usage: { input_tokens: 1, cache_creation_input_tokens: 2, cache_read_input_tokens: 3, output_tokens: 4 } }), { inputTokens: 1, cacheCreationInputTokens: 2, cacheReadInputTokens: 3, outputTokens: 4, costUsd: 0.3, numTurns: 4 });
   assert.deepEqual(usageOf({ modelUsage: { a: { inputTokens: 1, outputTokens: 2, cacheReadInputTokens: 3, cacheCreationInputTokens: 4 }, b: { inputTokens: 10, outputTokens: 20, cacheReadInputTokens: 30, cacheCreationInputTokens: 40 } } }), { inputTokens: 11, cacheCreationInputTokens: 44, cacheReadInputTokens: 33, outputTokens: 22, model: "a,b" });
   assert.equal(usageOf({ result: "text only" }), undefined);
+});
+
+test("BRG-02 (C151): a throw BEFORE the first stream message is the typed not-started case; after it, always started", async () => {
+  const run = async (sdk: Parameters<typeof runTurn>[0]) => {
+    const events: HarnessEvent[] = [];
+    await runTurn(sdk, "hi", { bridge: { agentId: "agt_X" }, cwd: "/w", env: {} }, (e) => events.push(e));
+    return events;
+  };
+  // query() itself throws (SDK/binary did not load): not started
+  const atCall = await run({
+    query() {
+      throw new Error("spawn claude ENOENT");
+    },
+  });
+  assert.deepEqual(atCall, [{ type: "error", code: "Error", started: false }]);
+  assert.equal(turnNotStarted(atCall[0] as HarnessEvent), true);
+  // the stream throws before its first message (start-up refused): not started
+  const beforeFirst = await run({
+    query() {
+      return {
+        [Symbol.asyncIterator]() {
+          return { next: () => Promise.reject(new TypeError("login refused at start")) };
+        },
+      };
+    },
+  });
+  assert.deepEqual(beforeFirst, [{ type: "error", code: "TypeError", started: false }]);
+  // a throw after the first message: started (never retried by a host)
+  const afterInit = await run({
+    query() {
+      return (async function* () {
+        yield { type: "system", subtype: "init", session_id: "s1" };
+        throw new Error("connection reset");
+      })();
+    },
+  });
+  assert.deepEqual(afterInit.at(-1), { type: "error", code: "Error", started: true });
+  assert.equal(turnNotStarted(afterInit.at(-1) as HarnessEvent), false);
+  // a throw after a tool call: started
+  const afterTool = await run({
+    query() {
+      return (async function* () {
+        yield { type: "assistant", message: { content: [{ type: "tool_use", id: "t1", name: "mcp__tealbrick__notes__notes_send" }] } };
+        throw new Error("Login expired");
+      })();
+    },
+  });
+  assert.ok(afterTool.some((e) => e.type === "tool"));
+  assert.deepEqual(afterTool.at(-1), { type: "error", code: "Error", started: true });
+  // a normal turn has no error event at all (L34 quiet case)
+  const ok = await run({
+    query() {
+      return (async function* () {
+        yield { type: "result", subtype: "success", result: "done" };
+      })();
+    },
+  });
+  assert.ok(!ok.some((e) => e.type === "error"));
 });

@@ -63,6 +63,8 @@ export const OPTIONS = {
   supervise: { type: "boolean" },
   /** internal: the process a supervisor started */
   "supervised-child": { type: "boolean" },
+  /** BRG-03: agent serve: start fresh (but safe) when the state file is unreadable */
+  "accept-state-loss": { type: "boolean" },
   // connect
   write: { type: "boolean" },
   /** F78: connect/adopt claude-code: project (default, <dir>/.mcp.json) or user */

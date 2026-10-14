@@ -51,7 +51,7 @@ describe("command harness turn limit (BRG-04)", () => {
       const runTurn = await commandRunner(harness(record), "relay", { turnTimeoutMs: 1_500, killGraceMs: 500, log: (event, fields = {}) => logs.push({ event, fields }) });
       const started = Date.now();
       const r = await runTurn("HANG please", noHold);
-      assert.deepEqual(r, { ok: false, summary: "turn timed out" });
+      assert.deepEqual(r, { ok: false, summary: "turn timed out", code: "turn_timeout" });
       assert.ok(Date.now() - started >= 2_000, "the grace ran before SIGKILL");
       const rec = records(record);
       const pid = rec[0]?.pid as number;
@@ -96,9 +96,9 @@ describe("command harness turn limit (BRG-04)", () => {
 
   test("an EPIPE on the prompt and a harness that does not start end the turn (no crash, no hang)", async () => {
     const quit = await commandRunner({ kind: "command", command: [process.execPath, "-e", "process.exit(3)"] }, "relay", { turnTimeoutMs: 5_000 });
-    assert.deepEqual(await quit("x".repeat(4 * 1024 * 1024), noHold), { ok: false, summary: "exit code 3" });
+    assert.deepEqual(await quit("x".repeat(4 * 1024 * 1024), noHold), { ok: false, summary: "exit code 3", code: "exit_3" });
     const missing = await commandRunner({ kind: "command", command: [join(dir, "no-such-harness")] }, "relay", { turnTimeoutMs: 5_000 });
-    assert.deepEqual(await missing("x", noHold), { ok: false, summary: "harness did not start" });
+    assert.deepEqual(await missing("x", noHold), { ok: false, summary: "harness did not start", started: false, code: "not_started" }, "BRG-02: a spawn error is the only proven not-started case");
   });
 
   test("the serve loop goes on: a hung turn times out, the next inbox item gets its own turn", async () => {
@@ -152,15 +152,17 @@ describe("command harness turn limit (BRG-04)", () => {
       abort.signal,
     );
     assert.deepEqual(results, [
-      { ok: false, summary: "turn timed out" },
+      { ok: false, summary: "turn timed out", code: "turn_timeout" },
       { ok: true, summary: "exit code 0" },
     ]);
     assert.deepEqual(
       logs.map((l) => l.split(" ")[0]),
-      ["serve.turn.start", "serve.error", "serve.turn.start", "serve.turn.done"],
-      "the timed-out turn is a failed turn (backoff), then the loop starts the next turn",
+      ["serve.turn.start", "serve.turn.failed", "serve.turn.start", "serve.turn.done"],
+      "BRG-02: the timed-out turn is a failed turn (never re-run, no loop error), then the loop starts the next turn",
     );
-    assert.match(logs[1] as string, /"code":"turn_failed"/);
+    assert.match(logs[1] as string, /"code":"turn_timeout"/);
+    assert.match(logs[1] as string, /"items":\["1"\]/);
+    assert.equal(state.health?.failed, 1);
     const rec = records(record);
     assert.deepEqual(
       rec.map((x) => x.event),

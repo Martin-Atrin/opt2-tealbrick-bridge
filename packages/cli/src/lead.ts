@@ -379,11 +379,48 @@ async function agentStatus(ctx: Ctx): Promise<void> {
       running = (e as NodeJS.ErrnoException).code === "EPERM";
     }
   }
-  const serveInfo = { running, ...(holder ? { pid: holder.pid, mode: holder.role } : {}), lastPollAt: hb?.lastPollAt ?? null, phase: hb?.phase ?? null };
+  // BRG-02/03 (C151 D): unanswered turns and a refused start, from the heartbeat (else the state file), no log reading
+  let health = hb?.health;
+  if (!health) {
+    try {
+      const { readFile } = await import("node:fs/promises");
+      const st = JSON.parse(await readFile(join(ctx.configDir(), `agent-serve-${item.con}.json`), "utf8")) as { health?: unknown };
+      if (isRecord(st.health)) health = st.health as unknown as typeof health;
+    } catch {
+      /* no state yet, or unreadable: the refused line says so when serve tried */
+    }
+  }
+  const refused = hb?.refused;
+  const serveInfo = { running, ...(holder ? { pid: holder.pid, mode: holder.role } : {}), lastPollAt: hb?.lastPollAt ?? null, phase: hb?.phase ?? null, ...(health ? { health } : {}), ...(refused ? { refused } : {}) };
   ctx.emit(
     { agent: item.agt, connection: item.con, bridge: item.bridgeUrl, reachable, state, tools, serve: serveInfo },
-    `agent ${item.agt}\nconnection ${item.con}\nbridge ${item.bridgeUrl} (${state})\ntools ${tools ?? "-"}\nserve ${running ? `running (${serveInfo.mode} pid ${serveInfo.pid})` : "not running"}; last poll ${serveInfo.lastPollAt ?? "never"}`,
+    [
+      `agent ${item.agt}`,
+      `connection ${item.con}`,
+      `bridge ${item.bridgeUrl} (${state})`,
+      `tools ${tools ?? "-"}`,
+      `serve ${running ? `running (${serveInfo.mode} pid ${serveInfo.pid})` : "not running"}; last poll ${serveInfo.lastPollAt ?? "never"}`,
+      ...(refused ? [refusedLine(refused)] : []),
+      ...(health ? [healthLine(health)] : []),
+    ].join("\n"),
   );
+}
+
+const hhmm = (iso: string) => (/T(\d\d:\d\d)/.exec(iso)?.[1] ?? iso).concat("Z");
+const plural = (n: number, one: string) => `${n} ${one}${n === 1 ? "" : "s"}`;
+
+/** BRG-03: the `agent status` line of a refused start. */
+export function refusedLine(r: { path: string; reason: string; at: string }): string {
+  return `serve refused to start ${hhmm(r.at)}: state file unreadable (${r.path}: ${r.reason}); fix or restore the file, or start serve with --accept-state-loss`;
+}
+
+/** BRG-02 (C151 D): the `agent status` line of the unanswered-turn counters. */
+export function healthLine(h: { failed: number; uncertain: number; gaveUp: number; routinesSkipped?: number; last?: { at: string; kind: string; tool: string; items: number; code?: string } }): string {
+  const parts = [plural(h.failed, "failed turn"), plural(h.uncertain, "uncertain turn"), plural(h.gaveUp, "gave-up item"), ...(h.routinesSkipped ? [`${plural(h.routinesSkipped, "routine run")} skipped (state lost)`] : [])];
+  if (!h.failed && !h.uncertain && !h.gaveUp && !h.routinesSkipped) return "unanswered: none";
+  const what: Record<string, string> = { failed: "turn failed", uncertain: "turn uncertain (serve restarted during it)", gave_up: "gave up (harness did not start)", routine_skipped: "routine skipped (state lost)" };
+  const l = h.last;
+  return `unanswered: ${parts.join(", ")}${l ? `; last: ${what[l.kind] ?? l.kind} ${hhmm(l.at)} (${l.tool}${l.items ? `, ${plural(l.items, "item")}` : ""}${l.code ? `, ${l.code}` : ""})` : ""}`;
 }
 
 async function agentList(ctx: Ctx): Promise<void> {
@@ -420,7 +457,7 @@ async function agentServe(ctx: Ctx): Promise<void> {
   // F66: --detach starts `agent serve --supervise` in the background (same as adopt --start) and returns
   if (ctx.v.detach === true) {
     const file = resolve(ctx.v.file as string);
-    const started = await startDetached(ctx, { file, agt: item.agt, con: item.con, log: ctx.v.log ? resolve(ctx.v.log) : join(dirname(file), "serve.log") });
+    const started = await startDetached(ctx, { file, agt: item.agt, con: item.con, log: ctx.v.log ? resolve(ctx.v.log) : join(dirname(file), "serve.log"), ...(ctx.v["accept-state-loss"] === true ? { acceptStateLoss: true } : {}) });
     if (!started.pid) throw new CliError(EXIT.unexpected, "internal", "agent serve did not start");
     ctx.emit({ agent: item.agt, connection: item.con, started }, `started agent serve for ${item.agt} (supervisor pid ${started.pid}), log ${started.log}; stop: tealbrick agent stop --agent ${item.agt}`);
     return;
@@ -435,13 +472,45 @@ async function agentServe(ctx: Ctx): Promise<void> {
   if (ctx.v.supervise === true && ctx.v["supervised-child"] !== true) {
     const args = [process.argv[1] ?? "tealbrick", ...process.argv.slice(2).filter((a) => a !== "--supervise"), "--supervised-child"];
     ctx.say(`supervising agent serve for ${item.agt} (restart with backoff); Ctrl-C to stop`);
-    await sup.supervise({ command: process.execPath, args, pidfile, log: logLine });
+    const last = await sup.supervise({ command: process.execPath, args, pidfile, log: logLine });
+    if (last === sup.EXIT_STATE_UNREADABLE) throw new CliError(sup.EXIT_STATE_UNREADABLE, "state_unreadable", "agent serve refused to start: its state file is unreadable (see the log line serve.state.unreadable, or tealbrick agent status); fix or restore the file, or start serve with --accept-state-loss");
     return;
   }
   // one loop per connection: a plain serve takes the pidfile (a supervised child runs under its supervisor's)
   const releasePid = ctx.v["supervised-child"] === true ? async () => undefined : await sup.acquirePidfile(pidfile, "serve").catch((e: Error) => {
     throw new CliError(EXIT.validation, "already_running", e.message);
   });
+  // BRG-03: read the state BEFORE anything connects. Only "no file yet" is a fresh start; any other read problem refuses
+  // to start (exit EXIT_STATE_UNREADABLE, the supervisor does not restart) unless the owner passed --accept-state-loss.
+  const statePath = join(ctx.configDir(), `agent-serve-${item.con}.json`);
+  const stateFile = serve.fileState(statePath);
+  let initialState: Awaited<ReturnType<typeof stateFile.loadState>>;
+  try {
+    initialState = await stateFile.loadState();
+    if (ctx.v["accept-state-loss"] === true) logLine("serve.state.reset_not_needed", { path: statePath });
+  } catch (e) {
+    if (!(e instanceof serve.StateUnreadableError)) throw e;
+    if (ctx.v["accept-state-loss"] !== true) {
+      logLine("serve.state.unreadable", { path: e.path, reason: e.reason });
+      await sup.writeRefused(sup.heartbeatPath(ctx.configDir(), item.con), { code: "state_unreadable", path: e.path, reason: e.reason, at: new Date(ctx.now()).toISOString() }, ctx.v["supervised-child"] === true ? process.ppid : undefined);
+      await releasePid();
+      throw new CliError(
+        sup.EXIT_STATE_UNREADABLE,
+        "state_unreadable",
+        `agent serve cannot read its state file ${e.path} (${e.reason}). The file holds the routine ledger and the inbox cursors, so serve does not start with an empty one. Either fix or restore the file and start serve again, or start serve with --accept-state-loss: inboxes then start at the serve start (no backlog) and routine runs due before now are reported uncertain and not run.`,
+      );
+    }
+    // keep the unreadable file for the owner; start fresh but safe (C151 C)
+    const { rename } = await import("node:fs/promises");
+    const kept = `${statePath}.unreadable-${ctx.now()}`;
+    const keptOk = await rename(statePath, kept).then(
+      () => true,
+      () => false,
+    );
+    initialState = { ...serve.freshState(), stateLostAt: ctx.now() };
+    cfg.backlog = false;
+    logLine("serve.state.reset_accepted", { path: statePath, reason: e.reason, ...(keptOk ? { kept } : {}) });
+  }
   const key = await keyOf(item);
   // in-process relay: the watcher's MCP connection to the deployed bridge, as this agent
   const toRelay = new PassThrough();
@@ -502,7 +571,8 @@ async function agentServe(ctx: Ctx): Promise<void> {
     {
       mcp,
       runTurn,
-      ...serve.fileState(join(ctx.configDir(), `agent-serve-${item.con}.json`)),
+      loadState: async () => initialState,
+      saveState: stateFile.saveState,
       log: logLine,
       sleep: (ms, signal) =>
         new Promise<void>((r) => {
@@ -517,6 +587,7 @@ async function agentServe(ctx: Ctx): Promise<void> {
         await mcp.initialize("tealbrick-agent-serve");
       },
       heartbeat: (phase) => live.beat(phase),
+      health: (h) => live.health(h),
     },
     abort.signal,
   );
@@ -532,7 +603,7 @@ async function agentServe(ctx: Ctx): Promise<void> {
  * F66 (and adopt --start): start `agent serve --supervise` detached, its output appended to `log` (0600). One loop per
  * connection: refuses while the connection's pidfile names a live process.
  */
-export async function startDetached(ctx: Ctx, o: { file: string; agt: string; con: string; log: string; cwd?: string }): Promise<{ pid: number | null; log: string }> {
+export async function startDetached(ctx: Ctx, o: { file: string; agt: string; con: string; log: string; cwd?: string; acceptStateLoss?: boolean }): Promise<{ pid: number | null; log: string }> {
   const sup = await import("./supervise.ts");
   const held = await sup.readPid(sup.pidPath(ctx.configDir(), o.con));
   if (held && sup.isAlive(held.pid)) throw new CliError(EXIT.conflict, "already_running", `agent serve already runs for ${o.agt} (pid ${held.pid}); stop it with tealbrick agent stop --agent ${o.agt}`);
@@ -542,7 +613,7 @@ export async function startDetached(ctx: Ctx, o: { file: string; agt: string; co
   try {
     // this package's own entry (dist/main.js next to this file; main.ts when run from source), never argv[1]
     const entry = cliEntry();
-    const child = spawn(process.execPath, [entry, "agent", "serve", "--file", o.file, "--agent", o.agt, "--supervise", "--log", o.log], { detached: true, cwd: o.cwd ?? dirname(o.file), stdio: ["ignore", fd, fd], env: ctx.io.env as NodeJS.ProcessEnv });
+    const child = spawn(process.execPath, [entry, "agent", "serve", "--file", o.file, "--agent", o.agt, "--supervise", "--log", o.log, ...(o.acceptStateLoss ? ["--accept-state-loss"] : [])], { detached: true, cwd: o.cwd ?? dirname(o.file), stdio: ["ignore", fd, fd], env: ctx.io.env as NodeJS.ProcessEnv });
     child.unref();
     return { pid: child.pid ?? null, log: o.log };
   } finally {

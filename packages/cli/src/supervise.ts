@@ -7,6 +7,7 @@
 import { spawn } from "node:child_process";
 import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import type { ServeHealth } from "./serve.ts";
 
 export interface Heartbeat {
   pid: number;
@@ -17,6 +18,10 @@ export interface Heartbeat {
   /** "poll" between turns, "turn" while a harness turn runs */
   phase: "poll" | "turn";
   since: string;
+  /** BRG-02 (C151 D): unanswered-turn counters (`agent status` shows them without reading logs) */
+  health?: ServeHealth;
+  /** BRG-03: serve refused to start (state file unreadable); the supervisor does not restart it */
+  refused?: { code: "state_unreadable"; path: string; reason: string; at: string };
 }
 
 export const pidPath = (configDir: string, con: string) => join(configDir, `agent-serve-${con}.pid`);
@@ -24,6 +29,8 @@ export const heartbeatPath = (configDir: string, con: string) => join(configDir,
 
 /** exit code of a loop the watchdog stopped (EX_TEMPFAIL): the supervisor restarts it */
 export const EXIT_STALLED = 75;
+/** BRG-03: exit code of a serve that refused to start on an unreadable state file (EX_CONFIG): never restarted */
+export const EXIT_STATE_UNREADABLE = 78;
 
 const alive = (pid: number): boolean => {
   try {
@@ -80,6 +87,8 @@ export function liveness(o: { path: string; pollMs: number; turnLimitMs: number;
   let last = now();
   let phase: Heartbeat["phase"] = "poll";
   let lastPollAt: string | null = null;
+  let health: ServeHealth | undefined;
+  const write = () => writeJson(o.path, { pid: process.pid, ...(o.supervisorPid ? { supervisorPid: o.supervisorPid } : {}), lastPollAt, phase, since: new Date(last).toISOString(), ...(health ? { health } : {}) } satisfies Heartbeat).catch(() => undefined);
   const pollLimit = Math.max(3 * o.pollMs, 300_000);
   const timer = setInterval(() => {
     const limit = phase === "turn" ? o.turnLimitMs + 300_000 : pollLimit;
@@ -91,7 +100,12 @@ export function liveness(o: { path: string; pollMs: number; turnLimitMs: number;
       last = now();
       phase = p;
       if (p === "poll") lastPollAt = new Date(last).toISOString();
-      await writeJson(o.path, { pid: process.pid, ...(o.supervisorPid ? { supervisorPid: o.supervisorPid } : {}), lastPollAt, phase, since: new Date(last).toISOString() } satisfies Heartbeat).catch(() => undefined);
+      await write();
+    },
+    /** BRG-02: new counters go to the heartbeat file at once (not only with the next poll) */
+    async health(h: ServeHealth): Promise<void> {
+      health = h;
+      await write();
     },
     stop(): void {
       clearInterval(timer);
@@ -118,7 +132,7 @@ export async function supervise(o: {
   maxRestarts?: number;
   /** F56: a child that has not exited this long after SIGTERM gets SIGKILL (own child only) */
   stopGraceMs?: number;
-}): Promise<void> {
+}): Promise<number | null> {
   const release = await acquirePidfile(o.pidfile, "supervisor");
   let stopping = false;
   let child: ReturnType<typeof spawn> | undefined;
@@ -148,13 +162,20 @@ export async function supervise(o: {
       }));
   let backoff = 1_000;
   let restarts = 0;
+  let lastCode: number | null = null;
   try {
     while (!stopping) {
       const started = Date.now();
       child = spawn(o.command, o.args, { stdio: ["ignore", "inherit", "inherit"] });
       o.log("serve.supervisor.started", { child: child.pid ?? null });
       const code = await new Promise<number | null>((r) => child?.once("exit", (c) => r(c)));
+      lastCode = code;
       if (stopping) break;
+      // BRG-03: an unreadable state file needs the owner (fix it or --accept-state-loss): no restart loop
+      if (code === EXIT_STATE_UNREADABLE) {
+        o.log("serve.supervisor.gave_up", { exitCode: code, reason: "state_unreadable" });
+        break;
+      }
       if (Date.now() - started > 600_000) backoff = 1_000;
       restarts += 1;
       o.log("serve.supervisor.restart", { exitCode: code, inMs: backoff, stalled: code === EXIT_STALLED });
@@ -167,6 +188,12 @@ export async function supervise(o: {
     process.removeListener("SIGTERM", stop);
     await release();
   }
+  return lastCode;
+}
+
+/** BRG-03: the heartbeat of a serve that refused to start, so `agent status` shows why (no restart loop). */
+export async function writeRefused(path: string, refused: NonNullable<Heartbeat["refused"]>, supervisorPid?: number): Promise<void> {
+  await writeJson(path, { pid: process.pid, ...(supervisorPid ? { supervisorPid } : {}), lastPollAt: null, phase: "poll", since: refused.at, refused } satisfies Heartbeat).catch(() => undefined);
 }
 
 /** true while `pid` exists (signal 0: existence check only) */

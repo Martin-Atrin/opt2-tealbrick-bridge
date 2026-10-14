@@ -271,13 +271,14 @@ export async function referencedProducts(files: string[]): Promise<string[]> {
 }
 
 /**
- * C106a/F46: the grant SUGGESTION sent with the device request — read for every Teal Brick product the persona refers
- * to (Connect always when serving, for its inbox). It never names write ops: Core lists every deployed app and its
- * manifest ops on the approval page, and the owner ticks writes there.
+ * C106a/F46/F114: the grant SUGGESTION sent with the device request — read for EVERY Teal Brick app (and any other
+ * product the persona refers to). Core pre-ticks the read ops of each suggested app that is deployed (C106 "read
+ * grants checked") and shows the others as not in the workspace; so the owner gets the reads ticked even when the
+ * persona names no app (F114: claude-desktop had none). It never names write ops: Core lists every deployed app's ops
+ * on the approval page, write ops are never pre-ticked, and the owner ticks writes there.
  */
 export function adoptSuggestion(products: string[], plan: Pick<AdoptPlan, "serve" | "buzzChannels">): AdoptSuggestion {
-  const all = new Set(products);
-  if (plan.serve) all.add("connect");
+  const all = new Set([...PRODUCT_IDS, ...products]);
   const grants = [...all].sort().slice(0, 16).map((product) => ({ product, crud: ["read" as const] }));
   return {
     grants,
@@ -357,7 +358,7 @@ export const adopt: Handler = async (ctx) => {
   if (existing.length > 1) existingLines.push(`  CHOOSE         several Teal Brick entries: remove the ones you do not need, or pass --keep-existing to add "tealbrick" next to them`);
   // F46: the grant suggestion (products the persona refers to; read only — the owner ticks writes in Portal)
   const suggestion = adoptSuggestion(await referencedProducts(d.persona.files), plan);
-  const suggestLines = [`  access asked   read: ${suggestion.grants.map((g) => g.product).join(", ") || "none"} (Portal lists every deployed app; you tick any write access there)`];
+  const suggestLines = [`  access asked   read: ${suggestion.grants.map((g) => g.product).join(", ")} (Portal ticks the reads of each deployed app; you tick any write access there)`];
   const text = [planText(plan, planned), ...suggestLines, ...existingLines].join("\n");
 
   if (ctx.v["dry-run"] === true) {
@@ -377,11 +378,20 @@ export const adopt: Handler = async (ctx) => {
 
   // §10 / §4: re-use a valid connection; otherwise ONE device flow for the card (same card id on a re-run)
   let item = prior ? await pickAgentItem(ctx.store(), prior.state.con).catch(() => null) : null;
+  // F115: a stored card whose connection the bridge refuses (revoked, or the card was deleted in Portal) is never sent
+  // again as the card to approve onto (a deleted id makes the approval page "Not found"): the device request asks for a
+  // NEW card, and the approval page lists the existing cards, so the owner can still pick the old one if it exists.
+  let staleCard: string | null = prior && (prior.state as AdoptState & { undone?: string }).undone ? prior.state.agt : null;
+  if (item && (await probeAgent(ctx, item)).state === "invalid_grant") {
+    staleCard = item.agt;
+    item = null;
+  }
+  if (staleCard) ctx.say(`card ${staleCard}: its stored connection is ${prior && (prior.state as { undone?: string }).undone ? "undone" : "refused by the bridge (revoked, or the card was deleted in Portal)"}; the approval page offers a NEW card (pick ${staleCard} there if it still exists)`);
   // F40: "reused" means the CONNECTION was reused (no device flow), not that adopt ran before
   const connectionReused = !!item;
   if (!item) {
     const captured: { connections?: { con: string; agt: string }[] }[] = [];
-    const card = ctx.v["keep-existing"] === true && !prior && !ctx.g.agent ? null : reuseCard;
+    const card = (ctx.v["keep-existing"] === true && !prior && !ctx.g.agent) || (staleCard && reuseCard === staleCard && ctx.g.agent !== staleCard) ? null : reuseCard;
     // BRG-01: the runner kind is not a Portal harness id; device.start gets the mapped spec id
     const sub: Ctx = { ...ctx, v: { ...ctx.v, harness: PORTAL_HARNESS_ID[harness], ...(card ? {} : { create: true }), name, ...(plan.purpose ? { purpose: plan.purpose } : {}) }, g: { ...ctx.g, agents: card ? [card] : [], agent: card ?? undefined }, emit: (r) => void captured.push(r as never) };
     if (card) delete (sub.v as Record<string, unknown>).create;
@@ -391,7 +401,11 @@ export const adopt: Handler = async (ctx) => {
     item = await pickAgentItem(ctx.store(), con);
   }
   const adir = dirFor(item.agt);
-  const state: AdoptState = prior?.state ?? { v: 1, name, harness, agt: item.agt, con: item.con, wired: [], persona: null, serve: null, createdAt: new Date(ctx.now()).toISOString(), updatedAt: "" };
+  const sameCard = !!prior && prior.state.agt === item.agt;
+  // F115: a new card gets its own state; the old card's state is removed so a later re-run never finds the dead id
+  const state: AdoptState = sameCard && prior ? prior.state : { v: 1, name, harness, agt: item.agt, con: item.con, wired: prior?.state.wired ?? [], persona: null, serve: null, createdAt: new Date(ctx.now()).toISOString(), updatedAt: "" };
+  delete (state as { undone?: string }).undone;
+  if (prior && !sameCard) await rm(join(prior.dir, "adopt.json"), { force: true });
   state.con = item.con;
   const changes: string[] = [];
 
@@ -490,7 +504,7 @@ export const adopt: Handler = async (ctx) => {
     connection: item.con,
     harness,
     reused: connectionReused,
-    sameCard: !!prior,
+    sameCard,
     probe,
     toolsReady: (probe.tools ?? 0) > 0,
     changed: changes,
@@ -504,7 +518,7 @@ export const adopt: Handler = async (ctx) => {
   ctx.emit(
     report,
     [
-      `adopted ${item.agt} (${item.con}) — ${connectionReused ? "connection reused" : prior ? "same card, NEW connection" : "new card and connection"}`,
+      `adopted ${item.agt} (${item.con}) — ${connectionReused ? "connection reused" : sameCard ? "same card, NEW connection" : "new card and connection"}`,
       `bridge ${probe.state}, tools ${probe.tools ?? "-"}${probe.tools === 0 ? " — NO TOOLS: the approval granted no operations (owner: tick the grants on the card)" : ""}`,
       changes.length ? `changed: ${changes.join(", ")}` : "nothing changed (already adopted)",
       ...(report.backups.length ? [`backups: ${report.backups.join(", ")}`] : []),
@@ -552,9 +566,10 @@ async function adoptUndo(ctx: Ctx): Promise<void> {
     if (st?.isDirectory()) await rm(dir, { recursive: true, force: true });
     done.push(`removed ${dir}`);
   } else {
-    state.wired = [];
-    state.serve = null;
-    await writePrivate(join(dir, "adopt.json"), `${JSON.stringify({ ...state, undone: new Date(ctx.now()).toISOString() }, null, 2)}\n`);
+    // F115: the local adopt state of this card goes too (persona, transcripts and logs stay); a later adopt starts
+    // from the harness config and never re-uses this card id by itself
+    await rm(join(dir, "adopt.json"), { force: true });
+    done.push(`removed the adopt state ${join(dir, "adopt.json")} (persona and logs kept; --purge removes ${dir})`);
   }
   // the owner step only when the self-revoke failed (the connection stays valid on the server until then)
   const ownerStep = revoked.ok ? [] : [`Owner: revoke connection ${state.con} of agent ${state.agt} in Portal → the agent card → Connections (the local key is gone; the server connection stays valid until then).`];

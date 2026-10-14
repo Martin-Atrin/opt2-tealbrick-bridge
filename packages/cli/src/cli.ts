@@ -33,7 +33,7 @@ Harness:
 Agent mode (agent items only):
   agent login (--agent <agt>... | --file <agents.json> | --create [--grant <product>[:read+create+…],…] [--channel buzz:<id>|new:<name>])
         [--name <card name>] [--purpose <text>] [--harness <id>] [--label <machine>] | status | logout | list
-  agent serve --file <agent-serve.json> [--agent <agt>] [--supervise | --detach] [--log <file>]   answer inbox items with the agent's own harness
+  agent serve --file <agent-serve.json> [--agent <agt>] [--supervise | --detach] [--log <file>] [--accept-state-loss]   answer inbox items with the agent's own harness
   agent stop [--agent <agt>]   stop the serve loop started by --detach or --supervise (own pidfile only)
   (owner) agents export [--file <agents.json>]   writes card ids so agent login --file connects existing cards
   tool list | tool call <name> [--input <json|@file>] [--yes]   call one tool as the agent (read-only tools; writes need --yes)

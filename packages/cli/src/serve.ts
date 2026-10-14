@@ -15,7 +15,7 @@
  * a turn; the server marks ambiguous runs `uncertain`. Due times and cron live on the server, not here.
  */
 import { type ChildProcess, spawn } from "node:child_process";
-import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, open, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve as resolvePath } from "node:path";
 import type { HeldResult, McpClient, McpToolResult } from "@opt2-tealbrick/bridge";
@@ -60,6 +60,12 @@ export interface InboxSpec {
    * `sender.name`. `channel` fixes the channel (e.g. "buzz"). `false` = never send a claim for this inbox.
    */
   sender?: false | { channel?: string; channelField?: string; idField?: string; nameField?: string };
+  /**
+   * BRG-02 (C151, opt-in): `"notify"` = when a turn for this inbox fails (or is given up), post ONE fixed notice in the
+   * same thread (TURN_FAILED_NOTICE, idempotency key `turnfail:<itemId>`). Only for Connect's `connect__buzz_read` and
+   * `connect__channel_inbox` (and the auto inbox). Off by default: it is an outward action of the runner.
+   */
+  onFailure?: "notify";
 }
 
 /** C83 G10: one scheduled-work source (e.g. Evolution `routines_due` / `routine_claim` / `routine_report`). */
@@ -149,6 +155,12 @@ export interface ClaudeCodeHarness {
   turnTimeoutSeconds?: number;
   /** extra env names for the turn (the allow-list of the command harness applies; HOME and USER are in it) */
   passthroughEnv?: string[];
+  /**
+   * F104 (L29): false (default) = each turn runs with `--no-session-persistence`: Claude Code writes no session
+   * transcript under ~/.claude/projects/. Claude Code has no option that moves only that folder into the agent folder
+   * (CLAUDE_CONFIG_DIR moves its login too), so nothing is written there instead. true = Claude Code's own default.
+   */
+  persistSession?: boolean;
 }
 
 export const CLAUDE_CODE_MAX_TURNS = 20;
@@ -182,7 +194,59 @@ export interface TurnEvents {
 /** Runs one turn in the agent's harness. Resolves when the turn ends (success or failure). `summary`: the last
  * assistant text (claude) or the exit code (command), used for routine reports. `onBehalfOf`: the sender of the
  * turn's message(s); the turn's relay adds it as `_meta["tealbrick/onBehalfOf"]` to every tool call. */
-export type HarnessRunner = (prompt: string, events: TurnEvents, opts?: { onBehalfOf?: OnBehalfOfClaim }) => Promise<{ ok: boolean; summary?: string }>;
+export type HarnessRunner = (prompt: string, events: TurnEvents, opts?: { onBehalfOf?: OnBehalfOfClaim }) => Promise<TurnResult>;
+
+/**
+ * BRG-02 (C151): `started: false` ONLY when the runner can prove that no model call and no tool call happened (the
+ * harness process did not spawn; the Agent SDK threw before the first stream message). Absent = started (conservative):
+ * a started turn is never re-run. `code`: a short failure code for logs and `agent status` (no payload).
+ */
+export interface TurnResult {
+  ok: boolean;
+  summary?: string;
+  started?: boolean;
+  code?: string;
+}
+
+/** BRG-02: one sender group of one inbox poll, kept in the state from the poll until its turn has ended. */
+export interface InboxQueueEntry {
+  id: string;
+  /** inboxKey of the inbox it came from */
+  key: string;
+  tool: string;
+  itemIds: string[];
+  claim?: OnBehalfOfClaim;
+  prompt: string;
+  /** "started" is saved BEFORE the turn; found at start = the runner died during the turn → uncertain, never re-run */
+  state: "pending" | "started";
+  /** not-started attempts so far */
+  attempts: number;
+  /** epoch ms: not before (backoff of a not-started turn) */
+  next: number;
+  /** opt-in failure notice (InboxSpec.onFailure "notify") */
+  notify?: { tool: string; args: Record<string, unknown>; key: string };
+}
+
+/** BRG-02 (C151 D): what `agent status` shows without reading logs. Counters since the state file was created. */
+export interface ServeHealth {
+  /** inbox or hold turns that started and failed (never re-run) */
+  failed: number;
+  /** inbox turns found started after a restart (the runner died during the turn; never re-run) */
+  uncertain: number;
+  /** inbox items given up after QUEUE_MAX_ATTEMPTS not-started attempts (or dropped from a full queue) */
+  gaveUp: number;
+  /** routine occurrences due before an accepted state loss: reported uncertain, never run */
+  routinesSkipped?: number;
+  last?: { at: string; kind: "failed" | "uncertain" | "gave_up" | "routine_skipped"; tool: string; items: number; code?: string };
+}
+
+/** The fixed text of the opt-in failure notice (no payload, no reason: the owner sees the reason in agent status). */
+export const TURN_FAILED_NOTICE = "I could not finish this request. The owner can see why in the agent status.";
+/** BRG-02: a not-started turn is tried at most this often, with backoff QUEUE_BACKOFF_MS doubling to QUEUE_MAX_BACKOFF_MS. */
+export const QUEUE_MAX_ATTEMPTS = 5;
+export const QUEUE_BACKOFF_MS = 15_000;
+export const QUEUE_MAX_BACKOFF_MS = 300_000;
+const MAX_QUEUE = 100;
 
 export interface ServeState {
   cursors: Record<string, unknown>;
@@ -192,6 +256,15 @@ export interface ServeState {
   routineRuns?: Record<string, { s: RoutineRunState; reason?: string; report?: string }>;
   /** C83: reports that failed; re-sent with the same idempotency key, never with a new turn */
   pendingReports?: PendingReport[];
+  /** BRG-02: inbox turns not finished yet (bounded, MAX_QUEUE) */
+  inboxQueue?: InboxQueueEntry[];
+  /** BRG-02 (C151 D) */
+  health?: ServeHealth;
+  /**
+   * BRG-03: set by `agent serve --accept-state-loss` (epoch ms): a routine occurrence due before it is reported
+   * `uncertain` and never run (a lost ledger may skip work, never repeat it).
+   */
+  stateLostAt?: number;
 }
 
 export interface ServeDeps {
@@ -206,6 +279,8 @@ export interface ServeDeps {
   reconnect?(): Promise<void>;
   /** C96 §8 liveness: "poll" after every poll cycle, "turn" when a harness turn starts */
   heartbeat?(phase: "poll" | "turn"): Promise<void> | void;
+  /** BRG-02 (C151 D): the failure counters, at start and after every change (the heartbeat file carries them) */
+  health?(h: ServeHealth): Promise<void> | void;
 }
 
 const MAX_PROMPT_CHARS = 64_000;
@@ -225,6 +300,7 @@ export function validateServeConfig(raw: unknown): ServeConfig {
   if (c.inboxes.length === 0 && (c.routines ?? []).length === 0) throw new Error("set at least one of inboxes and routines");
   for (const i of c.inboxes) {
     if (i.auto !== undefined && i.auto !== "connect") throw new Error('inbox auto must be "connect"');
+    if (i.onFailure !== undefined && (i.onFailure !== "notify" || (i.auto !== "connect" && !NOTIFY_TOOLS.includes(i.tool)))) throw new Error(`inbox ${i.auto ? "auto" : String(i.tool)}: onFailure "notify" is for ${NOTIFY_TOOLS.join(", ")} and the auto inbox`);
     if (i.auto === "connect") {
       i.tool = AUTO_TOOL;
       if (i.wake !== undefined && i.wake !== "mentions" && i.wake !== "all") throw new Error('inbox auto: wake must be "mentions" or "all"');
@@ -251,6 +327,7 @@ export function validateServeConfig(raw: unknown): ServeConfig {
     if (typeof h.cwd !== "string" || h.cwd.length === 0) throw new Error("harness.cwd: the Claude Code project folder (relative to the config file)");
     if (h.maxTurns !== undefined && (!Number.isInteger(h.maxTurns) || h.maxTurns < 1 || h.maxTurns > 200)) throw new Error("harness.maxTurns: integer 1..200");
     if (h.model !== undefined && !(typeof h.model === "string" && /^[A-Za-z0-9][A-Za-z0-9._:[\]-]{0,99}$/.test(h.model))) throw new Error("harness.model: a model name");
+    if (h.persistSession !== undefined && typeof h.persistSession !== "boolean") throw new Error("harness.persistSession: true or false");
     if (h.allowedTools !== undefined) {
       if (!Array.isArray(h.allowedTools) || h.allowedTools.length > 32 || !h.allowedTools.every((t) => typeof t === "string" && /^[A-Za-z][A-Za-z0-9_-]{0,127}$/.test(t))) throw new Error("harness.allowedTools: up to 32 tool names");
       const no = h.allowedTools.filter((t) => (CLAUDE_CODE_DISALLOWED as readonly string[]).includes(t));
@@ -264,17 +341,20 @@ export function validateServeConfig(raw: unknown): ServeConfig {
 /** F35: auto inbox — re-resolve at most this often, and at once after a derived inbox is refused */
 export const AUTO_RESOLVE_MS = 300_000;
 const AUTO_TOOL = "connect__auto";
+/** inbox tools whose items name the thread a failure notice goes to (InboxSpec.onFailure) */
+const NOTIFY_TOOLS = ["connect__buzz_read", "connect__channel_inbox"];
 const CHAT_BOT_SERVICES = ["slack", "teams", "telegram", "discord"];
 const MAX_AUTO_INBOXES = 8;
 
 /** F35: the concrete inboxes for an `auto: "connect"` entry (pure; the caller makes the tool calls). */
 export function autoInboxes(base: InboxSpec, channels: { id: string; type: string }[] | null, hasChatBot: boolean): { why: string; inboxes: InboxSpec[] } {
-  const buzz = (channel: string, wake: "mentions" | "all"): InboxSpec => ({ tool: "connect__buzz_read", args: { channel }, cursor: { param: "since", from: "max:createdAt" }, items: "messages", id: "id", skipIf: { fromSelf: true }, wake, startAtServe: true });
+  const notify = base.onFailure === "notify" ? { onFailure: "notify" as const } : {};
+  const buzz = (channel: string, wake: "mentions" | "all"): InboxSpec => ({ tool: "connect__buzz_read", args: { channel }, cursor: { param: "since", from: "max:createdAt" }, items: "messages", id: "id", skipIf: { fromSelf: true }, wake, startAtServe: true, ...notify });
   const joined = (channels ?? []).filter((c) => c.type === "channel" || c.type === "group");
   if (joined.length) return { why: "buzz_channels", inboxes: joined.slice(0, MAX_AUTO_INBOXES).map((c) => buzz(c.id, base.wake ?? "mentions")) };
   const dms = (channels ?? []).filter((c) => c.type === "direct");
   if (dms.length) return { why: "buzz_dms", inboxes: dms.slice(0, MAX_AUTO_INBOXES).map((c) => buzz(c.id, "all")) };
-  if (hasChatBot) return { why: "chat_bot", inboxes: [{ tool: "connect__channel_inbox", cursor: { param: "sinceSeq", from: "nextSeq" }, id: "seq", wake: base.wake ?? "mentions" }] };
+  if (hasChatBot) return { why: "chat_bot", inboxes: [{ tool: "connect__channel_inbox", cursor: { param: "sinceSeq", from: "nextSeq" }, id: "seq", wake: base.wake ?? "mentions", ...notify }] };
   return { why: "none", inboxes: [] };
 }
 
@@ -353,6 +433,26 @@ export function routinePrompt(spec: RoutineSpec, job: Record<string, unknown>, t
   return head + body;
 }
 
+/** BRG-02: where the opt-in failure notice goes: the thread of the group's last item (Connect inboxes only). */
+export function noticeFor(inbox: InboxSpec, items: Record<string, unknown>[]): InboxQueueEntry["notify"] | undefined {
+  if (inbox.onFailure !== "notify") return undefined;
+  const last = items.at(-1);
+  const itemId = last ? String(last[inbox.id ?? "id"] ?? "") : "";
+  if (!last || !itemId) return undefined;
+  const key = `turnfail:${itemId}`.slice(0, 200);
+  const hex = /^[0-9a-f]{64}$/;
+  if (inbox.tool === "connect__buzz_read") {
+    const channel = inbox.args?.channel ?? last.channel;
+    if (typeof channel !== "string" || !channel) return undefined;
+    return { tool: "connect__buzz_post", args: { channel, content: TURN_FAILED_NOTICE, ...(hex.test(itemId) ? { replyTo: itemId } : {}), ...(typeof last.threadId === "string" && hex.test(last.threadId) ? { threadRoot: last.threadId } : {}) }, key };
+  }
+  if (inbox.tool === "connect__channel_inbox") {
+    if (typeof last.account !== "string" || typeof last.seq !== "number") return undefined;
+    return { tool: "connect__channel_reply", args: { account: last.account, seq: last.seq, text: TURN_FAILED_NOTICE }, key };
+  }
+  return undefined;
+}
+
 export function holdPrompt(h: { tool: string; holdId: string }, status: "approved" | "denied" | "expired"): string {
   if (status === "approved") return `The owner APPROVED your held call ${h.tool} (hold ${h.holdId}). Repeat exactly the same call once now.`;
   return `Your held call ${h.tool} (hold ${h.holdId}) was ${status === "denied" ? "DENIED by the owner" : "not decided in time and EXPIRED"}. Do not repeat it; tell whoever asked, if appropriate.`;
@@ -369,7 +469,7 @@ export async function serveLoop(cfg: ServeConfig, deps: ServeDeps, signal: Abort
   const followHolds = cfg.holds !== false;
   let backoff = 0;
 
-  const runOne = async (prompt: string, onBehalfOf?: OnBehalfOfClaim): Promise<{ ok: boolean; summary?: string; held: number }> => {
+  const runOne = async (prompt: string, onBehalfOf?: OnBehalfOfClaim): Promise<TurnResult & { held: number }> => {
     let held = 0;
     await deps.heartbeat?.("turn");
     const r = await deps.runTurn(
@@ -445,9 +545,96 @@ export async function serveLoop(cfg: ServeConfig, deps: ServeDeps, signal: Abort
     }
     return it.mentionsMe;
   };
-  const turn = async (prompt: string, onBehalfOf?: OnBehalfOfClaim) => {
-    const r = await runOne(prompt, onBehalfOf);
-    if (!r.ok) throw new Error("turn_failed");
+  const idem = (key: string) => ({ [TOOL_NAME_RULE.idempotencyMetaKey]: key });
+  /** a runner that throws is treated as a started, failed turn (conservative: never re-run) */
+  const runSafe = async (prompt: string, onBehalfOf?: OnBehalfOfClaim): Promise<TurnResult & { held: number }> => {
+    try {
+      return await runOne(prompt, onBehalfOf);
+    } catch {
+      return { ok: false, started: true, code: "runner_error", held: 0 };
+    }
+  };
+  const failCode = (r: TurnResult) => String(r.code ?? (r.started === false ? "not_started" : "turn_failed")).slice(0, 40);
+
+  // ── BRG-02: durable inbox queue + visible failures (C151) ──
+  state.inboxQueue ??= [];
+  state.health ??= { failed: 0, uncertain: 0, gaveUp: 0 };
+  const queue = state.inboxQueue;
+  const health = state.health;
+  const publishHealth = async () => {
+    await deps.health?.(structuredClone(health));
+  };
+  const noteFailure = (kind: NonNullable<ServeHealth["last"]>["kind"], what: { tool: string; itemIds: string[] }, code?: string) => {
+    if (kind === "failed") health.failed += 1;
+    else if (kind === "uncertain") health.uncertain += 1;
+    else if (kind === "gave_up") health.gaveUp += what.itemIds.length;
+    else health.routinesSkipped = (health.routinesSkipped ?? 0) + 1;
+    health.last = { at: new Date(deps.now()).toISOString(), kind, tool: what.tool, items: what.itemIds.length, ...(code ? { code } : {}) };
+  };
+  const unqueue = (e: InboxQueueEntry) => {
+    const i = queue.indexOf(e);
+    if (i >= 0) queue.splice(i, 1);
+  };
+  /** opt-in (onFailure "notify"): ONE fixed notice in the item's thread; one attempt, idempotency key turnfail:<itemId> */
+  const notifyFailure = async (e: InboxQueueEntry) => {
+    if (!e.notify || signal.aborted) return;
+    try {
+      const r = await deps.mcp.callTool(e.notify.tool, e.notify.args, idem(e.notify.key));
+      if (r.isError) deps.log("serve.turn.notice_refused", { tool: e.notify.tool, code: errCode(r) });
+      else deps.log("serve.turn.notice_sent", { tool: e.notify.tool });
+    } catch {
+      deps.log("serve.turn.notice_failed", { tool: e.notify.tool });
+    }
+  };
+  // restart: a turn saved as `started` = the runner died during it → uncertain, never re-run (like routines)
+  for (const e of [...queue]) {
+    if (e.state !== "started") continue;
+    unqueue(e);
+    noteFailure("uncertain", e);
+    await deps.saveState(state);
+    deps.log("serve.turn.uncertain", { tool: e.tool, items: e.itemIds });
+    await notifyFailure(e);
+  }
+  await publishHealth();
+  /** runs every due queue entry in order; each in its own try (one failed group never stops the others) */
+  const drainQueue = async () => {
+    for (const e of [...queue]) {
+      if (signal.aborted) return;
+      if (e.state !== "pending" || deps.now() < e.next) continue;
+      e.state = "started";
+      await deps.saveState(state); // saved BEFORE the turn
+      deps.log("serve.turn.start", { tool: e.tool, items: e.itemIds.length, onBehalfOf: !!e.claim, ...(e.attempts ? { attempt: e.attempts + 1 } : {}) });
+      const r = await runSafe(e.prompt, e.claim);
+      if (r.ok) {
+        unqueue(e);
+        await deps.saveState(state);
+        deps.log("serve.turn.done", { tool: e.tool });
+        continue;
+      }
+      const code = failCode(r);
+      if (r.started === false && e.attempts + 1 < QUEUE_MAX_ATTEMPTS) {
+        e.attempts += 1;
+        e.state = "pending";
+        const wait = Math.min(QUEUE_BACKOFF_MS * 2 ** (e.attempts - 1), QUEUE_MAX_BACKOFF_MS);
+        e.next = deps.now() + wait;
+        await deps.saveState(state);
+        deps.log("serve.turn.not_started", { tool: e.tool, items: e.itemIds, attempt: e.attempts, retryInMs: wait, code });
+        continue;
+      }
+      unqueue(e);
+      if (r.started === false) {
+        noteFailure("gave_up", e, code);
+        await deps.saveState(state);
+        deps.log("serve.inbox.gave_up", { tool: e.tool, items: e.itemIds, attempts: e.attempts + 1, code });
+      } else {
+        // started and not ok: NEVER re-run (it may have acted already)
+        noteFailure("failed", e, code);
+        await deps.saveState(state);
+        deps.log("serve.turn.failed", { tool: e.tool, items: e.itemIds, code });
+      }
+      await publishHealth();
+      await notifyFailure(e);
+    }
   };
 
   // ── C83 routines: at-most-once bookkeeping ──
@@ -462,7 +649,6 @@ export async function serveLoop(cfg: ServeConfig, deps: ServeDeps, signal: Abort
     for (const k of keys.slice(0, Math.max(0, keys.length - MAX_SEEN))) delete runs[k];
     await deps.saveState(state);
   };
-  const idem = (key: string) => ({ [TOOL_NAME_RULE.idempotencyMetaKey]: key });
   /** sends a report once; a failure queues it (same key) for later polls — never a new turn */
   const report = async (tool: string, occ: string, status: "dispatched" | "completed" | "failed" | "uncertain", summary?: string) => {
     const args = { occurrence: occ, status, ...(summary ? { summary } : {}) };
@@ -519,6 +705,22 @@ export async function serveLoop(cfg: ServeConfig, deps: ServeDeps, signal: Abort
       if (signal.aborted) return;
       const occ = String(j[idField] ?? "");
       if (!/^[A-Za-z0-9_-]{8,120}$/.test(occ) || runs[occ]) continue; // (a) known in any state → never again
+      // BRG-03: after an accepted state loss, an occurrence due before it may have run already → uncertain, never run
+      if (state.stateLostAt !== undefined && !(Date.parse(String(j.dueAt ?? "")) >= state.stateLostAt)) {
+        await setRun(occ, { s: "reported", reason: "state_lost", report: spec.report });
+        noteFailure("routine_skipped", { tool: spec.due, itemIds: [occ] });
+        await deps.saveState(state);
+        deps.log("serve.routine.uncertain", { occurrence: occ, reason: "state_lost" });
+        await publishHealth();
+        // one attempt, not queued: an occurrence this runner never claimed is refused (not_found) by the server
+        try {
+          const r = await deps.mcp.callTool(spec.report, { occurrence: occ, status: "uncertain", summary: "state lost; not run" }, idem(`report:${occ}:uncertain`));
+          if (r.isError) deps.log("serve.routine.report_refused", { status: "uncertain", code: errCode(r) });
+        } catch {
+          deps.log("serve.routine.report_failed", { status: "uncertain" });
+        }
+        continue;
+      }
       await setRun(occ, { s: "claiming", report: spec.report }); // (b) before the claim
       let claimed: Record<string, unknown> | undefined;
       try {
@@ -542,12 +744,7 @@ export async function serveLoop(cfg: ServeConfig, deps: ServeDeps, signal: Abort
       await report(spec.report, occ, "dispatched"); // (d)
       await setRun(occ, { s: "started", report: spec.report }); // saved BEFORE the turn
       deps.log("serve.routine.turn.start", { occurrence: occ });
-      let r: { ok: boolean; summary?: string; held: number };
-      try {
-        r = await runOne(routinePrompt(spec, job, typeof j.title === "string" ? j.title : undefined));
-      } catch {
-        r = { ok: false, held: 0 };
-      }
+      const r = await runSafe(routinePrompt(spec, job, typeof j.title === "string" ? j.title : undefined));
       deps.log("serve.routine.turn.done", { occurrence: occ, ok: r.ok, held: r.held });
       await setRun(occ, { s: "reported", report: spec.report });
       await report(spec.report, occ, r.ok ? "completed" : "failed", reportSummary(r.summary, r.held)); // (f)
@@ -557,6 +754,7 @@ export async function serveLoop(cfg: ServeConfig, deps: ServeDeps, signal: Abort
   while (!signal.aborted) {
     try {
       await flushReports();
+      await drainQueue(); // BRG-02: turns left from an earlier poll (not-started retries, a poll cut by an error)
       for (const spec of cfg.routines ?? []) {
         if (signal.aborted) break;
         await pollRoutine(spec);
@@ -621,8 +819,8 @@ export async function serveLoop(cfg: ServeConfig, deps: ServeDeps, signal: Abort
         state.seen[key] = [...(state.seen[key] ?? []), ...ids.filter((id) => !seen.has(id))].slice(-MAX_SEEN);
         const firstRun = !state.primed[key];
         state.primed[key] = true;
-        await deps.saveState(state);
         if (firstRun && !cfg.backlog) {
+          await deps.saveState(state);
           deps.log("serve.inbox.primed", { tool: inbox.tool, skipped: fresh.length });
           continue;
         }
@@ -635,12 +833,25 @@ export async function serveLoop(cfg: ServeConfig, deps: ServeDeps, signal: Abort
           g.items.push(it);
           groups.set(k, g);
         }
+        // BRG-02: each group goes into the queue as `pending`; the queue, the cursor and `seen` are ONE write (L31)
         for (const g of groups.values()) {
-          if (signal.aborted) break;
-          deps.log("serve.turn.start", { tool: inbox.tool, items: g.items.length, onBehalfOf: !!g.claim });
-          await turn(promptFor(inbox.tool, g.items), g.claim);
-          deps.log("serve.turn.done", { tool: inbox.tool });
+          const itemIds = g.items.map((it) => String(it[idField] ?? ""));
+          const notify = noticeFor(inbox, g.items);
+          queue.push({ id: `${key}#${itemIds.at(-1)}`, key, tool: inbox.tool, itemIds, ...(g.claim ? { claim: g.claim } : {}), prompt: promptFor(inbox.tool, g.items), state: "pending", attempts: 0, next: 0, ...(notify ? { notify } : {}) });
         }
+        // bounded: a full queue gives up its oldest pending groups (visible, never silent)
+        const dropped: InboxQueueEntry[] = [];
+        while (queue.length > MAX_QUEUE) {
+          const old = queue.find((e) => e.state === "pending");
+          if (!old) break;
+          unqueue(old);
+          noteFailure("gave_up", old, "queue_full");
+          dropped.push(old);
+        }
+        await deps.saveState(state);
+        for (const d of dropped) deps.log("serve.inbox.gave_up", { tool: d.tool, items: d.itemIds, code: "queue_full" });
+        if (dropped.length) await publishHealth();
+        await drainQueue();
       }
       // held calls: poll their status tool (≥ 10 s apart) and start a follow-up turn on a decision
       for (const [id, h] of holds) {
@@ -651,7 +862,14 @@ export async function serveLoop(cfg: ServeConfig, deps: ServeDeps, signal: Abort
           holds.delete(id);
           const s = status === "approved" ? "approved" : status === "denied" || status === "declined" ? "denied" : "expired";
           deps.log("serve.hold.decided", { hold: id, status: s });
-          await turn(holdPrompt(h, s), h.onBehalfOf);
+          const r = await runSafe(holdPrompt(h, s), h.onBehalfOf);
+          if (!r.ok) {
+            // a follow-up turn that failed is never re-run (it may have acted); visible like an inbox turn (L3)
+            noteFailure("failed", { tool: h.tool, itemIds: [] }, failCode(r));
+            await deps.saveState(state);
+            deps.log("serve.turn.failed", { hold: id, tool: h.tool, code: failCode(r) });
+            await publishHealth();
+          }
         } else h.next = deps.now() + 10_000;
       }
       backoff = 0;
@@ -674,26 +892,108 @@ export async function serveLoop(cfg: ServeConfig, deps: ServeDeps, signal: Abort
     // F58: wake early for a pending quick retry
     // (only FUTURE wake-ups, and never less than 1 s: a stale entry must not turn the loop into a busy spin)
     const t = deps.now();
-    const quickAt = Math.min(...[...refused.values()].filter((r) => r.quick && r.next > t).map((r) => r.next), ...[...auto.values()].filter((a) => a.tries > 0 && a.next > t).map((a) => a.next));
+    const quickAt = Math.min(
+      ...[...refused.values()].filter((r) => r.quick && r.next > t).map((r) => r.next),
+      ...[...auto.values()].filter((a) => a.tries > 0 && a.next > t).map((a) => a.next),
+      ...queue.filter((e) => e.state === "pending" && e.next > t).map((e) => e.next),
+    );
     await deps.sleep(Number.isFinite(quickAt) ? Math.max(1_000, Math.min(pollMs, quickAt - t)) : pollMs, signal);
   }
 }
 
 // ── state file ──
-export function fileState(path: string): Pick<ServeDeps, "loadState" | "saveState"> {
+/**
+ * BRG-03: the state file could not be read (anything but "does not exist"). `agent serve` refuses to start: a silent
+ * fresh state would wipe the routine ledger (duplicate outward actions) and the inbox cursors.
+ */
+export class StateUnreadableError extends Error {
+  readonly code = "state_unreadable";
+  readonly path: string;
+  /** errno code (EACCES, EIO, …) or empty | json | shape */
+  readonly reason: string;
+  constructor(path: string, reason: string) {
+    super(`state_unreadable: ${path} (${reason})`);
+    this.name = "StateUnreadableError";
+    this.path = path;
+    this.reason = reason;
+  }
+}
+
+/** The file operations of the state file (injectable: the fsync order is tested, L27). */
+export interface StateIo {
+  readFile(path: string): Promise<string>;
+  mkdir(dir: string): Promise<void>;
+  /** write the whole file (mode 0600) and fsync it before returning */
+  writeFileSynced(path: string, data: string): Promise<void>;
+  rename(from: string, to: string): Promise<void>;
+  /** fsync the directory (makes the rename durable) */
+  syncDir(dir: string): Promise<void>;
+}
+
+export const realStateIo: StateIo = {
+  readFile: (p) => readFile(p, "utf8"),
+  mkdir: async (d) => {
+    await mkdir(d, { recursive: true, mode: 0o700 });
+  },
+  async writeFileSynced(p, data) {
+    const fh = await open(p, "w", 0o600);
+    try {
+      await fh.writeFile(data, "utf8");
+      await fh.sync();
+    } finally {
+      await fh.close();
+    }
+  },
+  rename: (a, b) => rename(a, b),
+  async syncDir(d) {
+    const fh = await open(d, "r");
+    try {
+      await fh.sync();
+    } catch (e) {
+      // some file systems cannot fsync a directory; the file itself is already synced
+      if (!["EINVAL", "ENOTSUP", "EISDIR", "EPERM", "EBADF"].includes(String((e as NodeJS.ErrnoException).code))) throw e;
+    } finally {
+      await fh.close();
+    }
+  },
+};
+
+const isObj = (v: unknown): v is Record<string, unknown> => !!v && typeof v === "object" && !Array.isArray(v);
+
+/** A fresh state (first start, or `--accept-state-loss`). */
+export const freshState = (): ServeState => ({ cursors: {}, seen: {}, primed: {}, routineRuns: {}, pendingReports: [] });
+
+export function fileState(path: string, io: StateIo = realStateIo): Pick<ServeDeps, "loadState" | "saveState"> {
   return {
     async loadState() {
+      let text: string;
       try {
-        return JSON.parse(await readFile(path, "utf8")) as ServeState;
-      } catch {
-        return { cursors: {}, seen: {}, primed: {}, routineRuns: {}, pendingReports: [] };
+        text = await io.readFile(path);
+      } catch (e) {
+        const code = String((e as NodeJS.ErrnoException).code ?? "read_error");
+        if (code === "ENOENT") return freshState(); // first start
+        throw new StateUnreadableError(path, code);
       }
+      if (!text.trim()) throw new StateUnreadableError(path, "empty");
+      let v: unknown;
+      try {
+        v = JSON.parse(text);
+      } catch {
+        throw new StateUnreadableError(path, "json");
+      }
+      const objects = ["cursors", "seen", "primed", "routineRuns", "health"] as const;
+      const arrays = ["pendingReports", "inboxQueue"] as const;
+      if (!isObj(v) || objects.some((f) => v[f] !== undefined && !isObj(v[f])) || arrays.some((f) => v[f] !== undefined && !Array.isArray(v[f]))) throw new StateUnreadableError(path, "shape");
+      return v as unknown as ServeState;
     },
     async saveState(s) {
-      await mkdir(dirname(path), { recursive: true, mode: 0o700 });
+      // BRG-03: tmp written and fsynced, renamed, then the directory fsynced: a power loss leaves the old or the new file
+      const dir = dirname(path);
+      await io.mkdir(dir);
       const tmp = `${path}.tmp-${process.pid}`;
-      await writeFile(tmp, JSON.stringify(s), { mode: 0o600 });
-      await rename(tmp, path);
+      await io.writeFileSynced(tmp, JSON.stringify(s));
+      await io.rename(tmp, path);
+      await io.syncDir(dir);
     },
   };
 }
@@ -728,6 +1028,9 @@ export async function claudeRunner(h: Extract<HarnessSpec, { kind: "claude" }>, 
     let ok = false;
     let summary: string | undefined;
     let usage: Record<string, unknown> | undefined;
+    // BRG-02 (C151): only the harness's typed marker (SDK threw before the first stream message) means "not started"
+    let notStarted = false;
+    let errorCode: string | undefined;
     const relayArgs = turnOpts?.onBehalfOf ? [...relay.args, "--on-behalf-of", encodeOnBehalfOf(turnOpts.onBehalfOf)] : relay.args;
     const transcript: Record<string, unknown>[] | null = h.transcripts ? [{ at: new Date().toISOString(), type: "prompt", text: prompt, ...(turnOpts?.onBehalfOf ? { onBehalfOf: turnOpts.onBehalfOf } : {}) }] : null;
     try {
@@ -754,6 +1057,10 @@ export async function claudeRunner(h: Extract<HarnessSpec, { kind: "claude" }>, 
         if (transcript) transcript.push({ at: new Date().toISOString(), ...e });
         if (e.type === "held") events.onHeld({ status: "held", holdId: e.holdId, expiresAt: e.expiresAt, checkWith: e.checkWith, tool: e.tool });
         if (e.type === "text") summary = e.text;
+        if (e.type === "error") {
+          errorCode = e.code;
+          if (e.started === false) notStarted = true;
+        }
         if (e.type === "result") {
           ok = e.ok;
           if (e.text) summary = e.text;
@@ -764,9 +1071,9 @@ export async function claudeRunner(h: Extract<HarnessSpec, { kind: "claude" }>, 
     } finally {
       if (transcript && h.transcripts) await writeTranscript(resolvePath(configDir, h.transcripts), transcript).catch(() => undefined);
       // usage per turn (tokens, cost, turns, model; never the prompt or the reply) in the serve log too
-      opts.log?.("serve.turn.result", { harness: "claude", ok, ...(usage ?? {}) });
+      opts.log?.("serve.turn.result", { harness: "claude", ok, ...(notStarted ? { started: false } : {}), ...(errorCode ? { error: errorCode.slice(0, 40) } : {}), ...(usage ?? {}) });
     }
-    return { ok, ...(summary ? { summary } : {}) };
+    return { ok, ...(summary ? { summary } : {}), ...(notStarted ? { started: false, code: "not_started" } : !ok && errorCode ? { code: errorCode.slice(0, 40) } : {}) };
   };
 }
 
@@ -862,7 +1169,8 @@ export async function commandRunner(
       ...(r.spawnError ? { error: "harness did not start" } : {}),
       wallMs: Date.now() - started,
     });
-    return { ok, summary: r.spawnError ? "harness did not start" : r.timedOut ? "turn timed out" : `exit code ${r.code ?? "none"}` };
+    // BRG-02: only a spawn error proves the harness did not start (a child that ran may have acted, even with no output)
+    return { ok, summary: r.spawnError ? "harness did not start" : r.timedOut ? "turn timed out" : `exit code ${r.code ?? "none"}`, ...(r.spawnError ? { started: false, code: "not_started" } : !ok ? { code: r.timedOut ? "turn_timeout" : `exit_${r.code ?? r.signal ?? "none"}` } : {}) };
   };
 }
 
@@ -875,6 +1183,8 @@ export function claudeCodeArgs(h: ClaudeCodeHarness, mcpConfig: string): string[
     "--max-turns",
     String(h.maxTurns ?? CLAUDE_CODE_MAX_TURNS),
     ...(h.model ? ["--model", h.model] : []),
+    // F104: no session transcript under ~/.claude/projects/ (outside the agent folder)
+    ...(h.persistSession === true ? [] : ["--no-session-persistence"]),
     "--mcp-config",
     mcpConfig,
     "--strict-mcp-config",
@@ -974,7 +1284,7 @@ export async function claudeCodeRunner(
         stderrBytes: r.stderrBytes,
       });
       const summary = r.spawnError ? "harness did not start" : r.timedOut ? "turn timed out" : (text ?? `exit code ${r.code ?? "none"}`);
-      return { ok, summary };
+      return { ok, summary, ...(r.spawnError ? { started: false, code: "not_started" } : !ok ? { code: r.timedOut ? "turn_timeout" : res?.subtype ? res.subtype : `exit_${r.code ?? r.signal ?? "none"}` } : {}) };
     } finally {
       await rm(dir, { recursive: true, force: true });
     }
