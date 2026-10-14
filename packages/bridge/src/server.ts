@@ -121,6 +121,15 @@ export function internalListenHost(form: "deployed" | "own_infra", env: NodeJS.P
   return { host: form === "own_infra" ? "127.0.0.1" : "::", explicit: false };
 }
 
+/**
+ * C171: the address the public listener binds. `TB_PUBLIC_HOST` when set (e.g. `127.0.0.1` for an own-infra bridge
+ * behind a local tunnel, so no other program bound to 127.0.0.1:<port> can take its IPv4 traffic). Unset: the bind
+ * without a host, unchanged in both forms (Node: `::` dual stack, `0.0.0.0` on a host without IPv6).
+ */
+export function publicListenHost(env: NodeJS.ProcessEnv): string | undefined {
+  return env.TB_PUBLIC_HOST?.trim() || undefined;
+}
+
 const WILDCARD_HOSTS = new Set(["::", "0.0.0.0"]);
 
 function listenOn(server: Server, port: number, host: string): Promise<void> {
@@ -285,8 +294,9 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
   });
   publicServer.on("upgrade", (req, socket, head) => person.upgrade(req, socket as never, head));
   const internalServer = createServer(listenerOptions, (req, res) => void internalHandler(req, res));
+  const publicBind = publicListenHost(env);
   await Promise.all([
-    new Promise<void>((r) => publicServer.listen(publicPort, r)),
+    publicBind ? listenOn(publicServer, publicPort, publicBind) : new Promise<void>((r) => publicServer.listen(publicPort, r)),
     listenOn(internalServer, internalPort, internalBind.host).catch((e: NodeJS.ErrnoException) => {
       // the deployed default `::` on a host without IPv6: Node's implicit fallback, kept (an explicit host never falls back)
       if (internalBind.explicit || internalBind.host !== "::" || e.code !== "EAFNOSUPPORT") throw e;
@@ -294,7 +304,13 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
     }),
   ]);
   const bound = internalServer.address();
-  logger.info("bridge.listening", { bridge: ctx.identity?.bridgeId, rev: ctx.table?.rev ?? 0, internalHost: bound && typeof bound === "object" ? bound.address : null });
+  const boundPublic = publicServer.address();
+  logger.info("bridge.listening", {
+    bridge: ctx.identity?.bridgeId,
+    rev: ctx.table?.rev ?? 0,
+    publicHost: boundPublic && typeof boundPublic === "object" ? boundPublic.address : null,
+    internalHost: bound && typeof bound === "object" ? bound.address : null,
+  });
 
   const running: RunningBridge = {
     ctx,

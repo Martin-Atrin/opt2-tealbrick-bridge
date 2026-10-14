@@ -5,12 +5,43 @@
  * must recover by itself and process the next message.
  */
 import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { rmSync } from "node:fs";
 import type { ServerResponse } from "node:http";
+import { basename } from "node:path";
 import { PassThrough } from "node:stream";
 import { after, before, describe, test } from "node:test";
 import { connectMcp, McpTimeoutError, startRelay } from "@opt2-tealbrick/bridge";
 import { AGT, BRG, CON, makeWorld, type World } from "../../bridge/test/support/world.ts";
 import { type ServeState, serveLoop, validateServeConfig } from "../src/serve.ts";
+
+/**
+ * Failure diagnostics (C171): the test bridge listens on 127.0.0.1 only (world default), so a failure is never a
+ * neighbour taking the port. On failure print what the bridge saw on /oauth/token and who holds the ports.
+ */
+function diagnose(w: World, e: unknown): never {
+  const lsof = (port: number) => {
+    try {
+      return execFileSync("lsof", ["-nP", `-i:${port}`], { encoding: "utf8", timeout: 5000 });
+    } catch (err) {
+      const x = err as { stdout?: string; code?: string; status?: number };
+      return x.stdout || `(lsof gave no output: ${x.code ?? `exit ${x.status}`})`;
+    }
+  };
+  console.error(
+    [
+      `serve-restart diagnostics: /oauth/token requests seen by the test bridge = ${w.publicRequests("/oauth/token")}, /mcp = ${w.publicRequests("/mcp")}`,
+      `lsof -nP -i :${w.ports.public} (public)`,
+      lsof(w.ports.public),
+      `lsof -nP -i :${w.ports.internal} (internal)`,
+      lsof(w.ports.internal),
+    ].join("\n"),
+  );
+  throw e;
+}
+
+/** above the relay's 20 s /oauth/token bound: a stuck token request is answered by the relay, not by this timeout */
+const CALL_TIMEOUT_MS = 25_000;
 
 describe("agent serve survives a bridge restart mid-call (F26)", () => {
   let w: World;
@@ -18,14 +49,21 @@ describe("agent serve survives a bridge restart mid-call (F26)", () => {
     w = await makeWorld({ real: true });
   });
   after(async () => {
-    await w.close();
+    try {
+      await w.close();
+    } finally {
+      // this test's own temp dir, also when close fails (world.close removes it too)
+      if (w && basename(w.dataDir).startsWith("tb-bridge-test-")) rmSync(w.dataDir, { recursive: true, force: true });
+    }
   });
 
-  test("the in-flight call fails fast (relay answers), serve backs off, reconnects and handles the next message", async () => {
+  test("the in-flight call fails fast (relay answers), serve backs off, reconnects and handles the next message", () => restartCase().catch((e) => diagnose(w, e)));
+
+  async function restartCase(): Promise<void> {
     const toRelay = new PassThrough();
     const fromRelay = new PassThrough();
     const relay = startRelay({ api: w.api, bridgeUrl: w.publicUrl, connection: { con: CON as never, agt: AGT as never, bridgeId: BRG as never }, signer: { sign: (i) => w.signRaw(i), publicJwk: () => w.agentKey.publicJwk }, stdin: toRelay, stdout: fromRelay });
-    const mcp = connectMcp({ streams: { input: fromRelay, output: toRelay }, callTimeoutMs: 20_000 });
+    const mcp = connectMcp({ streams: { input: fromRelay, output: toRelay }, callTimeoutMs: CALL_TIMEOUT_MS });
     await mcp.initialize("serve-restart-test");
 
     let polls = 0;
@@ -90,11 +128,11 @@ describe("agent serve survives a bridge restart mid-call (F26)", () => {
     w.appOps.override = undefined;
     assert.ok(restarted, "the bridge restarted mid-call");
     assert.ok(logs.includes("serve.error"), "the lost call surfaced as an error (no silent hang)");
-    assert.ok((firstErrorMs ?? Infinity) < 10_000, `the RELAY answered the lost call (error after ${firstErrorMs} ms, client timeout is 20 s)`);
+    assert.ok((firstErrorMs ?? Infinity) < 10_000, `the RELAY answered the lost call (error after ${firstErrorMs} ms, client timeout is ${CALL_TIMEOUT_MS / 1000} s)`);
     assert.ok(logs.includes("serve.reconnected"));
     assert.equal(turns.length, 1, "serve recovered by itself and processed the next message");
     assert.match(turns[0] as string, /after the restart/);
-  });
+  }
 
   test("an MCP call with no answer at all fails after the per-call timeout (never waits forever)", async () => {
     const silent = new PassThrough();
@@ -104,7 +142,9 @@ describe("agent serve survives a bridge restart mid-call (F26)", () => {
     mcp.close();
   });
 
-  test("the relay answers a request whose response carries no answer for it (empty stream / 202)", async () => {
+  test("the relay answers a request whose response carries no answer for it (empty stream / 202)", () => noAnswerCase().catch((e) => diagnose(w, e)));
+
+  async function noAnswerCase(): Promise<void> {
     for (const reply of [() => new Response("", { status: 200, headers: { "content-type": "text/event-stream" } }), () => new Response(null, { status: 202 })]) {
       const stdin = new PassThrough();
       const stdout = new PassThrough();
@@ -137,5 +177,5 @@ describe("agent serve survives a bridge restart mid-call (F26)", () => {
       relay.stop();
       assert.equal(lines.find((l) => l.id === 2)?.error?.message, "bridge connection lost");
     }
-  });
+  }
 });

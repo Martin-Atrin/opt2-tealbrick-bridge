@@ -49,7 +49,7 @@ describe("BRG-12: a one-time claim code is consumed once, even by parallel claim
       });
     });
     await new Promise<void>((r) => neighbour.listen(port, "127.0.0.1", r));
-    w = await makeWorld({ real: true, extraOwnInfraOrigins: [`http://127.0.0.1:${port}`] });
+    w = await makeWorld({ real: true, formDefaultHosts: true, extraOwnInfraOrigins: [`http://127.0.0.1:${port}`] });
     await w.amend((c) => {
       c.enrolCodes.push({ digest: w.api.opaqueDigest(NCODE), kind: "neighbour", ins: NINS as never, product: "guard", exp: now() + 3600 } as never);
     });
@@ -233,7 +233,7 @@ describe("BRG-29: the internal listener's address per form", () => {
   });
 
   test("own_infra: bound to 127.0.0.1 (never every interface), advertised as 127.0.0.1, reachable there", async () => {
-    const w = await makeWorld({ real: true, form: "own_infra" });
+    const w = await makeWorld({ real: true, form: "own_infra", formDefaultHosts: true });
     try {
       assert.equal(boundHost(w), "127.0.0.1");
       assert.match(w.bridge.ctx.internalUrl, /^http:\/\/127\.0\.0\.1:\d+$/, "advertised as the bound address (tests listen on port 0)");

@@ -141,6 +141,8 @@ export interface World {
   signPortal(typ: string, claims: object): Promise<string>;
   /** access token for any connection of the config (key method, the world's agent key) */
   agentTokenFor(agt: string, con: string): Promise<string>;
+  /** requests the bridge's public listener received on this path, across restarts (failure diagnostics) */
+  publicRequests(path: string): number;
   /** test hook in the fake app's op route: return true when it answered the request itself */
   appOps: { override?: (op: string, body: Record<string, unknown>, res: ServerResponse) => boolean };
 }
@@ -167,6 +169,12 @@ export interface WorldOptions {
   extraOwnInfraOrigins?: string[];
   /** BRG-29: the bridge form (default: the startBridge default, deployed) */
   form?: "deployed" | "own_infra";
+  /**
+   * C171: by default both test listeners bind 127.0.0.1 (TB_PUBLIC_HOST / TB_INTERNAL_HOST), so no other program on
+   * this machine bound to a wildcard or 127.0.0.1 port can shadow the test bridge. true = leave both unset (tests of
+   * the per-form defaults).
+   */
+  formDefaultHosts?: boolean;
 }
 
 async function listen(handler: (req: IncomingMessage, res: ServerResponse) => void): Promise<{ server: Server; url: string }> {
@@ -388,7 +396,8 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
   });
 
   const dir = mkdtempSync(join(tmpdir(), "tb-bridge-test-"));
-  const bridgeEnv = (): NodeJS.ProcessEnv => ({ TB_DATA_DIR: dir, TB_PORTAL_URL: portal.url, TB_PUBLIC_URL: "http://127.0.0.1", TB_KEYS_PUBLIC_URL: "http://localhost", TB_ENROL_CODE: ENROL, TB_KEK: "11".repeat(32), TB_OWN_INFRA_ORIGINS: [app.url, hookApp.url, ...(opts.extraOwnInfraOrigins ?? [])].join(","), ...opts.env, ...envOverrides });
+  const loopback = opts.formDefaultHosts ? {} : { TB_PUBLIC_HOST: "127.0.0.1", TB_INTERNAL_HOST: "127.0.0.1" };
+  const bridgeEnv = (): NodeJS.ProcessEnv => ({ ...loopback, TB_DATA_DIR: dir, TB_PORTAL_URL: portal.url, TB_PUBLIC_URL: "http://127.0.0.1", TB_KEYS_PUBLIC_URL: "http://localhost", TB_ENROL_CODE: ENROL, TB_KEK: "11".repeat(32), TB_OWN_INFRA_ORIGINS: [app.url, hookApp.url, ...(opts.extraOwnInfraOrigins ?? [])].join(","), ...opts.env, ...envOverrides });
   const roots = opts.portalRoots ?? (root ? [root.publicJwk] : undefined);
   const rootOpt = roots ? { portalRootKeys: roots } : {};
   let bridge: RunningBridge;
@@ -411,6 +420,13 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
     rmSync(dir, { recursive: true, force: true });
     throw e;
   }
+  const seen = new Map<string, number>();
+  const countRequests = (b: RunningBridge) =>
+    b.publicServer.on("request", (req: IncomingMessage) => {
+      const path = new URL(req.url ?? "/", "http://x").pathname;
+      seen.set(path, (seen.get(path) ?? 0) + 1);
+    });
+  countRequests(bridge);
   const publicUrl = `http://127.0.0.1:${(bridge.publicServer.address() as AddressInfo).port}`;
   const keysUrl = `http://localhost:${(bridge.publicServer.address() as AddressInfo).port}`;
   const internalUrl = `http://127.0.0.1:${(bridge.internalServer.address() as AddressInfo).port}`;
@@ -455,6 +471,7 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
     agentToken,
     agentTokenFor,
     appOps,
+    publicRequests: (path) => seen.get(path) ?? 0,
     mcp,
     signPortal: sign,
     async amend(change) {
@@ -525,6 +542,7 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
       // stop() is idempotent: the bridge may already be stopped (a drain ends with stop)
       await bridge.stop();
       bridge = await startBridge({ api, logger: opts.logger ?? silentLogger, ports, env: bridgeEnv(), ...(opts.limits ? { limits: opts.limits } : {}), ...(opts.form ? { form: opts.form } : {}), ...rootOpt });
+      countRequests(bridge);
       world.bridge = bridge;
     },
     dataDir: dir,
@@ -538,12 +556,16 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
     },
     rejectedBridgeAssertions: () => assertFailures,
     async close() {
-      await bridge.stop();
-      for (const s of [app.server, hookApp.server, portal.server]) {
-        s.closeAllConnections();
-        await new Promise((r) => s.close(r));
+      // the temp dir goes even when a stop fails (no tb-bridge-test-* left behind)
+      try {
+        await bridge.stop();
+        for (const s of [app.server, hookApp.server, portal.server]) {
+          s.closeAllConnections();
+          await new Promise((r) => s.close(r));
+        }
+      } finally {
+        rmSync(dir, { recursive: true, force: true });
       }
-      rmSync(dir, { recursive: true, force: true });
     },
   };
   return world;

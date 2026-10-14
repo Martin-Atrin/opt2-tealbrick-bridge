@@ -213,8 +213,20 @@ export class PersonSurfaces {
     const session = sid ? this.keySessions.get(sid) : undefined;
     const secure = (this.ctx.keysUrl ?? this.ctx.publicUrl).startsWith("https:");
     if (req.method === "POST") {
-      if (!this.keysPostLimit.take(clientIp(req))) return htmlPage(res, 429, "Too many requests", "<p>Please wait a minute and try again.</p>", { "retry-after": "60" });
-      const form = new URLSearchParams((await readBody(req, 20 * 1024)).toString("utf8"));
+      // L3/L18: every refused save is one log line (names and a code only, never the value, L15) and a plain page
+      const refuse = (code: KeySaveRefusal, keyName: string | null, status: number, title: string, text: string, headers: Record<string, string> = {}) => {
+        this.ctx.log.warn("bridge.keys.save_refused", { app: keyApps(t, keyName), keyName: safeKeyName(keyName), code });
+        htmlPage(res, status, title, `<p>${text}</p>`, headers);
+      };
+      if (!this.keysPostLimit.take(clientIp(req))) return refuse("rate_limited", null, 429, "Too many requests", "The key was not saved. Please wait a minute and try again.", { "retry-after": "60" });
+      let raw: Buffer;
+      try {
+        raw = await readBody(req, 20 * 1024);
+      } catch (e) {
+        if (e instanceof BridgeError && e.code === "payload_too_large") return refuse("too_large", null, 413, "Not saved", "The key was not saved: the value is too large (at most 16 KB).");
+        return refuse("body_invalid", null, e instanceof BridgeError ? e.status : 400, "Not saved", "The key was not saved: the form did not arrive completely. Try again.");
+      }
+      const form = new URLSearchParams(raw.toString("utf8"));
       const ticket = form.get("ticket");
       if (ticket) {
         const v = this.ctx.api.verifyJws<PersonTicketKeysClaims>(ticket, t.issuers, {
@@ -226,7 +238,7 @@ export class PersonSurfaces {
         });
         if (isRefusal(v) || v.claims.pur !== "keys" || v.claims.ws !== t.ws || !this.ctx.state.useJti(v.claims.jti, v.claims.exp)) {
           this.ctx.reject({ kind: "ticket", code: "invalid_token" });
-          return htmlPage(res, 401, "Link expired", "<p>This link has expired or was used. Open the key page again from Portal.</p>");
+          return refuse("ticket_invalid", null, 401, "Link expired", "This link has expired or was used. Open the key page again from Portal.");
         }
         const id = randomBytes(32).toString("base64url");
         const fresh: KeySession = { csrf: randomBytes(24).toString("base64url"), exp: nowS() + LIFETIME_S.keyPageSession, req: v.claims.req ?? [] };
@@ -236,17 +248,20 @@ export class PersonSurfaces {
         // The later form posts on this page are same-site, so Strict works for them.
         return this.renderKeys(res, t, fresh, { "set-cookie": `${cookieName}=${id}; HttpOnly; ${secure ? "Secure; " : ""}SameSite=Strict; Path=/keys; Max-Age=${LIFETIME_S.keyPageSession}` });
       }
-      if (!session || session.exp <= nowS()) return htmlPage(res, 401, "Session expired", "<p>Open the key page again from Portal.</p>");
-      if (form.get("csrf") !== session.csrf) return htmlPage(res, 403, "Refused", "<p>The form expired. Reload the page.</p>");
       const name = form.get("name") ?? "";
+      if (!session || session.exp <= nowS()) return refuse("page_expired", name, 401, "Session expired", "The key was not saved: this page expired. Open the key page again from Portal.");
+      if (form.get("csrf") !== session.csrf) return refuse("csrf_invalid", name, 403, "Refused", "The key was not saved: the form expired. Open the key page again from Portal.");
       const allowed = t.config.keyRequirements.some((k) => k.source === "account_default" && k.name === name);
-      if (!allowed) return htmlPage(res, 400, "Unknown key", "<p>This key is not requested by any app.</p>");
+      if (!allowed) return refuse("unknown_key", name, 400, "Unknown key", "The key was not saved: no app requests this key.");
       if (form.get("action") === "delete") {
         this.ctx.state.setKey(name, null);
       } else {
-        const value = form.get("value") ?? "";
-        if (!value || Buffer.byteLength(value) > 16 * 1024) return htmlPage(res, 400, "Not saved", "<p>Enter a value (at most 16 KB).</p>");
+        // a pasted key often carries a trailing newline or spaces: only the surrounding whitespace is removed
+        const value = (form.get("value") ?? "").trim();
+        if (!value) return refuse("empty_value", name, 400, "Not saved", "The key was not saved: enter a value.");
+        if (Buffer.byteLength(value) > 16 * 1024) return refuse("too_large", name, 400, "Not saved", "The key was not saved: the value is too large (at most 16 KB).");
         this.ctx.state.setKey(name, value);
+        this.ctx.log.info("bridge.keys.saved", { app: keyApps(t, name), keyName: name, keysRev: this.ctx.state.keyStore.keysRev });
       }
       this.ctx.log.info("bridge.keys.changed", { name, keysRev: this.ctx.state.keyStore.keysRev });
       this.ctx.emit("keys");
@@ -280,6 +295,22 @@ ${set ? `<form method="post" action="/keys"><input type="hidden" name="csrf" val
       .join("");
     htmlPage(res, 200, "Workspace default keys", `<p>Keys are stored in your workspace only. Teal Brick Portal never sees them. Values are never shown again.</p>${rows || "<p>No app needs a key.</p>"}`, headers);
   }
+}
+
+/** why a key page save was refused (`bridge.keys.save_refused` code) */
+type KeySaveRefusal = "rate_limited" | "too_large" | "body_invalid" | "ticket_invalid" | "page_expired" | "csrf_invalid" | "unknown_key" | "empty_value";
+
+/** the apps (product ids) that request this key; null when no app does */
+function keyApps(t: NonNullable<BridgeContext["table"]>, keyName: string | null): string | null {
+  if (!keyName) return null;
+  const apps = [...new Set(t.config.keyRequirements.filter((k) => k.source === "account_default" && k.name === keyName).map((k) => k.product))].sort();
+  return apps.length ? apps.join(",") : null;
+}
+
+/** a key name as the form sent it, for the log: only a plain name shape, never a long or odd string (could be a value) */
+function safeKeyName(keyName: string | null): string | null {
+  if (!keyName) return null;
+  return /^[A-Za-z][A-Za-z0-9_]{0,63}$/.test(keyName) ? keyName : "(invalid)";
 }
 
 function unavailable(res: ServerResponse, requestId: string): void {
