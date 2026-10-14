@@ -1,7 +1,8 @@
 # Deployed Teal Brick bridge (opt2). Build context: repository root.
 #   docker build -f packages/bridge-server/Dockerfile .
 # Public image, no secrets baked in. Runtime env: TB_PORTAL_URL, TB_ENROL_CODE, TB_KEK, TB_PUBLIC_URL,
-# TB_DATA_DIR (mount a provider volume at /data; no Dockerfile VOLUME, Railway refuses it), PORT, TB_INTERNAL_PORT.
+# TB_DATA_DIR (mount a provider volume at /data; no Dockerfile VOLUME, Railway refuses it), PORT, TB_INTERNAL_PORT,
+# optional TB_INTERNAL_HOST (private listener address; default `::`, the Railway private network).
 # BSD-04: USER is numeric 1000:1000. Railway runs volume services as root (RAILWAY_RUN_UID=0); the entry then chowns
 # TB_DATA_DIR and drops to 1000:1000 (SDK dropPrivileges) before it loads state or listens, and refuses to stay root.
 FROM node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc2ca920407d46d7ec7f87b20 AS build

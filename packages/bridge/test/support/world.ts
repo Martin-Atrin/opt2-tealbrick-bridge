@@ -96,7 +96,7 @@ export interface World {
   signRaw(input: string): Promise<string>;
   acks: StatusReport[];
   appLog: AppLog;
-  hookMode: { mode: "allow" | "deny" | "fail"; answer?: (hook: string, body: Record<string, unknown>) => unknown };
+  hookMode: { mode: "allow" | "deny" | "fail"; answer?: (hook: string, body: Record<string, unknown>) => unknown | Promise<unknown> };
   /** publish a new config revision (tweak: mutate THIS revision only) */
   publish(tweak?: (c: WorkspaceConfig) => void): Promise<number>;
   /** change the base config for every later revision (what Core keeps listing), then publish */
@@ -165,6 +165,8 @@ export interface WorldOptions {
   portalRoots?: Ed25519KeyPair["publicJwk"][];
   /** further own-infrastructure origins for TB_OWN_INFRA_ORIGINS (e.g. a real SDK app started by a test) */
   extraOwnInfraOrigins?: string[];
+  /** BRG-29: the bridge form (default: the startBridge default, deployed) */
+  form?: "deployed" | "own_infra";
 }
 
 async function listen(handler: (req: IncomingMessage, res: ServerResponse) => void): Promise<{ server: Server; url: string }> {
@@ -267,7 +269,7 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
       const b = await body(req);
       appLog.hooks.push({ hook: url.pathname.slice(13), body: b });
       if (hookMode.mode === "fail") return res.writeHead(500).end();
-      const custom = hookMode.answer?.(url.pathname.slice(13), b);
+      const custom = await hookMode.answer?.(url.pathname.slice(13), b);
       if (custom !== undefined) return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify(custom));
       return res.writeHead(200, { "content-type": "application/json" }).end(JSON.stringify({ allow: hookMode.mode === "allow", reason: "blocked by test" }));
     }
@@ -397,6 +399,7 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
       ports: { public: 0, internal: 0 },
       env: bridgeEnv(),
       ...(opts.limits ? { limits: opts.limits } : {}),
+      ...(opts.form ? { form: opts.form } : {}),
       ...rootOpt,
     });
   } catch (e) {
@@ -521,7 +524,7 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
     async restart() {
       // stop() is idempotent: the bridge may already be stopped (a drain ends with stop)
       await bridge.stop();
-      bridge = await startBridge({ api, logger: opts.logger ?? silentLogger, ports, env: bridgeEnv(), ...(opts.limits ? { limits: opts.limits } : {}), ...rootOpt });
+      bridge = await startBridge({ api, logger: opts.logger ?? silentLogger, ports, env: bridgeEnv(), ...(opts.limits ? { limits: opts.limits } : {}), ...(opts.form ? { form: opts.form } : {}), ...rootOpt });
       world.bridge = bridge;
     },
     dataDir: dir,

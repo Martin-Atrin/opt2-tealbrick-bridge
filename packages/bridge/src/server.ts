@@ -108,6 +108,32 @@ export function ownInfraEnv(env: NodeJS.ProcessEnv, api: ManifestApi): NodeJS.Pr
   return { ...env, TB_KEK: readFileSync(path, "utf8").trim() };
 }
 
+/**
+ * BRG-29: the address the internal listener (claim, status, keys, companion calls, metrics) binds. `TB_INTERNAL_HOST`
+ * wins. Deployed form (a Railway service on the workspace private network): `::`, the address Node bound implicitly
+ * before 0.1.27 (dual stack; the private network reaches the service over it), with Node's own fallback to `0.0.0.0`
+ * on a host without IPv6. own_infra (`tealbrick bridge run` on a user machine or NAS): `127.0.0.1`, never every
+ * interface implicitly; a neighbour on another machine needs `TB_INTERNAL_HOST` set to the private interface.
+ */
+export function internalListenHost(form: "deployed" | "own_infra", env: NodeJS.ProcessEnv): { host: string; explicit: boolean } {
+  const set = env.TB_INTERNAL_HOST?.trim();
+  if (set) return { host: set, explicit: true };
+  return { host: form === "own_infra" ? "127.0.0.1" : "::", explicit: false };
+}
+
+const WILDCARD_HOSTS = new Set(["::", "0.0.0.0"]);
+
+function listenOn(server: Server, port: number, host: string): Promise<void> {
+  return new Promise<void>((resolve, reject) => {
+    const failed = (e: Error) => reject(e);
+    server.once("error", failed);
+    server.listen(port, host, () => {
+      server.off("error", failed);
+      resolve();
+    });
+  });
+}
+
 /** BRG-05: a KEK rotation is visible in the log (how many records moved to TB_KEK); quiet when nothing moved. */
 function logResealed(logger: Logger, records: number): void {
   if (records > 0) logger.info("bridge.kek.resealed", { records });
@@ -149,7 +175,11 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
   const keks = keksFromEnv(env, o.api);
   const state = new BridgeState(dataDir, o.api, keks);
   logResealed(logger, state.load());
-  const privateHost = env.RAILWAY_PRIVATE_DOMAIN || hostname();
+  const form = o.form ?? "deployed";
+  const internalBind = internalListenHost(form, env);
+  // the advertised internal address: the Railway private domain, else the bound address when it is one host
+  const boundHost = WILDCARD_HOSTS.has(internalBind.host) ? undefined : internalBind.host.includes(":") ? `[${internalBind.host}]` : internalBind.host;
+  const privateHost = env.RAILWAY_PRIVATE_DOMAIN || boundHost || hostname();
   const ctx = new BridgeContext({
     api: o.api,
     state,
@@ -158,7 +188,7 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
     publicUrl,
     keysUrl,
     internalUrl: `http://${privateHost}:${internalPort}`,
-    form: o.form ?? "deployed",
+    form,
     ownInfraOrigins: (env.TB_OWN_INFRA_ORIGINS ?? "").split(",").map((h) => h.trim()).filter(Boolean),
     ...(o.portalRootKeys ? { portalRoots: o.portalRootKeys } : {}),
     ...(o.fetch ? { fetch: o.fetch } : {}),
@@ -257,9 +287,14 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
   const internalServer = createServer(listenerOptions, (req, res) => void internalHandler(req, res));
   await Promise.all([
     new Promise<void>((r) => publicServer.listen(publicPort, r)),
-    new Promise<void>((r) => internalServer.listen(internalPort, r)),
+    listenOn(internalServer, internalPort, internalBind.host).catch((e: NodeJS.ErrnoException) => {
+      // the deployed default `::` on a host without IPv6: Node's implicit fallback, kept (an explicit host never falls back)
+      if (internalBind.explicit || internalBind.host !== "::" || e.code !== "EAFNOSUPPORT") throw e;
+      return listenOn(internalServer, internalPort, "0.0.0.0");
+    }),
   ]);
-  logger.info("bridge.listening", { bridge: ctx.identity?.bridgeId, rev: ctx.table?.rev ?? 0 });
+  const bound = internalServer.address();
+  logger.info("bridge.listening", { bridge: ctx.identity?.bridgeId, rev: ctx.table?.rev ?? 0, internalHost: bound && typeof bound === "object" ? bound.address : null });
 
   const running: RunningBridge = {
     ctx,

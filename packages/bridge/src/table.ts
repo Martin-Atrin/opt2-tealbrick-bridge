@@ -192,7 +192,7 @@ export async function buildTable(input: BuildInput): Promise<Table> {
     appsByProduct,
     grants: new Map(),
     instanceKeys: new Map(),
-    hooks: [...config.hooks].sort((a, b) => (a.phase === b.phase ? a.order - b.order || a.product.localeCompare(b.product) : 0)),
+    hooks: [...config.hooks].sort(compareHooks),
     revokedJtis,
     pausedAgents: new Set(config.pause.agents),
     pausedInstances: new Set(config.pause.instances),
@@ -216,6 +216,18 @@ export async function buildTable(input: BuildInput): Promise<Table> {
     partial.instanceKeys.set(key, api.keySetFrom({ keys: [k.jwk] }, insRef(k.ins)));
   }
   return partial;
+}
+
+const PHASE_RANK: Record<HookEntry["phase"], number> = { before: 0, context: 1, after: 2 };
+const cmp = (a: string, b: string): number => (a < b ? -1 : a > b ? 1 : 0);
+
+/**
+ * BRG-28 (BRIDGE §8.1 steps 6, 7, 12): THE hook order, used everywhere — phase, then ascending `order`, then product
+ * id, then hook id. Ids compare by code unit (`<`), never by locale: the security chain keeps the FIRST hold, so its
+ * order must not depend on the ICU locale. A total order: the table is sorted once and phases filter it in place.
+ */
+export function compareHooks(a: HookEntry, b: HookEntry): number {
+  return PHASE_RANK[a.phase] - PHASE_RANK[b.phase] || (a.order === b.order ? 0 : a.order < b.order ? -1 : 1) || cmp(a.product, b.product) || cmp(a.hookId, b.hookId);
 }
 
 /** Pause decision inputs for `gate()` step 1 (CREDENTIALS §13). */

@@ -4,7 +4,8 @@
  * env, signals, graceful shutdown. All behaviour lives in @opt2-tealbrick/bridge.
  *
  * Env (BRIDGE §4.1, §3): TB_PORTAL_URL, TB_ENROL_CODE, TB_KEK, TB_PUBLIC_URL, TB_DATA_DIR,
- * PORT (public listener), TB_INTERNAL_PORT (private listener, default 8788). KEK rotation (BRG-05): set the new key
+ * PORT (public listener), TB_INTERNAL_PORT (private listener, default 8788), TB_INTERNAL_HOST (private listener
+ * address, default `::` as before: the Railway private network; BRG-29). KEK rotation (BRG-05): set the new key
  * as TB_KEK and the old one as TB_KEK_PREVIOUS for ONE start (every sealed record moves to TB_KEK), then drop it.
  */
 import { lchownSync } from "node:fs";

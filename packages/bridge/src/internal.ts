@@ -28,6 +28,8 @@ export class InternalApi {
   private readonly seenJtis = new Map<string, number>();
   private readonly waiters = new Set<() => void>();
   private readonly appInitiated = new TokenBucket(APP_INITIATED_LIMIT.perMinute / 60, APP_INITIATED_LIMIT.burst);
+  /** BRG-12 (L31): digests of one-time codes whose claim is in progress (reserved before the first await) */
+  private readonly claiming = new Set<string>();
 
   constructor(ctx: BridgeContext, router: CallRouter) {
     this.ctx = ctx;
@@ -120,10 +122,24 @@ export class InternalApi {
     const codeDigest = ctx.api.opaqueDigest(r.code);
     const now = nowS();
     const entry = t.config.enrolCodes.find((e) => ctx.api.digestEqual(e.digest, codeDigest) && e.exp > now);
-    if (!entry || ctx.state.claims.some((c) => ctx.api.digestEqual(c.codeDigest, codeDigest))) {
+    const taken = (d: string) => ctx.api.digestEqual(d as typeof codeDigest, codeDigest);
+    if (!entry || ctx.state.claims.some((c) => taken(c.codeDigest)) || [...this.claiming].some(taken)) {
       ctx.reject({ kind: "claim", code: "code_invalid" });
       throw new BridgeError("code_invalid", 403);
     }
+    // BRG-12: reserve the code in the same synchronous step as the check (a neighbour claim awaits its manifest
+    // fetch below); a parallel claim with the same code is refused code_invalid. Released when this claim ends:
+    // on success the persisted claim record holds the code, on failure a retry can claim again.
+    this.claiming.add(codeDigest);
+    try {
+      await this.claimReserved(res, t, id, r, entry, codeDigest);
+    } finally {
+      this.claiming.delete(codeDigest);
+    }
+  }
+
+  private async claimReserved(res: ServerResponse, t: Table, id: NonNullable<BridgeContext["identity"]>, r: ClaimRequest, entry: Table["config"]["enrolCodes"][number], codeDigest: Table["config"]["enrolCodes"][number]["digest"]): Promise<void> {
+    const ctx = this.ctx;
     if (typeof r.sdkVersion !== "string" || !ctx.api.sdkMajorServed(r.sdkVersion, SDK_CURRENT_MAJOR)) throw new BridgeError("sdk_major_unsupported", 400);
     const service = entry.kind === "service" ? entry.service : undefined;
     if ((r.service ?? undefined) !== service) throw new BridgeError("code_invalid", 403);
@@ -159,7 +175,7 @@ export class InternalApi {
       out.app = { publicKey: appKey };
       out.serviceKeys = serviceKeyNames(t, entry.ins, service).map((name) => ({ name, env: name }));
     }
-    ctx.state.claims.push({
+    const record = {
       kind: entry.kind,
       ins: entry.ins,
       ...(service ? { service } : {}),
@@ -170,8 +186,15 @@ export class InternalApi {
       codeDigest,
       claimedAt: new Date().toISOString(),
       reported: false,
-    });
-    ctx.state.saveClaims();
+    };
+    ctx.state.claims.push(record);
+    try {
+      ctx.state.saveClaims();
+    } catch (e) {
+      // not persisted → not claimed: the code stays usable (one state change = one write, L31)
+      ctx.state.claims.splice(ctx.state.claims.indexOf(record), 1);
+      throw e;
+    }
     ctx.emit("claim");
     ctx.log.info("bridge.claim", { ins: entry.ins, kind: entry.kind, ...(service ? { svc: service } : {}) });
     sendJson(res, 200, out);

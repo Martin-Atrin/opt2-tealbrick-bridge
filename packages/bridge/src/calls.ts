@@ -139,6 +139,9 @@ export const CALL_ID_RE = /^call_[0-9A-HJKMNP-TV-Z]{26}$/;
 /** an open parent call is accepted as parentCall for at most this long (the op/hook answer windows are shorter) */
 export const PARENT_CALL_TTL_MS = 120_000;
 
+/** A hook answered, but not in the phase's shape (manifest hookResponseProblem). */
+class HookBadAnswer extends Error {}
+
 function hookMatches(m: { products: readonly string[]; operations?: readonly string[]; effects?: readonly string[] }, target: Target, op: OperationView): boolean {
   return (m.products.includes("*") || m.products.includes(target.app.entry.product)) && (!m.operations || m.operations.includes(op.id)) && (!m.effects || m.effects.includes(op.effect));
 }
@@ -328,14 +331,36 @@ export class CallRouter {
     }
   }
 
-  /** Listed, enabled hooks of one phase that match the call (a listed hook whose app is down fails closed in callHook). */
+  /**
+   * Listed, enabled hooks of one phase that match the call (a listed hook whose app is down fails closed in callHook).
+   * BRG-28: `t.hooks` is already in THE hook order (table.ts compareHooks); filtering keeps it, no second sort.
+   */
   private matchingHooks(t: Table, phase: HookEntry["phase"], target: Target, op: OperationView): HookEntry[] {
-    return t.hooks
-      .filter((h) => h.phase === phase && h.enabled !== false && hookMatches(h.match, target, op))
-      .sort((a, b) => a.order - b.order || a.product.localeCompare(b.product));
+    return t.hooks.filter((h) => h.phase === phase && h.enabled !== false && hookMatches(h.match, target, op));
   }
 
+  /**
+   * One hook request, answer shape-checked by the shared rule (manifest hookResponseProblem; a bad shape throws
+   * {@link HookBadAnswer}). BRG-28 (L3, L34): `tb_bridge_hook_calls_total{result}` = done | slow (answered, over
+   * `timeoutMs`) | timeout (aborted at the ≤ 2 s cap) | failed (down app, HTTP error, unreadable or bad answer).
+   */
   private async callHook<R>(t: Table, h: HookEntry, call: CallId, request: Record<string, unknown>, callerRef: string, input: Json | undefined): Promise<R> {
+    const started = Date.now();
+    let result = "failed";
+    try {
+      const r = await this.requestHook(t, h, call, request, callerRef, input);
+      if (this.ctx.api.hookResponseProblem(h.phase, r, h.product) !== null) throw new HookBadAnswer();
+      result = Date.now() - started > h.timeoutMs ? "slow" : "done";
+      return r as R;
+    } catch (e) {
+      if ((e as { name?: unknown } | null)?.name === "TimeoutError") result = "timeout";
+      throw e;
+    } finally {
+      this.count(`hook|${h.id}|${result}`);
+    }
+  }
+
+  private async requestHook(t: Table, h: HookEntry, call: CallId, request: Record<string, unknown>, callerRef: string, input: Json | undefined): Promise<unknown> {
     this.active.get(call)?.deliveredTo.add(h.ins);
     const app = t.apps.get(h.ins);
     // a hook app that is down (or refused by BSD-07) fails closed without a request
@@ -361,23 +386,18 @@ export class CallRouter {
       },
       id.key,
     );
-    const started = Date.now();
-    try {
-      const res = await this.ctx.fetch(new URL(`/tb/v1/hooks/${h.hookId}`, app.entry.internalUrl), {
-        method: "POST",
-        headers: { "content-type": "application/json", "TB-Call": proof },
-        body: JSON.stringify(request),
-        redirect: "error",
-        signal: AbortSignal.timeout(Math.min(Math.max(h.timeoutMs, 100), 2_000)),
-      });
-      if (!res.ok) {
-        await res.body?.cancel().catch(() => undefined);
-        throw new Error(String(res.status));
-      }
-      return await readCappedJson<R>(res, MAX_SMALL_ANSWER_BYTES);
-    } finally {
-      this.count(`hook|${h.id}|${Date.now() - started > h.timeoutMs ? "slow" : "done"}`);
+    const res = await this.ctx.fetch(new URL(`/tb/v1/hooks/${h.hookId}`, app.entry.internalUrl), {
+      method: "POST",
+      headers: { "content-type": "application/json", "TB-Call": proof },
+      body: JSON.stringify(request),
+      redirect: "error",
+      signal: AbortSignal.timeout(Math.min(Math.max(h.timeoutMs, 100), 2_000)),
+    });
+    if (!res.ok) {
+      await res.body?.cancel().catch(() => undefined);
+      throw new Error(String(res.status));
     }
+    return await readCappedJson<unknown>(res, MAX_SMALL_ANSWER_BYTES);
   }
 
   /** Runs one call through the pipeline. Throws BridgeError for refusals; returns ok/held results. */
@@ -442,10 +462,9 @@ export class CallRouter {
         let r: BeforeHookResponse;
         try {
           r = await this.callHook<BeforeHookResponse>(t0, h, call, { phase: "before", call: callInfo, context }, callerRef, req.input);
-        } catch {
-          throw new BridgeError("hook_failed", 503, `hook ${h.id} failed`);
+        } catch (e) {
+          throw new BridgeError("hook_failed", 503, `hook ${h.id} ${e instanceof HookBadAnswer ? "bad answer" : "failed"}`);
         }
-        if (ctx.api.hookResponseProblem("before", r, h.product) !== null) throw new BridgeError("hook_failed", 503, `hook ${h.id} bad answer`);
         const answer = r as unknown as { allow: boolean; reason?: string; hold?: { family: string; reason: string } };
         answers.push({ by: `${h.product}/${h.hookId}`, answer });
         if (!answer.allow && !answer.hold) break;
@@ -458,10 +477,9 @@ export class CallRouter {
         let r: ContextHookResponse;
         try {
           r = await this.callHook<ContextHookResponse>(t0, h, call, { phase: "context", call: callInfo, context }, callerRef, req.input);
-        } catch {
-          throw new BridgeError("hook_failed", 503, `hook ${h.id} failed`);
+        } catch (e) {
+          throw new BridgeError("hook_failed", 503, `hook ${h.id} ${e instanceof HookBadAnswer ? "bad answer" : "failed"}`);
         }
-        if (ctx.api.hookResponseProblem("context", r, h.product) !== null) throw new BridgeError("hook_failed", 503, `hook ${h.id} bad answer`);
         for (const [k, val] of Object.entries((r as { add: Record<string, unknown> }).add)) {
           // §8.5 (G4b): `tb.*` is the bridge's namespace (also enforced here, defence in depth)
           if (k.startsWith("tb.") || !k.startsWith(`${h.product}.`)) throw new BridgeError("hook_failed", 503, `hook ${h.id} wrote outside its namespace`);
@@ -475,6 +493,10 @@ export class CallRouter {
       const target1 = t1 === t0 ? target : { ...target, app: t1.apps.get(target.app.entry.ins) ?? target.app };
       const grant1 = t1 === t0 ? grant : this.selectGrant(t1, caller, target.app.entry.ins);
       this.runGate(t1, caller, target1, op, grant1);
+      // BRG-09 (C117, L33): the after hooks come from t1, so t1 must list every declared matching hook too. A config
+      // swap during the before/context hooks that drops a declared hook refuses the call here, before it is forwarded
+      // (always run: a manifest fetched during the hooks can add declared hooks to the same table).
+      this.requireListedHooks(t1, target1, op);
       // 10. forward
       const result = await this.forward(t1, call, callerRef, target1, op.id, grant1, req, context, hv);
       // 12. after hooks (ok only)
@@ -485,7 +507,6 @@ export class CallRouter {
           let r: AfterHookResponse;
           try {
             r = await this.callHook<AfterHookResponse>(t1, h, call, { phase: "after", call: callInfo, context, output }, callerRef, req.input);
-            if (ctx.api.hookResponseProblem("after", r, h.product) !== null) throw new Error("shape");
           } catch {
             void this.bridgeOp(target1.app, "mark", { call, mark: "after_failed" }).catch(() => undefined);
             throw new BridgeError("after_failed", 503, `after hook ${h.id} failed; output withheld`);
