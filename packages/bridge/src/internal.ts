@@ -188,7 +188,8 @@ export class InternalApi {
       const prev = ctx.health.get(caller.ins);
       ctx.health.set(caller.ins, { status: body, lastSeen: nowS() });
       if (!prev || prev.status.scopesRev !== body.scopesRev) void this.refreshScopeSummary(caller.ins);
-      if (!prev || prev.status.readiness !== body.readiness || prev.status.pendingHolds !== body.pendingHolds) ctx.emit("health");
+      const attentionChanged = JSON.stringify(prev?.status.attention ?? null) !== JSON.stringify(body.attention ?? null);
+      if (!prev || prev.status.readiness !== body.readiness || prev.status.pendingHolds !== body.pendingHolds || attentionChanged) ctx.emit("health");
     }
     const wait = Math.min(Math.max(Number(url.searchParams.get("wait") ?? 0) || 0, 0), 60);
     const answer = (): AppStatusResponse | undefined => {

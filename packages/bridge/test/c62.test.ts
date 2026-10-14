@@ -172,8 +172,8 @@ describe("C133: plaintext state of a bridge before 0.1.12 is refused, never read
       writeFileSync(join(dir, "identity.json"), JSON.stringify({ bridgeId: BRG, workspaceId: WS, kid: key.kid, publicKey: key.publicJwk, sealedPrivateKey: api.seal(pkcs8, keks.current, `tb:seal:bridge-key:${key.kid}`), portalKeys: [], enrolCodeDigest: "sha256:00", configPath: "/c", ackPath: "/a" }));
       writeFileSync(join(dir, "jtis.json"), JSON.stringify({ J1: now() + 600 }));
       const st = new BridgeState(data, api, keks);
-      assert.throws(() => st.load(), /jtis\.json: plaintext state \(a bridge before 0\.1\.12\) is not accepted; re-enrol this bridge/);
-      await assert.rejects(st.loadIdentity(), /identity\.json: plaintext state/);
+      // BRG-25: ONE check at boot names every plaintext file
+      assert.throws(() => st.load(), /^Error: identity\.json, jtis\.json: plaintext state \(a bridge before 0\.1\.12\) is not accepted; re-enrol this bridge/);
       assert.deepEqual(readdirSync(dir).sort(), ["identity.json", "jtis.json"], "nothing resealed, nothing removed");
       // quiet on the good case: a fresh sealed state saves and loads without any error
       rmSync(join(dir, "identity.json"));

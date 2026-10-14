@@ -108,12 +108,17 @@ export function ownInfraEnv(env: NodeJS.ProcessEnv, api: ManifestApi): NodeJS.Pr
   return { ...env, TB_KEK: readFileSync(path, "utf8").trim() };
 }
 
+/** BRG-05: a KEK rotation is visible in the log (how many records moved to TB_KEK); quiet when nothing moved. */
+function logResealed(logger: Logger, records: number): void {
+  if (records > 0) logger.info("bridge.kek.resealed", { records });
+}
+
 /** Enrols (or re-enrols on a new code) and stops: `tealbrick bridge enrol` (CLI.md §5). */
 export async function enrolBridge(o: { api: ManifestApi; env: NodeJS.ProcessEnv; logger?: Logger; fetch?: typeof fetch; form?: "deployed" | "own_infra"; portalRootKeys?: Ed25519PublicJwk[] }): Promise<{ bridgeId: string; workspaceId: string }> {
   const env = o.env;
   if (!env.TB_DATA_DIR) throw new Error("TB_DATA_DIR is required");
   const state = new BridgeState(env.TB_DATA_DIR, o.api, keksFromEnv(env, o.api));
-  state.load();
+  logResealed(o.logger ?? jsonLogger(), state.load());
   const ctx = new BridgeContext({
     api: o.api,
     state,
@@ -143,7 +148,7 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
   const publicPort = o.ports?.public ?? Number(env.PORT ?? 8080);
   const keks = keksFromEnv(env, o.api);
   const state = new BridgeState(dataDir, o.api, keks);
-  state.load();
+  logResealed(logger, state.load());
   const privateHost = env.RAILWAY_PRIVATE_DOMAIN || hostname();
   const ctx = new BridgeContext({
     api: o.api,
@@ -167,7 +172,7 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
 
   const router = new CallRouter(ctx);
   const mcp = new McpServer(ctx, router, o.limits?.mcp);
-  const oauth = new OAuthServer(ctx, keks.current);
+  const oauth = new OAuthServer(ctx, keks);
   const person = new PersonSurfaces(ctx);
   const internal = new InternalApi(ctx, router);
   const admin = new StandaloneAdmin(ctx);

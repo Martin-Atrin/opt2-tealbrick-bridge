@@ -363,6 +363,8 @@ export function buildStatusReport(ctx: BridgeContext): StatusReport {
       pendingHolds: h?.status.pendingHolds ?? 0,
       // the slice revision the app last reported it holds (AppStatus.sliceRevision); omitted before its first report
       ...(typeof h?.status.sliceRevision === "number" ? { sliceRevision: h.status.sliceRevision } : {}),
+      // spec 0.1.28 (F89): AppStatus.attention as the app last reported it, copied unchanged; absent stays absent (L24)
+      ...(isRecord(h?.status.attention) ? { attention: h.status.attention } : {}),
     };
   });
   const keys = (t?.config.keyRequirements ?? [])
@@ -460,6 +462,13 @@ export function startStatusLoop(ctx: BridgeContext, signal: AbortSignal): { poke
   return { poke };
 }
 
+/** A code for an apply failure (an fs errno or a BridgeError code, else the error class): never a message (BRIDGE §12). */
+function applyErrorCode(e: unknown): string {
+  const code = (e as { code?: unknown } | undefined)?.code;
+  if (typeof code === "string" && /^[A-Za-z0-9_]{1,40}$/.test(code)) return code;
+  return e instanceof Error ? e.name : "error";
+}
+
 /** BRIDGE §5.1: long-poll loop. Errors never extend or replace S2. */
 export async function runConfigLoop(ctx: BridgeContext, signal: AbortSignal): Promise<void> {
   // error backoff: first retry after ~5 s (never below MIN_PULL_INTERVAL_MS, BSD-09), then doubling to 4 min. A
@@ -490,7 +499,19 @@ export async function runConfigLoop(ctx: BridgeContext, signal: AbortSignal): Pr
         ctx.lastPull = nowS();
         backoff = FIRST_BACKOFF_MS;
         const sameRev = peekRev(jws) === ctx.table?.rev;
-        const applied = await applyConfig(ctx, jws);
+        let applied: boolean;
+        try {
+          applied = await applyConfig(ctx, jws);
+        } catch (e) {
+          // BRG-08 / L3: the document arrived; APPLYING it failed (disk, sealing, a bug). That is no network blip: it is
+          // a status signal (rejected config/apply_failed) and an error line. The running table keeps serving (L7).
+          const code = applyErrorCode(e);
+          ctx.reject({ kind: "config", code: "apply_failed", detail: `${code}; rev ${peekRev(jws)}` });
+          ctx.log.error("bridge.config.apply_failed", { code, rev: peekRev(jws) ?? null });
+          await sleep(Math.max(MIN_PULL_INTERVAL_MS, jitter(backoff)), signal);
+          backoff = Math.min(backoff * 2, 240_000);
+          continue;
+        }
         // A refused document would be served again at once (`after` is unchanged): wait before the next pull
         // instead of re-pulling it in a tight loop. Pause/revoke in the next valid revision is still picked up ≤ ~6 s.
         // A document with the revision we already run is a no-op, not a refusal: only a short pause.

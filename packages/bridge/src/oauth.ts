@@ -18,7 +18,7 @@ import {
   type SealedBlob,
   TYP,
 } from "@opt2-tealbrick/spec/credentials";
-import { isRefusal } from "./api.ts";
+import { isRefusal, type Kek } from "./api.ts";
 import type { BridgeContext } from "./context.ts";
 import { connectionState, issueAccess, revokeLocal, rotateRefresh } from "./identity.ts";
 import { BridgeError, clientIp, envelope, isRecord, nowS, RateLimiter, readBody, sendJson } from "./util.ts";
@@ -66,11 +66,12 @@ export class OAuthServer {
   /** unauthenticated body routes (pair callback, revoke), per client address (BSD-01) */
   private readonly pairCallbackLimit = new RateLimiter(30);
   private readonly revokeLimit = new RateLimiter(30);
-  private readonly kek: { id: string; key: Uint8Array };
+  /** client ids are sealed under TB_KEK and opened with TB_KEK or, during a rotation, TB_KEK_PREVIOUS (BRG-05) */
+  private readonly keks: { current: Kek; previous?: Kek };
 
-  constructor(ctx: BridgeContext, kek: { id: string; key: Uint8Array }) {
+  constructor(ctx: BridgeContext, keks: { current: Kek; previous?: Kek }) {
     this.ctx = ctx;
-    this.kek = kek;
+    this.keks = keks;
     setInterval(() => this.sweep(), 60_000).unref();
   }
 
@@ -117,7 +118,7 @@ export class OAuthServer {
 
   // ── DCR (stateless): client_id = sealed registration (integrity under TB_KEK, no client table) ──
   private encodeClient(reg: ClientReg): string {
-    const blob = this.ctx.api.seal(Buffer.from(this.ctx.api.canonicalize(reg as never), "utf8"), this.kek, CLIENT_AAD);
+    const blob = this.ctx.api.seal(Buffer.from(this.ctx.api.canonicalize(reg as never), "utf8"), this.keks.current, CLIENT_AAD);
     return `tbc_${Buffer.from(JSON.stringify(blob)).toString("base64url")}`;
   }
 
@@ -125,7 +126,7 @@ export class OAuthServer {
     if (!clientId.startsWith("tbc_") || clientId.length > 4096) return undefined;
     try {
       const blob = JSON.parse(Buffer.from(clientId.slice(4), "base64url").toString("utf8")) as SealedBlob;
-      const reg = JSON.parse(Buffer.from(this.ctx.api.unseal(blob, { current: this.kek }, CLIENT_AAD)).toString("utf8")) as ClientReg;
+      const reg = JSON.parse(Buffer.from(this.ctx.api.unseal(blob, this.keks, CLIENT_AAD)).toString("utf8")) as ClientReg;
       return Array.isArray(reg.redirect_uris) ? reg : undefined;
     } catch {
       return undefined;
