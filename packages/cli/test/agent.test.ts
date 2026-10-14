@@ -5,6 +5,8 @@ import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 import { manifestApi } from "@opt2-tealbrick/bridge";
+import { HARNESS_OPTION_IDS, isHarnessOptionId } from "@opt2-tealbrick/spec/routes";
+import { PORTAL_HARNESS_ID } from "../src/lead.ts";
 import { Harness } from "./fixtures.ts";
 
 const api = manifestApi();
@@ -59,6 +61,8 @@ describe("agent mode (key connections)", () => {
     h.portal.on("POST", "/device/authorize", (req) => {
       assert.equal(req.body.scope, "agent");
       assert.equal(req.body.client_id, "tealbrick-cli");
+      // BRG-01 (L1): the fake judges the harness id by the spec list, as Core does
+      assert.ok(isHarnessOptionId(req.body.harness), `device.start.harness is a spec id: ${req.body.harness}`);
       lastStart = req.body;
       registeredKey = req.body.agents[0].public_key;
       return { body: { device_code: "tbdv_x", user_code: "BCDF-GHJK", verification_uri: `${h.portal.origin}/device`, verification_uri_complete: `${h.portal.origin}/device?code=BCDFGHJK`, expires_in: 600, interval: 5 } };
@@ -125,6 +129,27 @@ describe("agent mode (key connections)", () => {
     assert.equal(tooLong.code, 2, "names are 1-60 characters");
     const two = await h.run(["agent", "login", "--agent", AGT, "--agent", "agt_01HAAAAAAAAAAAAAAAAAAAAAAA", "--name", "x", "--json"]);
     assert.equal(two.code, 2, "--name names one agent");
+  });
+
+  test("BRG-01: --harness takes spec harness option ids only; a runner kind is refused before any call, with the id list", async () => {
+    h.clock = Date.now();
+    const ok = await h.run(["agent", "login", "--create", "--name", "Code agent", "--harness", "claude-code", "--json"]);
+    assert.equal(ok.code, 0, ok.err);
+    assert.equal(lastStart.harness, "claude-code");
+    for (const bad of ["claude-sdk", "command", "codex", "tb-anything"]) {
+      const before = h.portal.requests.length;
+      const r = await h.run(["agent", "login", "--create", "--name", "x", "--harness", bad, "--json"]);
+      assert.equal(r.code, 2, `${bad} is a usage error`);
+      assert.match(r.json.error.message, new RegExp(`--harness must be a Portal harness option id: ${HARNESS_OPTION_IDS.join(", ")}`));
+      assert.equal(h.portal.requests.length, before, "no device request was started");
+    }
+    const sdk = await h.run(["agent", "login", "--create", "--name", "x", "--harness", "claude-sdk", "--json"]);
+    assert.match(sdk.json.error.message, /"claude-sdk" is a runner kind; its harness id is tealbrick-cli/);
+  });
+
+  test("BRG-01: ONE map from runner kind to Portal harness id; every value is a spec id", () => {
+    assert.deepEqual(PORTAL_HARNESS_ID, { "claude-sdk": "tealbrick-cli", command: "tealbrick-cli", codex: "codex-desktop", "claude-desktop": "claude-desktop", "claude-code": "claude-code", generic: "generic-mcp" });
+    for (const id of Object.values(PORTAL_HARNESS_ID)) assert.ok(isHarnessOptionId(id), id);
   });
 
   test("F63: agent login --create asks for app access and a channel in the SAME approval (one form, like adopt)", async () => {

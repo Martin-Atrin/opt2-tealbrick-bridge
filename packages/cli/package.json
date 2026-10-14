@@ -1,6 +1,6 @@
 {
   "name": "@opt2-tealbrick/cli",
-  "version": "0.1.20",
+  "version": "0.1.21",
   "private": true,
   "type": "module",
   "description": "tealbrick CLI: owner mode (drafts, reads), agent mode, stdio relay, harness connection.",
@@ -29,6 +29,6 @@
     "@opt2-tealbrick/bridge": "workspace:*",
     "@opt2-tealbrick/harness-claude": "workspace:*",
     "@opt2-tealbrick/manifest": "https://github.com/Martin-Atrin/opt2-tealbrick-sdk/releases/download/manifest-v0.1.18/opt2-tealbrick-manifest-0.1.18.tgz",
-    "@opt2-tealbrick/spec": "https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.26/opt2-tealbrick-spec-0.1.26.tgz"
+    "@opt2-tealbrick/spec": "https://github.com/Martin-Atrin/opt2-tealbrick-specs/releases/download/spec-v0.1.27/opt2-tealbrick-spec-0.1.27.tgz"
   }
 }

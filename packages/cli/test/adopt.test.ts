@@ -11,8 +11,9 @@ import type { AddressInfo } from "node:net";
 import { join } from "node:path";
 import { after, before, describe, test } from "node:test";
 import { manifestApi } from "@opt2-tealbrick/bridge";
+import { isHarnessOptionId } from "@opt2-tealbrick/spec/routes";
 import { validateServeConfig } from "../src/serve.ts";
-import { Harness } from "./fixtures.ts";
+import { apiError, Harness } from "./fixtures.ts";
 
 const api = manifestApi();
 const BRG = "brg_01HZZZZZZZZZZZZZZZZZZZZZZZ";
@@ -26,6 +27,7 @@ describe("tealbrick adopt (C96 phase 1)", () => {
   let bridge: Server;
   let registeredKey: unknown;
   let deviceStarts = 0;
+  const harnessIds: unknown[] = [];
   const revokes: string[] = [];
 
   before(async () => {
@@ -50,6 +52,9 @@ describe("tealbrick adopt (C96 phase 1)", () => {
     await new Promise<void>((r) => bridge.listen(0, "127.0.0.1", r));
     const bridgeUrl = `http://127.0.0.1:${(bridge.address() as AddressInfo).port}`;
     h.portal.on("POST", "/device/authorize", (req) => {
+      // BRG-01 (L1/L27): like Core, the fake judges device.start.harness by the spec list and records it
+      harnessIds.push(req.body.harness);
+      if (!isHarnessOptionId(req.body.harness)) return apiError(400, "input_invalid", `unknown harness ${String(req.body.harness)}`);
       deviceStarts += 1;
       registeredKey = req.body.agents[0].public_key;
       return { body: { device_code: "tbdv_x", user_code: "BCDF-GHJK", verification_uri: `${h.portal.origin}/device`, verification_uri_complete: `${h.portal.origin}/device?code=BCDFGHJK`, expires_in: 600, interval: 5 } };
@@ -98,10 +103,12 @@ describe("tealbrick adopt (C96 phase 1)", () => {
   });
 
   test("real run, then a re-run: one device flow, persona + serve config written once, the re-run changes nothing", async () => {
+    const n0 = harnessIds.length;
     const r = await h.run([...sdk(), "--yes", "--json"]);
     assert.equal(r.code, 0, r.err);
     assert.equal(r.json.agent, AGT);
     assert.equal(r.json.reused, false);
+    assert.deepEqual(harnessIds.slice(n0), ["tealbrick-cli"], "BRG-01: a claude-sdk runner is a tealbrick-cli agent, never 'claude-sdk'");
     const start = h.portal.requests.filter((q) => q.path.endsWith("/device/authorize")).at(-1)?.body as { agents: { adopt?: { grants: { product: string; crud?: string[]; operations?: string[] }[]; channel?: { kind: string }; wake?: string } }[] };
     const sugg = start.agents[0]?.adopt;
     assert.ok(sugg, "C106a: the device request carries the adopt suggestion");
@@ -150,8 +157,10 @@ describe("tealbrick adopt (C96 phase 1)", () => {
     await mkdir(cfgDir, { recursive: true });
     const original = `${JSON.stringify({ mcpServers: { mine: { command: "my-server" } }, theme: "dark" }, null, 2)}\n`;
     await writeFile(cfgPath, original);
+    const n0 = harnessIds.length;
     const r = await h.run(["adopt", "--harness", "claude-desktop", "--name", "Desk agent", "--yes", "--json"]);
     assert.equal(r.code, 0, r.err);
+    assert.deepEqual(harnessIds.slice(n0), ["claude-desktop"], "BRG-01");
     const wired = JSON.parse(await readFile(cfgPath, "utf8"));
     assert.ok(wired.mcpServers.tealbrick, "one tealbrick entry added");
     assert.ok(wired.mcpServers.mine, "the user's own server is kept");
@@ -240,8 +249,10 @@ describe("tealbrick adopt (C96 phase 1)", () => {
     assert.match(text.out + text.err, /kept: remote OAuth/);
     const sw = await h.run(["adopt", "--harness", "codex", "--name", "Codex agent", "--agent", AGT, "--switch-to-stdio", "--dry-run", "--json"]);
     assert.equal(sw.json.transport, "stdio");
+    const n0 = harnessIds.length;
     const real = await h.run(["adopt", "--harness", "codex", "--name", "Codex agent", "--agent", AGT, "--yes", "--json"]);
     assert.equal(real.code, 0, real.err);
+    assert.deepEqual(harnessIds.slice(n0), ["codex-desktop"], "BRG-01: codex is the codex-desktop harness option");
     assert.equal(await readFile(cfg, "utf8"), original, "the remote entry is not rewritten");
   });
   test("F78/F79: claude-code — project scope by default (the plan says which), --serve writes a claude-code serve config; --scope user writes no file", async () => {
@@ -257,8 +268,10 @@ describe("tealbrick adopt (C96 phase 1)", () => {
     assert.equal(dryJ.json.target, join(proj, ".mcp.json"));
     assert.deepEqual(dryJ.json.plan.detection.persona.files, [join(proj, "CLAUDE.md")], "--project is where the agent's CLAUDE.md is");
     assert.equal(existsSync(join(proj, ".mcp.json")), false, "dry-run writes nothing");
+    const n0 = harnessIds.length;
     const r = await h.run([...base, "--serve", "--yes", "--json"]);
     assert.equal(r.code, 0, r.err);
+    assert.deepEqual(harnessIds.slice(n0), ["claude-code"], "BRG-01");
     const entry = JSON.parse(await readFile(join(proj, ".mcp.json"), "utf8")).mcpServers.tealbrick;
     assert.equal(entry.command, process.execPath, "F77: absolute node, no bare tealbrick");
     assert.deepEqual(entry.args.slice(1, 6), ["bridge", "serve", "--stdio", "--agent", AGT]);

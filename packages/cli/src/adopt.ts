@@ -14,7 +14,7 @@ import { basename, delimiter, dirname, join, relative, resolve } from "node:path
 import { claudeCodeScope, confirm, desktopConfigPath, mergeJsonConfig, mergeTomlConfig, planConnect, readExisting, writeAtomic } from "./connect.ts";
 import type { Ctx, Handler } from "./ctx.ts";
 import { CliError, EXIT, usageError } from "./io.ts";
-import { type AdoptSuggestion, agentLogin, probeAgent, selfRevoke, startDetached } from "./lead.ts";
+import { type AdoptSuggestion, agentLogin, PORTAL_HARNESS_ID, probeAgent, selfRevoke, startDetached } from "./lead.ts";
 import { pickAgentItem } from "./relay-main.ts";
 import { AGENT_ITEM_PREFIX } from "./store.ts";
 import { heartbeatPath, isAlive, pidPath, readHeartbeat, readPid, stopLoop } from "./supervise.ts";
@@ -382,7 +382,8 @@ export const adopt: Handler = async (ctx) => {
   if (!item) {
     const captured: { connections?: { con: string; agt: string }[] }[] = [];
     const card = ctx.v["keep-existing"] === true && !prior && !ctx.g.agent ? null : reuseCard;
-    const sub: Ctx = { ...ctx, v: { ...ctx.v, ...(card ? {} : { create: true }), name, ...(plan.purpose ? { purpose: plan.purpose } : {}) }, g: { ...ctx.g, agents: card ? [card] : [], agent: card ?? undefined }, emit: (r) => void captured.push(r as never) };
+    // BRG-01: the runner kind is not a Portal harness id; device.start gets the mapped spec id
+    const sub: Ctx = { ...ctx, v: { ...ctx.v, harness: PORTAL_HARNESS_ID[harness], ...(card ? {} : { create: true }), name, ...(plan.purpose ? { purpose: plan.purpose } : {}) }, g: { ...ctx.g, agents: card ? [card] : [], agent: card ?? undefined }, emit: (r) => void captured.push(r as never) };
     if (card) delete (sub.v as Record<string, unknown>).create;
     await agentLogin(sub, { adopt: suggestion });
     const con = captured.flatMap((c) => c.connections ?? [])[0]?.con;

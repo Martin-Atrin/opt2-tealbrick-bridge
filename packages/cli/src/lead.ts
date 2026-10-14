@@ -13,7 +13,7 @@ import {
   startBridge,
 } from "@opt2-tealbrick/bridge";
 import type { AgentId, Ed25519PublicJwk } from "@opt2-tealbrick/spec/credentials";
-import type { DeviceAgentTokenResult, DeviceStart, DeviceStartAgentInput, DeviceTokenInput } from "@opt2-tealbrick/spec/routes";
+import { type DeviceAgentTokenResult, type DeviceStart, type DeviceStartAgentInput, type DeviceTokenInput, HARNESS_OPTION_IDS, type HarnessOptionId, isHarnessOptionId } from "@opt2-tealbrick/spec/routes";
 import { cliEntry, relayCommand } from "./connect.ts";
 import type { Ctx, Handler } from "./ctx.ts";
 import { requirePos } from "./ctx.ts";
@@ -113,11 +113,33 @@ export interface AdoptSuggestion {
   wake?: "serve" | "poll" | "none";
 }
 
+/**
+ * BRG-01 (F75, spec 0.1.27): THE map from a local runner kind (`adopt --harness`, `connect <harness>`) to the Portal
+ * harness option id that device.start sends. A runner kind is never sent as is: `claude-sdk` and `command` are runner
+ * kinds of a `tealbrick-cli` agent, not harness options (no aliases, C133). The ids come from the spec list only (L1).
+ */
+export const PORTAL_HARNESS_ID = {
+  "claude-sdk": "tealbrick-cli",
+  command: "tealbrick-cli",
+  codex: "codex-desktop",
+  "claude-desktop": "claude-desktop",
+  "claude-code": "claude-code",
+  generic: "generic-mcp",
+} as const satisfies Record<string, HarnessOptionId>;
+
+/** `--harness` of agent login: a spec harness option id (default tealbrick-cli); anything else is a usage error. */
+export function portalHarnessId(raw: unknown): HarnessOptionId {
+  const id = raw ?? "tealbrick-cli";
+  if (isHarnessOptionId(id)) return id;
+  const kind = typeof id === "string" && Object.hasOwn(PORTAL_HARNESS_ID, id) ? PORTAL_HARNESS_ID[id as keyof typeof PORTAL_HARNESS_ID] : undefined;
+  throw usageError(`--harness must be a Portal harness option id: ${HARNESS_OPTION_IDS.join(", ")}${kind ? ` ("${String(id)}" is a runner kind; its harness id is ${kind})` : ""}`);
+}
+
 export async function agentLogin(ctx: Ctx, extra: { adopt?: AdoptSuggestion } = {}): Promise<void> {
   if (ctx.v.code !== undefined) throw usageError("agent login takes no code (the owner approves in the browser)");
+  // C96/C133/BRG-01: a spec harness option id only (Core accepts canonical ids, no aliases), checked before any call
+  const harness = portalHarnessId(ctx.v.harness);
   const origin = ctx.portalOrigin();
-  // C96/C133: the canonical harness option id (Core accepts canonical ids only, no aliases of earlier dev spellings)
-  const harness = ctx.v.harness ?? "tealbrick-cli";
   const label = (ctx.v.label ?? ctx.io.hostname ?? osHostname()).slice(0, 64) || "machine";
   // Every slot names an existing card (`id`) or asks for a new one (`create: true`): an approval must never
   // create cards by accident (QA S2: entries without ids produced duplicate cards). Ids come from the owner's
@@ -450,7 +472,7 @@ async function agentServe(ctx: Ctx): Promise<void> {
       ? await serve.claudeRunner(cfg.harness, item.agt, relayCmd, configDir, { log: logLine })
       : cfg.harness.kind === "claude-code"
         ? await serve.claudeCodeRunner(cfg.harness, relayCmd, configDir, { log: logLine })
-        : await serve.commandRunner(cfg.harness, [relayCmd.command, ...relayCmd.args].map((a) => (/\s/.test(a) ? JSON.stringify(a) : a)).join(" "));
+        : await serve.commandRunner(cfg.harness, [relayCmd.command, ...relayCmd.args].map((a) => (/\s/.test(a) ? JSON.stringify(a) : a)).join(" "), { log: logLine });
   const abort = new AbortController();
   for (const sig of ["SIGINT", "SIGTERM"] as const)
     process.once(sig, () => {

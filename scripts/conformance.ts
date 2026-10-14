@@ -95,7 +95,7 @@ try {
   problems.push(
     ...judge(
       "relay",
-      run("relay", ["--cmd", `"${node}" "${tealbrick}" bridge serve --stdio`, "--login-cmd", `"${node}" "${tealbrick}" agent login --create --harness generic --label conformance`, "--timeout", "15000"], relayEnv),
+      run("relay", ["--cmd", `"${node}" "${tealbrick}" bridge serve --stdio`, "--login-cmd", `"${node}" "${tealbrick}" agent login --create --harness generic-mcp --label conformance`, "--timeout", "15000"], relayEnv),
     ),
   );
 } finally {

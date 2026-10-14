@@ -14,7 +14,7 @@
  * occurrence BEFORE it is claimed and BEFORE its turn starts, so a lost answer or a restart never repeats a claim or
  * a turn; the server marks ambiguous runs `uncertain`. Due times and cron live on the server, not here.
  */
-import { spawn } from "node:child_process";
+import { type ChildProcess, spawn } from "node:child_process";
 import { mkdir, mkdtemp, readFile, rename, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join, resolve as resolvePath } from "node:path";
@@ -122,7 +122,14 @@ export type HarnessSpec =
       turnTimeoutSeconds?: number;
     }
   /** any harness CLI: the prompt arrives on stdin; `{mcpCommand}` in an argument is replaced by the relay command */
-  | { kind: "command"; command: string[]; cwd?: string; passthroughEnv?: string[]; turnTimeoutSeconds?: number }
+  | {
+      kind: "command";
+      command: string[];
+      cwd?: string;
+      passthroughEnv?: string[];
+      /** default HARNESS_TURN_TIMEOUT_S; SIGTERM to the own child, SIGKILL after HARNESS_KILL_GRACE_MS (BRG-04) */
+      turnTimeoutSeconds?: number;
+    }
   /**
    * F79: a Claude Code project folder (CLAUDE.md, .claude/) woken by serve: one headless `claude -p` per turn with
    * ONLY this turn's relay as MCP server (temp config, strict) and only Teal Brick tools allowed by default.
@@ -138,17 +145,19 @@ export interface ClaudeCodeHarness {
   /** extra tools to allow next to `mcp__tealbrick` (e.g. ["Read"]); the always-disallowed tools cannot be added */
   allowedTools?: string[];
   model?: string;
-  /** default CLAUDE_CODE_TURN_TIMEOUT_S; SIGTERM to the own child, SIGKILL after a grace */
+  /** default HARNESS_TURN_TIMEOUT_S; SIGTERM to the own child, SIGKILL after HARNESS_KILL_GRACE_MS */
   turnTimeoutSeconds?: number;
   /** extra env names for the turn (the allow-list of the command harness applies; HOME and USER are in it) */
   passthroughEnv?: string[];
 }
 
 export const CLAUDE_CODE_MAX_TURNS = 20;
-export const CLAUDE_CODE_TURN_TIMEOUT_S = 600;
+/** Default turn limit of the harnesses serve starts as a child process (command, claude-code). */
+export const HARNESS_TURN_TIMEOUT_S = 600;
+/** SIGTERM → SIGKILL grace for such a child. */
+export const HARNESS_KILL_GRACE_MS = 10_000;
 /** Tools a claude-code serve turn never gets (the turn acts through Teal Brick tools; config may only ADD allowed tools). */
 export const CLAUDE_CODE_DISALLOWED = ["Bash", "WebFetch", "WebSearch", "Write", "Edit"] as const;
-const CLAUDE_CODE_KILL_GRACE_MS = 10_000;
 const CLAUDE_CODE_MAX_STDOUT = 4 * 1024 * 1024;
 
 export interface ServeConfig {
@@ -770,24 +779,91 @@ export async function writeTranscript(dir: string, lines: Record<string, unknown
   await appendFile(file, `${lines.map((l) => JSON.stringify(l)).join("\n")}\n`, { mode: 0o600 });
 }
 
-/** Any harness CLI (e.g. Eve's): prompt on stdin, allow-listed env, `{mcpCommand}` placeholder for the relay. */
-export async function commandRunner(h: Extract<HarnessSpec, { kind: "command" }>, relayCommand: string): Promise<HarnessRunner> {
-  const { sessionEnv } = await import("@opt2-tealbrick/harness-claude");
-  return (prompt, _events, turnOpts) =>
-    new Promise((resolve) => {
-      const mcpCommand = turnOpts?.onBehalfOf ? `${relayCommand} --on-behalf-of ${encodeOnBehalfOf(turnOpts.onBehalfOf)}` : relayCommand;
-      const [cmd, ...args] = h.command.map((a) => a.replaceAll("{mcpCommand}", mcpCommand));
-      const child = spawn(cmd as string, args, { cwd: h.cwd ?? process.cwd(), env: sessionEnv(process.env, { ...(h.passthroughEnv ? { passthrough: h.passthroughEnv } : {}) }), stdio: ["pipe", "inherit", "inherit"] });
-      // a turn never runs forever: SIGTERM after turnTimeoutSeconds (the child this runner started, never anything else)
-      const timer = h.turnTimeoutSeconds ? setTimeout(() => child.kill("SIGTERM"), h.turnTimeoutSeconds * 1000) : undefined;
-      child.on("error", () => resolve({ ok: false, summary: "harness did not start" }));
-      // command harnesses: the exit code only (their output is not parsed, STEP-B-DESIGN §2.2 f)
-      child.on("exit", (code, signal) => {
-        if (timer) clearTimeout(timer);
-        resolve({ ok: code === 0, summary: signal === "SIGTERM" && timer ? "turn timed out" : `exit code ${code ?? "none"}` });
-      });
-      child.stdin.end(prompt);
+/** How one turn's child ended. `signals`: what the runner sent (empty for a turn that ended by itself, L34). */
+export interface ChildTurnEnd {
+  code: number | null;
+  signal: NodeJS.Signals | null;
+  timedOut: boolean;
+  signals: NodeJS.Signals[];
+  spawnError?: boolean;
+}
+
+/**
+ * One turn of a child this runner started (BRG-04, shared by the command and claude-code harnesses, L1): the prompt on
+ * stdin (an EPIPE never crashes serve), SIGTERM after `timeoutMs`, SIGKILL after `graceMs` — both to THIS child only,
+ * never to anything else (L20). The promise always settles (L23), and a timed-out turn settles only once the child has
+ * exited (L28). "close" waits for the pipes; a process the harness started may keep one open, so "exit" ends the turn
+ * after a short drain at the latest.
+ */
+export function runChildTurn(child: ChildProcess, prompt: string, o: { timeoutMs: number; graceMs: number }): Promise<ChildTurnEnd> {
+  return new Promise((done) => {
+    let timedOut = false;
+    const signals: NodeJS.Signals[] = [];
+    let killer: NodeJS.Timeout | undefined;
+    const send = (sig: NodeJS.Signals) => {
+      if (child.exitCode !== null || child.signalCode !== null) return;
+      signals.push(sig);
+      child.kill(sig);
+    };
+    const timer = setTimeout(() => {
+      timedOut = true;
+      send("SIGTERM");
+      killer = setTimeout(() => send("SIGKILL"), o.graceMs);
+    }, o.timeoutMs);
+    let settled = false;
+    const finish = (v: { code: number | null; signal: NodeJS.Signals | null; spawnError?: boolean }) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      if (killer) clearTimeout(killer);
+      done({ ...v, timedOut, signals });
+    };
+    // "error" without a pid = the harness did not start; after a start the "exit" event ends the turn
+    child.on("error", () => {
+      if (child.pid === undefined) finish({ code: null, signal: null, spawnError: true });
     });
+    child.on("exit", (code, signal) => {
+      setTimeout(() => finish({ code, signal }), 2_000).unref();
+    });
+    child.on("close", (code, signal) => finish({ code, signal }));
+    child.stdin?.on("error", () => undefined);
+    child.stdin?.end(prompt);
+  });
+}
+
+/**
+ * Any harness CLI (e.g. Eve's): prompt on stdin, allow-listed env, `{mcpCommand}` placeholder for the relay. A turn
+ * past turnTimeoutSeconds (default HARNESS_TURN_TIMEOUT_S) gets SIGTERM, then SIGKILL (runChildTurn, BRG-04).
+ */
+export async function commandRunner(
+  h: Extract<HarnessSpec, { kind: "command" }>,
+  relayCommand: string,
+  opts: { log?: ServeDeps["log"]; turnTimeoutMs?: number; killGraceMs?: number } = {},
+): Promise<HarnessRunner> {
+  const { sessionEnv } = await import("@opt2-tealbrick/harness-claude");
+  const log = opts.log ?? (() => undefined);
+  const timeoutMs = opts.turnTimeoutMs ?? (h.turnTimeoutSeconds ?? HARNESS_TURN_TIMEOUT_S) * 1000;
+  const graceMs = opts.killGraceMs ?? HARNESS_KILL_GRACE_MS;
+  return async (prompt, _events, turnOpts) => {
+    const mcpCommand = turnOpts?.onBehalfOf ? `${relayCommand} --on-behalf-of ${encodeOnBehalfOf(turnOpts.onBehalfOf)}` : relayCommand;
+    const [cmd, ...args] = h.command.map((a) => a.replaceAll("{mcpCommand}", mcpCommand));
+    const started = Date.now();
+    const child = spawn(cmd as string, args, { cwd: h.cwd ?? process.cwd(), env: sessionEnv(process.env, { ...(h.passthroughEnv ? { passthrough: h.passthroughEnv } : {}) }), stdio: ["pipe", "inherit", "inherit"] });
+    const r = await runChildTurn(child, prompt, { timeoutMs, graceMs });
+    // command harnesses: the exit code only (their output is not parsed, STEP-B-DESIGN §2.2 f)
+    const ok = !r.spawnError && !r.timedOut && r.code === 0;
+    log("serve.turn.result", {
+      harness: "command",
+      ok,
+      exitCode: r.code,
+      ...(r.signal ? { signal: r.signal } : {}),
+      ...(r.timedOut ? { timedOut: true } : {}),
+      ...(r.signals.length ? { sent: r.signals } : {}),
+      ...(r.spawnError ? { error: "harness did not start" } : {}),
+      wallMs: Date.now() - started,
+    });
+    return { ok, summary: r.spawnError ? "harness did not start" : r.timedOut ? "turn timed out" : `exit code ${r.code ?? "none"}` };
+  };
 }
 
 /** The argv of one claude-code serve turn (F79): MCP-only by default; the config may only ADD allowed tools. */
@@ -860,8 +936,8 @@ export async function claudeCodeRunner(
   const st = await stat(cwd).catch(() => null);
   if (!st?.isDirectory()) throw new Error(`harness.cwd: ${cwd} is not a folder`);
   const log = opts.log ?? (() => undefined);
-  const timeoutMs = opts.turnTimeoutMs ?? (h.turnTimeoutSeconds ?? CLAUDE_CODE_TURN_TIMEOUT_S) * 1000;
-  const graceMs = opts.killGraceMs ?? CLAUDE_CODE_KILL_GRACE_MS;
+  const timeoutMs = opts.turnTimeoutMs ?? (h.turnTimeoutSeconds ?? HARNESS_TURN_TIMEOUT_S) * 1000;
+  const graceMs = opts.killGraceMs ?? HARNESS_KILL_GRACE_MS;
   const source = opts.env ?? process.env;
   return async (prompt, _events, turnOpts) => {
     const args = turnOpts?.onBehalfOf ? [...relay.args, "--on-behalf-of", encodeOnBehalfOf(turnOpts.onBehalfOf)] : relay.args;
@@ -871,44 +947,17 @@ export async function claudeCodeRunner(
     const started = Date.now();
     try {
       await writeFile(mcpConfig, JSON.stringify({ mcpServers: { tealbrick: { type: "stdio", command: relay.command, args } } }), { mode: 0o600 });
-      const r = await new Promise<{ code: number | null; signal: NodeJS.Signals | null; timedOut: boolean; stdout: string; stderrBytes: number; spawnError?: boolean }>((done) => {
-        const child = spawn("claude", claudeCodeArgs(h, mcpConfig), { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
-        let stdout = "";
-        let stderrBytes = 0;
-        let timedOut = false;
-        let killer: NodeJS.Timeout | undefined;
-        child.stdout.setEncoding("utf8");
-        child.stdout.on("data", (d: string) => {
-          if (stdout.length < CLAUDE_CODE_MAX_STDOUT) stdout += d;
-        });
-        child.stderr.on("data", (d: Buffer) => {
-          stderrBytes += d.length;
-        });
-        const timer = setTimeout(() => {
-          timedOut = true;
-          child.kill("SIGTERM");
-          killer = setTimeout(() => {
-            if (child.exitCode === null && child.signalCode === null) child.kill("SIGKILL");
-          }, graceMs);
-        }, timeoutMs);
-        let settled = false;
-        const finish = (v: { code: number | null; signal: NodeJS.Signals | null; spawnError?: boolean }) => {
-          if (settled) return;
-          settled = true;
-          clearTimeout(timer);
-          if (killer) clearTimeout(killer);
-          done({ ...v, timedOut, stdout, stderrBytes });
-        };
-        child.on("error", () => finish({ code: null, signal: null, spawnError: true }));
-        // "close" waits for the pipes; a process Claude Code started may keep one open, so "exit" ends the turn
-        // after a short drain at the latest
-        child.on("exit", (code, signal) => {
-          setTimeout(() => finish({ code, signal }), 2_000).unref();
-        });
-        child.on("close", (code, signal) => finish({ code, signal }));
-        child.stdin.on("error", () => undefined);
-        child.stdin.end(prompt);
+      const child = spawn("claude", claudeCodeArgs(h, mcpConfig), { cwd, env, stdio: ["pipe", "pipe", "pipe"] });
+      let stdout = "";
+      let stderrBytes = 0;
+      child.stdout.setEncoding("utf8");
+      child.stdout.on("data", (d: string) => {
+        if (stdout.length < CLAUDE_CODE_MAX_STDOUT) stdout += d;
       });
+      child.stderr.on("data", (d: Buffer) => {
+        stderrBytes += d.length;
+      });
+      const r = { ...(await runChildTurn(child, prompt, { timeoutMs, graceMs })), stdout, stderrBytes };
       const res = r.spawnError ? null : claudeCodeResult(r.stdout, (x) => usageOf(x) as Record<string, unknown> | undefined);
       const ok = !r.spawnError && !r.timedOut && r.code === 0 && res !== null && !res.isError;
       const { result: text, ...fields } = res ?? { isError: true };
@@ -918,6 +967,7 @@ export async function claudeCodeRunner(
         exitCode: r.code,
         ...(r.signal ? { signal: r.signal } : {}),
         ...(r.timedOut ? { timedOut: true } : {}),
+        ...(r.signals.length ? { sent: r.signals } : {}),
         ...(r.spawnError ? { error: "claude did not start (is claude on PATH?)" } : res === null ? { error: "no JSON result on stdout" } : {}),
         ...fields,
         wallMs: Date.now() - started,
