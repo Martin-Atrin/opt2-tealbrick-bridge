@@ -5,7 +5,6 @@
  * refresh_token with rotation, jwt-bearer for key connections), revoke (RFC 7009).
  */
 
-import { randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
 import type { DcrResponse, PairingConnectionRecord, ProtectedResourceMetadata, TokenResponse } from "@opt2-tealbrick/spec/bridge";
 import {
@@ -21,6 +20,7 @@ import {
 import { isRefusal, type Kek } from "./api.ts";
 import type { BridgeContext } from "./context.ts";
 import { connectionState, issueAccess, revokeLocal, rotateRefresh } from "./identity.ts";
+import { ARROW, esc, htmlPage, ink, type Message, messagePage, portalButton, steps } from "./pages.ts";
 import { BridgeError, clientIp, envelope, isRecord, nowS, RateLimiter, readBody, sendJson } from "./util.ts";
 
 interface ClientReg {
@@ -50,6 +50,10 @@ interface AuthCode {
 }
 
 const CLIENT_AAD = "tb:seal:oauth-client:v1";
+
+const TOO_MANY_DETAIL = "This protects your workspace from guessing.";
+const REQUEST_EXPIRED: Message = { title: "Request expired", text: "This sign-in request expired. Start again from your app.", sign: "open" };
+const CODE_REFUSED = "This pairing code is not valid for this workspace, has expired or was used already. Create a new one on the agent card in Portal.";
 
 export class OAuthServer {
   private readonly ctx: BridgeContext;
@@ -158,19 +162,19 @@ export class OAuthServer {
 
   // ── authorize page ──
   async authorize(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    if (!this.authorizeLimit.take(clientIp(req))) return htmlPage(res, 429, "Too many requests", "<p>Please wait a minute and try again.</p>");
+    if (!this.authorizeLimit.take(clientIp(req))) return this.message(res, 429, { title: "Too many requests", text: "Please wait a minute and try again.", sign: "person", detail: TOO_MANY_DETAIL });
     if (req.method === "GET") return this.authorizeGet(req, res);
     const form = parseBody(await readBody(req, 16 * 1024), req.headers["content-type"]);
     const rid = typeof form.rid === "string" ? form.rid : "";
     const p = this.pending.get(rid);
-    if (!p || p.exp <= nowS()) return htmlPage(res, 400, "Request expired", "<p>This sign-in request expired. Start again from your app.</p>");
+    if (!p || p.exp <= nowS()) return this.message(res, 400, REQUEST_EXPIRED);
     if (form.action === "portal") return this.toPortal(res, p);
-    if (!this.redeemLimit.take(rid)) return htmlPage(res, 429, "Too many attempts", "<p>Too many codes were tried for this request. Start again from your app.</p>");
+    if (!this.redeemLimit.take(rid)) return this.message(res, 429, { title: "Too many attempts", text: "Too many codes were tried for this request. Start again from your app.", sign: "person", detail: TOO_MANY_DETAIL });
     if (form.action === "paste") {
       const code = typeof form.code === "string" ? form.code.trim() : "";
       return this.redeem(res, code, p, false);
     }
-    return htmlPage(res, 400, "Bad request", "<p>Unknown action.</p>");
+    return this.message(res, 400, { title: "Bad request", text: "Unknown action. Start again from your app.", sign: "person" });
   }
 
   private authorizeGet(req: IncomingMessage, res: ServerResponse): void {
@@ -179,14 +183,14 @@ export class OAuthServer {
     const client = this.decodeClient(clientId);
     const redirectUri = q.get("redirect_uri") ?? "";
     if (!client || !redirectMatches(client.redirect_uris, redirectUri)) {
-      return htmlPage(res, 400, "Unknown client", "<p>The app that sent you here is not registered with this bridge. Remove the connector and add it again.</p>");
+      return this.message(res, 400, { title: "Unknown app", text: "The app that sent you here is not registered with this bridge. Remove the connector in your app and add it again.", sign: "person" });
     }
     // Nothing redirects before the owner has completed a verified pairing: a request that fails a check gets an
     // error page here, so the authorize endpoint can never be used to bounce a browser to a registered URL
     // (DCR is open, so any https URL can be "registered"). The one redirect is the code after a verified flow.
     const fail = (error: string) => {
       this.ctx.log.warn("bridge.oauth.authorize_refused", { code: error });
-      htmlPage(res, 400, "Request not valid", `<p>This sign-in request is not valid (${esc(error)}). Start again from your app.</p>`);
+      this.message(res, 400, { title: "Request not valid", text: `This sign-in request is not valid (${error}). Start again from your app.`, sign: "person" });
     };
     const state = q.get("state") ?? "";
     const challenge = q.get("code_challenge") ?? "";
@@ -197,33 +201,54 @@ export class OAuthServer {
     const rid = this.ctx.api.ulid();
     const pending: PendingAuth = { rid, client, clientId, redirectUri, challenge, state, exp: nowS() + 600 };
     this.pending.set(rid, pending);
-    const host = new URL(redirectUri).host;
-    const name = client.client_name || "(no name)";
-    htmlPage(
-      res,
-      200,
-      "Connect an agent",
-      `<p>An app wants to connect an agent to <b>${esc(this.ctx.table?.config.workspace.name ?? "your workspace")}</b>.</p>
-<table><tr><th>App name</th><td>${esc(name)} <span class="warn">unverified</span></td></tr>
-<tr><th>Returns to</th><td>${esc(host)}</td></tr></table>
-<p>Only continue if you started this from your own app.</p>
-<form method="post" action="/oauth/authorize"><input type="hidden" name="rid" value="${esc(rid)}"><input type="hidden" name="action" value="portal">
-<button type="submit">Approve in Portal</button></form>
-<details><summary>I have a pairing code</summary>
-<form method="post" action="/oauth/authorize"><input type="hidden" name="rid" value="${esc(rid)}"><input type="hidden" name="action" value="paste">
-<label>Pairing code from the agent card <input name="code" autocomplete="off" spellcheck="false" required></label>
-<button type="submit">Connect</button></form></details>`,
-    );
+    this.renderConnect(res, 200, pending);
+  }
+
+  /** The connect page (BRIDGE-PAGES #1/#1a). `codeError`: the pasted code was refused; the pairing form opens with it. */
+  private renderConnect(res: ServerResponse, status: number, p: PendingAuth, codeError?: string): void {
+    const host = new URL(p.redirectUri).host;
+    const name = p.client.client_name || "(no name)";
+    const rid = esc(p.rid);
+    const field = codeError
+      ? `<input class="tb-input tb-mono" name="code" autocomplete="off" spellcheck="false" required aria-invalid="true" aria-describedby="code-error"><span class="tb-error" id="code-error">${esc(codeError)}</span>`
+      : `<input class="tb-input tb-mono" name="code" autocomplete="off" spellcheck="false" required aria-describedby="code-hint"><span class="tb-hint" id="code-hint">Copy it from the agent card in Portal. It works once and expires.</span>`;
+    htmlPage(res, status, {
+      title: "Connect an agent",
+      workspace: this.ctx.table?.config.workspace.name,
+      main: `
+  <section class="bp-card" aria-labelledby="h">
+    ${steps(0)}
+    <h1 id="h">Connect an agent</h1>
+    <p class="tb-soft">An app wants to connect an agent to <b>${esc(this.ctx.table?.config.workspace.name ?? "your workspace")}</b>.</p>
+    <dl class="bp-facts"><dt>App name</dt><dd>${esc(name)} <span class="tb-tag needs-you">${ink("unverified")}</span></dd><dt>Returns to</dt><dd class="tb-mono">${esc(host)}</dd></dl>
+    <div class="tb-notice needs-you"><span><strong>Only continue if you started this from your own app.</strong> The app name comes from the app itself.</span></div>
+    <form class="tb-ctas" method="post" action="/oauth/authorize"><input type="hidden" name="rid" value="${rid}"><input type="hidden" name="action" value="portal"><button class="tb-btn primary lg" type="submit">${ink("Approve in Portal")} ${ARROW}</button></form>
+    <details class="bp-pair"${codeError ? " open" : ""}><summary>I have a pairing code</summary>
+      <form class="tb-stack" method="post" action="/oauth/authorize"><input type="hidden" name="rid" value="${rid}"><input type="hidden" name="action" value="paste">
+        <label class="tb-field"><span class="tb-label">Pairing code from the agent card</span>${field}</label>
+        <div class="tb-ctas"><button class="tb-btn" type="submit"><span class="tb-ink">Connect</span></button></div>
+      </form></details>
+  </section>`,
+    });
+  }
+
+  private message(res: ServerResponse, status: number, m: Message): void {
+    messagePage(res, status, this.ctx, m);
   }
 
   /** Path A: front-channel form POST to Portal /pair with a pairing state proof (no bridge→Portal call). */
   private async toPortal(res: ServerResponse, p: PendingAuth): Promise<void> {
     const id = this.ctx.identity;
-    if (!id || this.ctx.table?.standalone) return htmlPage(res, 400, "Not available", "<p>Approve in Portal is not available for this workspace. Use a pairing code.</p>");
+    if (!id || this.ctx.table?.standalone) return this.message(res, 400, { title: "Not available", text: "Approve in Portal is not available for this workspace. Connect with a pairing code from the agent card.", sign: "person" });
     if (!this.issuer.startsWith("https://")) {
       // the pairing state must name an https return URL (CREDENTIALS §10); say so instead of failing
       this.ctx.log.warn("bridge.pairing.config_error", { code: "public_url_not_https" });
-      return htmlPage(res, 400, "Bridge configuration error", "<p>Approve in Portal needs the bridge to run on an https public address (TB_PUBLIC_URL). Ask the workspace owner to fix the bridge address, or connect with a pairing code from the agent card.</p>");
+      return this.message(res, 400, {
+        title: "Bridge address needs a fix",
+        text: "Approve in Portal needs the bridge to run on an https public address (TB_PUBLIC_URL). Ask the workspace owner to fix the bridge address, or connect with a pairing code from the agent card.",
+        sign: "person",
+        detail: "Owner: redeploy the bridge from Portal → Workspace settings → Infrastructure.",
+      });
     }
     const now = nowS();
     const ref = this.ctx.bridgeRef;
@@ -243,17 +268,36 @@ export class OAuthServer {
       },
       id.key,
     );
-    autoPost(res, `${this.ctx.portalUrl}/pair`, { state }, "Opening Portal…");
+    this.openingPortal(res, `${this.ctx.portalUrl}/pair`, { state });
+  }
+
+  /** Auto-submitting form POST to Portal (credentials never travel in URLs); the one script, under the response nonce. */
+  private openingPortal(res: ServerResponse, action: string, fields: Record<string, string>): void {
+    const inputs = Object.entries(fields).map(([k, v]) => `<input type="hidden" name="${esc(k)}" value="${esc(v)}">`).join("");
+    htmlPage(res, 200, {
+      title: "Opening Portal",
+      workspace: this.ctx.table?.config.workspace.name,
+      formAction: new URL(action).origin,
+      script: 'document.getElementById("f").submit()',
+      main: `
+  <section class="bp-card" aria-labelledby="h">
+    ${steps(1)}
+    <h1 id="h">Opening Portal…</h1>
+    <p class="tb-soft">Approve the agent in Portal. You come back to your app on its own.</p>
+    <div class="tb-progress" role="progressbar" aria-label="Opening Portal"><span></span></div>
+    <form class="tb-ctas" id="f" method="post" action="${esc(action)}">${inputs}<noscript><button class="tb-btn primary" type="submit">${ink("Continue")}</button></noscript></form>
+  </section>`,
+    });
   }
 
   /** Path A return: Portal auto-submits `code=<K2b>` (never in a URL). */
   async pairCallback(req: IncomingMessage, res: ServerResponse): Promise<void> {
-    if (!this.pairCallbackLimit.take(clientIp(req))) return htmlPage(res, 429, "Too many requests", "<p>Please wait a minute and try again.</p>", { "retry-after": "60" });
+    if (!this.pairCallbackLimit.take(clientIp(req))) return this.message(res, 429, { title: "Too many requests", text: "Please wait a minute and try again.", sign: "person", detail: TOO_MANY_DETAIL, headers: { "retry-after": "60" } });
     const form = parseBody(await readBody(req, 16 * 1024), req.headers["content-type"]);
     const code = typeof form.code === "string" ? form.code.trim() : "";
     const peek = peekRid(code);
     const p = peek ? this.pending.get(peek) : undefined;
-    if (!p || p.exp <= nowS()) return htmlPage(res, 400, "Request expired", "<p>This sign-in request expired. Start again from your app.</p>");
+    if (!p || p.exp <= nowS()) return this.message(res, 400, REQUEST_EXPIRED);
     return this.redeem(res, code, p, true);
   }
 
@@ -263,7 +307,10 @@ export class OAuthServer {
     const t = ctx.table;
     const fail = (why: string) => {
       ctx.reject({ kind: "pairing", code: why });
-      htmlPage(res, 400, "Code not accepted", "<p>This pairing code is not valid for this workspace, has expired or was used already. Create a new one on the agent card in Portal.</p>");
+      // path B (pasted on the connect page): the page again, the pairing form open with the refusal (no code echoed);
+      // path A (Portal's form POST): the message page
+      if (!pathA) return this.renderConnect(res, 400, p, CODE_REFUSED);
+      this.message(res, 400, { title: "Code not accepted", text: CODE_REFUSED, sign: "person", action: portalButton(ctx) });
     };
     if (!t || !ctx.identity || !code) return fail("code_invalid");
     const now = nowS();
@@ -500,42 +547,4 @@ function redirectWith(res: ServerResponse, uri: string, params: Record<string, s
   const u = new URL(uri);
   for (const [k, v] of Object.entries(params)) u.searchParams.set(k, v);
   res.writeHead(302, { location: u.toString(), "cache-control": "no-store" }).end();
-}
-
-export function esc(s: string): string {
-  return s.replace(/[&<>"']/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[c] as string);
-}
-
-const STYLE = `body{font:15px/1.5 system-ui,sans-serif;max-width:32rem;margin:3rem auto;padding:0 1rem;color:#14302e;background:#f6f8f7}
-h1{font-size:1.3rem;color:#0f5f5a}button{background:#0f5f5a;color:#fff;border:0;border-radius:2px;padding:.6rem 1rem;font:inherit;cursor:pointer;margin:.5rem 0}
-input{font:inherit;padding:.4rem;border:1px solid #9bb;border-radius:2px;width:100%;box-sizing:border-box}th{text-align:left;padding-right:1rem;font-weight:600}
-.warn{color:#7a1f3d;font-size:.85em;border:1px solid #7a1f3d;border-radius:2px;padding:0 .3rem}
-@media (prefers-color-scheme:dark){body{background:#0e1817;color:#dce9e7}h1{color:#5fc4bb}input{background:#14201f;color:#dce9e7}}`;
-
-export function htmlPage(res: ServerResponse, status: number, title: string, body: string, extraHeaders: Record<string, string> = {}, nonce?: string, formAction = "'self'"): void {
-  const script = nonce ? ` 'nonce-${nonce}'` : "";
-  res.writeHead(status, {
-    "content-type": "text/html; charset=utf-8",
-    "cache-control": "no-store",
-    "x-frame-options": "DENY",
-    "referrer-policy": "no-referrer",
-    "content-security-policy": `default-src 'none'; style-src 'unsafe-inline'; script-src${script || " 'none'"}; form-action ${formAction}; frame-ancestors 'none'; base-uri 'none'`,
-    ...extraHeaders,
-  });
-  res.end(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>${esc(title)}</title><style>${STYLE}</style></head><body><h1>${esc(title)}</h1>${body}</body></html>`);
-}
-
-/** Auto-submitting form POST (credentials never travel in URLs). */
-export function autoPost(res: ServerResponse, action: string, fields: Record<string, string>, title: string): void {
-  const nonce = randomBytes(16).toString("base64url");
-  const inputs = Object.entries(fields).map(([k, v]) => `<input type="hidden" name="${esc(k)}" value="${esc(v)}">`).join("");
-  htmlPage(
-    res,
-    200,
-    title,
-    `<form id="f" method="post" action="${esc(action)}">${inputs}<noscript><button type="submit">Continue</button></noscript></form><script nonce="${nonce}">document.getElementById("f").submit()</script>`,
-    {},
-    nonce,
-    new URL(action).origin,
-  );
 }

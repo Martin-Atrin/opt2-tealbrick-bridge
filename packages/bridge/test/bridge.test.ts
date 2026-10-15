@@ -309,7 +309,9 @@ describe(`deployed bridge (${real ? "real manifest crypto" : "test double"})`, (
     const rid = /name="rid" value="([^"]+)"/.exec(page)?.[1] as string;
     const r = await fetch(`${w.publicUrl}/oauth/authorize`, { method: "POST", headers: { "content-type": "application/x-www-form-urlencoded" }, body: new URLSearchParams({ rid, action: "portal" }) });
     assert.equal(r.status, 400);
-    assert.match(await r.text(), /configuration error/i);
+    const text = await r.text();
+    assert.match(text, /Bridge address needs a fix/, "the configuration problem is named (0.1.29 copy, C185)");
+    assert.match(text, /TB_PUBLIC_URL/);
   });
 
   test("a refused config document is not re-pulled in a tight loop", async () => {

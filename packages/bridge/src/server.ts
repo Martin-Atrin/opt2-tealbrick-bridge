@@ -14,7 +14,8 @@ import { CallRouter } from "./calls.ts";
 import { BridgeContext } from "./context.ts";
 import { InternalApi } from "./internal.ts";
 import { type McpLimits, McpServer } from "./mcp.ts";
-import { htmlPage, OAuthServer } from "./oauth.ts";
+import { OAuthServer } from "./oauth.ts";
+import { messagePage, STATIC_PREFIX, sendStatic, staticFile } from "./pages.ts";
 import { PersonSurfaces } from "./person.ts";
 import { applyConfig, ensureEnrolled, runConfigLoop, startManifestRetry, startStatusLoop } from "./portal.ts";
 import { remintStandalone, StandaloneAdmin, startStandaloneLoop } from "./standalone.ts";
@@ -246,12 +247,24 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
       // (app UIs under /a/<product>/) never serves /keys.
       const host = (headerValue(req, "host") ?? "").replace(/:\d+$/, "").toLowerCase();
       const onKeysOrigin = !!ctx.keysUrl && host === new URL(ctx.keysUrl).hostname;
+      // the pages' own font, mark and favicon, on both origins: an exact allowlist, GET/HEAD only, nothing else under it
+      if (path.startsWith(STATIC_PREFIX)) {
+        const file = staticFile(path);
+        if (!file) return sendJson(res, 404, envelope("not_found", "not found", requestId));
+        if (req.method !== "GET" && req.method !== "HEAD") return sendJson(res, 405, envelope("method_not_allowed", "GET only", requestId), { allow: "GET, HEAD" });
+        return sendStatic(res, file);
+      }
       if (onKeysOrigin) {
         if (path === "/keys" && (req.method === "GET" || req.method === "POST")) return await person.keys(req, res);
         return sendJson(res, 404, envelope("not_found", "not found", requestId));
       }
       if (path === "/keys") {
-        if (!ctx.keysUrl) return htmlPage(res, 503, "Key page not configured", "<p>This workspace bridge has no separate key-page address yet (TB_KEYS_PUBLIC_URL). Ask the workspace owner to redeploy the bridge from Portal.</p>");
+        if (!ctx.keysUrl)
+          return messagePage(res, 503, ctx, {
+            title: "Key page not configured",
+            text: "This workspace bridge has no separate key-page address yet (TB_KEYS_PUBLIC_URL). Ask the workspace owner to redeploy the bridge from Portal.",
+            sign: "person",
+          });
         return sendJson(res, 404, envelope("not_found", "the key page is served on its own address", requestId));
       }
       if (path === "/mcp") return await mcp.handle(req, res, requestId);

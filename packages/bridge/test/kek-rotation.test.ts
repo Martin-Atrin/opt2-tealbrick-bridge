@@ -183,7 +183,13 @@ describe("BRG-05: a running bridge rotates its KEK across restarts (real world)"
       assert.equal(reg.status, 201);
       const clientId = ((await reg.json()) as { client_id: string }).client_id;
       const authorize = () => fetch(`${w.publicUrl}/oauth/authorize?response_type=code&client_id=${encodeURIComponent(clientId)}&redirect_uri=${encodeURIComponent("https://client.example/cb")}&code_challenge=${"a".repeat(43)}&code_challenge_method=S256&state=s`);
-      const known = async () => !(await (await authorize()).text()).includes("Unknown client");
+      // a known client gets the connect page (200); an unknown one the "Unknown app" page (400)
+      const known = async () => {
+        const r = await authorize();
+        const text = await r.text();
+        assert.ok(r.status === 200 ? text.includes("Connect an agent") : text.includes("Unknown app"), `status ${r.status} matches its page`);
+        return r.status === 200;
+      };
       assert.ok(await known(), "client id valid under K1");
       const sealedFiles = () => readdirSync(join(w.dataDir, "bridge")).filter((n) => n.endsWith(".sealed.json"));
       assert.ok(sealedFiles().includes("identity.sealed.json"));

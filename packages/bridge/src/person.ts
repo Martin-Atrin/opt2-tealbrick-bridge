@@ -11,7 +11,7 @@ import { connect as netConnect, type Socket } from "node:net";
 import { LIFETIME_S, type PersonTicketKeysClaims, type PersonTicketLaunchClaims, TYP } from "@opt2-tealbrick/spec/credentials";
 import { isRefusal } from "./api.ts";
 import type { BridgeContext } from "./context.ts";
-import { esc, htmlPage } from "./oauth.ts";
+import { appChip, esc, htmlPage, ink, linkButton, type Message, messagePage, type PageApp, pageApp, portalButton } from "./pages.ts";
 import type { AppRuntime } from "./table.ts";
 import { BridgeError, clientIp, envelope, headerValue, nowS, OpenCounter, RateLimiter, readBody, sendJson } from "./util.ts";
 
@@ -25,6 +25,8 @@ interface KeySession {
   csrf: string;
   exp: number;
   req: string[];
+  /** one-time success notice for the next page view: the saved key's NAME (never a value), server side only */
+  saved?: string;
 }
 
 export class PersonSurfaces {
@@ -73,7 +75,15 @@ export class PersonSurfaces {
       });
       if (isRefusal(v) || v.claims.pur !== "launch" || v.claims.ws !== this.ctx.table?.ws) {
         this.ctx.reject({ kind: "ticket", code: "invalid_token" });
-        return htmlPage(res, 401, "Link expired", "<p>This link has expired. Open the app again from Portal.</p>");
+        const a = pageApp(this.ctx, app.entry.product);
+        return messagePage(res, 401, this.ctx, {
+          title: "Link expired",
+          text: "This link has expired. Open the app again from Portal.",
+          sign: "open",
+          app: a,
+          action: portalButton(this.ctx, `Open ${a.name} from Portal`),
+          detail: `Links that open an app work once and expire after ${LIFETIME_S.ticketLaunch} seconds.`,
+        });
       }
       // The SDK redeems the ticket once (jti in the app DB); the bridge only checks and forwards it.
     }
@@ -207,24 +217,27 @@ export class PersonSurfaces {
   // ── §9.3 key-entry page ──
   async keys(req: IncomingMessage, res: ServerResponse): Promise<void> {
     const t = this.ctx.table;
-    if (!t) return htmlPage(res, 503, "Not ready", "<p>The bridge is starting. Try again in a moment.</p>");
+    if (!t) return messagePage(res, 503, this.ctx, { title: "The bridge is starting", text: "The bridge is starting. Try again in a moment.", sign: "open", action: linkButton("", "Try again") });
     const cookieName = "tb_keys";
     const sid = parseCookies(headerValue(req, "cookie"))[cookieName];
     const session = sid ? this.keySessions.get(sid) : undefined;
     const secure = (this.ctx.keysUrl ?? this.ctx.publicUrl).startsWith("https:");
     if (req.method === "POST") {
       // L3/L18: every refused save is one log line (names and a code only, never the value, L15) and a plain page
-      const refuse = (code: KeySaveRefusal, keyName: string | null, status: number, title: string, text: string, headers: Record<string, string> = {}) => {
+      const refuse = (code: KeySaveRefusal, keyName: string | null, status: number, m: Message) => {
         this.ctx.log.warn("bridge.keys.save_refused", { app: keyApps(t, keyName), keyName: safeKeyName(keyName), code });
-        htmlPage(res, status, title, `<p>${text}</p>`, headers);
+        messagePage(res, status, this.ctx, m);
       };
-      if (!this.keysPostLimit.take(clientIp(req))) return refuse("rate_limited", null, 429, "Too many requests", "The key was not saved. Please wait a minute and try again.", { "retry-after": "60" });
+      // the one "not saved" page (BRIDGE-PAGES #4): the reason, back to the keys
+      const notSaved = (reason: string): Message => ({ title: "The key was not saved", text: `The key was not saved: ${reason}`, sign: "person", action: linkButton("/keys", "Back to the keys", true), detail: "Nothing was stored. Your other keys did not change." });
+      if (!this.keysPostLimit.take(clientIp(req)))
+        return refuse("rate_limited", null, 429, { title: "Too many requests", text: "The key was not saved. Please wait a minute and try again.", sign: "person", detail: "This protects your workspace from guessing.", headers: { "retry-after": "60" } });
       let raw: Buffer;
       try {
         raw = await readBody(req, 20 * 1024);
       } catch (e) {
-        if (e instanceof BridgeError && e.code === "payload_too_large") return refuse("too_large", null, 413, "Not saved", "The key was not saved: the value is too large (at most 16 KB).");
-        return refuse("body_invalid", null, e instanceof BridgeError ? e.status : 400, "Not saved", "The key was not saved: the form did not arrive completely. Try again.");
+        if (e instanceof BridgeError && e.code === "payload_too_large") return refuse("too_large", null, 413, notSaved("the value is too large (at most 16 KB)."));
+        return refuse("body_invalid", null, e instanceof BridgeError ? e.status : 400, notSaved("the form did not arrive completely. Try again."));
       }
       const form = new URLSearchParams(raw.toString("utf8"));
       const ticket = form.get("ticket");
@@ -238,7 +251,7 @@ export class PersonSurfaces {
         });
         if (isRefusal(v) || v.claims.pur !== "keys" || v.claims.ws !== t.ws || !this.ctx.state.useJti(v.claims.jti, v.claims.exp)) {
           this.ctx.reject({ kind: "ticket", code: "invalid_token" });
-          return refuse("ticket_invalid", null, 401, "Link expired", "This link has expired or was used. Open the key page again from Portal.");
+          return refuse("ticket_invalid", null, 401, { title: "Link expired", text: "This link has expired or was used. Open it again from Portal.", sign: "open", action: portalButton(this.ctx) });
         }
         const id = randomBytes(32).toString("base64url");
         const fresh: KeySession = { csrf: randomBytes(24).toString("base64url"), exp: nowS() + LIFETIME_S.keyPageSession, req: v.claims.req ?? [] };
@@ -249,18 +262,26 @@ export class PersonSurfaces {
         return this.renderKeys(res, t, fresh, { "set-cookie": `${cookieName}=${id}; HttpOnly; ${secure ? "Secure; " : ""}SameSite=Strict; Path=/keys; Max-Age=${LIFETIME_S.keyPageSession}` });
       }
       const name = form.get("name") ?? "";
-      if (!session || session.exp <= nowS()) return refuse("page_expired", name, 401, "Session expired", "The key was not saved: this page expired. Open the key page again from Portal.");
-      if (form.get("csrf") !== session.csrf) return refuse("csrf_invalid", name, 403, "Refused", "The key was not saved: the form expired. Open the key page again from Portal.");
+      if (!session || session.exp <= nowS())
+        return refuse("page_expired", name, 401, {
+          title: "This page expired",
+          text: "The key was not saved: this page expired. Open the key page again from Portal.",
+          sign: "open",
+          action: portalButton(this.ctx),
+          detail: `Key pages close after ${LIFETIME_S.keyPageSession / 60} minutes so a key can never be entered on a page left open.`,
+        });
+      if (form.get("csrf") !== session.csrf) return refuse("csrf_invalid", name, 403, notSaved("the form expired. Go back to the keys and try again."));
       const allowed = t.config.keyRequirements.some((k) => k.source === "account_default" && k.name === name);
-      if (!allowed) return refuse("unknown_key", name, 400, "Unknown key", "The key was not saved: no app requests this key.");
+      if (!allowed) return refuse("unknown_key", name, 400, notSaved("no app requests this key."));
       if (form.get("action") === "delete") {
         this.ctx.state.setKey(name, null);
       } else {
         // a pasted key often carries a trailing newline or spaces: only the surrounding whitespace is removed
         const value = (form.get("value") ?? "").trim();
-        if (!value) return refuse("empty_value", name, 400, "Not saved", "The key was not saved: enter a value.");
-        if (Buffer.byteLength(value) > 16 * 1024) return refuse("too_large", name, 400, "Not saved", "The key was not saved: the value is too large (at most 16 KB).");
+        if (!value) return refuse("empty_value", name, 400, notSaved("enter a value."));
+        if (Buffer.byteLength(value) > 16 * 1024) return refuse("too_large", name, 400, notSaved("the value is too large (at most 16 KB)."));
         this.ctx.state.setKey(name, value);
+        session.saved = name; // the success notice on the next view (BRIDGE-PAGES #3a): shown once, nothing in the URL
         this.ctx.log.info("bridge.keys.saved", { app: keyApps(t, name), keyName: name, keysRev: this.ctx.state.keyStore.keysRev });
       }
       this.ctx.log.info("bridge.keys.changed", { name, keysRev: this.ctx.state.keyStore.keysRev });
@@ -268,7 +289,13 @@ export class PersonSurfaces {
       res.writeHead(303, { location: "/keys", "cache-control": "no-store" }).end();
       return;
     }
-    if (!session || session.exp <= nowS()) return htmlPage(res, 401, "Open from Portal", "<p>Open the key page from Portal (Workspace → workspace default keys).</p>");
+    if (!session || session.exp <= nowS())
+      return messagePage(res, 401, this.ctx, {
+        title: "Open the key page from Portal",
+        text: "Open it from Portal: Workspace → Workspace default keys. The link from Portal signs you in to this page once.",
+        sign: "open",
+        action: portalButton(this.ctx),
+      });
     return this.renderKeys(res, t, session);
   }
 
@@ -282,18 +309,46 @@ export class PersonSurfaces {
       byName.set(k.name, e);
     }
     const names = [...byName.keys()].sort((a, b) => Number(session.req.includes(b)) - Number(session.req.includes(a)) || a.localeCompare(b));
+    const apps = new Map<string, PageApp>();
+    const hidden = (n: string) => `<input type="hidden" name="csrf" value="${esc(session.csrf)}"><input type="hidden" name="name" value="${esc(n)}">`;
     const rows = names
       .map((n) => {
         const e = byName.get(n) as { label: string; provider?: string; products: Set<string>; required: boolean };
         const set = Object.hasOwn(this.ctx.state.keyStore.values, n);
-        return `<section><h2 style="font-size:1rem">${esc(e.label)}${e.required ? "" : " (optional)"}</h2>
-<p>${esc(n)} · used by ${esc([...e.products].join(", "))} · <b>${set ? "set" : "not set"}</b></p>
-<form method="post" action="/keys"><input type="hidden" name="csrf" value="${esc(session.csrf)}"><input type="hidden" name="name" value="${esc(n)}">
-<input type="password" name="value" autocomplete="off" placeholder="${set ? "Replace value" : "Enter value"}" required><button type="submit">${set ? "Replace" : "Save"}</button></form>
-${set ? `<form method="post" action="/keys"><input type="hidden" name="csrf" value="${esc(session.csrf)}"><input type="hidden" name="name" value="${esc(n)}"><input type="hidden" name="action" value="delete"><button type="submit">Delete</button></form>` : ""}</section>`;
+        const id = esc(n);
+        const chips = [...e.products]
+          .map((p) => {
+            const a = apps.get(p) ?? pageApp(this.ctx, p);
+            apps.set(p, a);
+            return appChip(a);
+          })
+          .join("");
+        const tag = set ? `<span class="tb-tag live">${ink("Set")}</span>` : e.required ? `<span class="tb-tag needs-you">${ink("Not set")}</span>` : `<span class="tb-tag idle">${ink("Not set")}</span>`;
+        return `
+  <section class="bp-key" aria-labelledby="k-${id}">
+    <div class="bp-key-head"><h2 id="k-${id}">${esc(e.label)}${e.required ? "" : " <small>(optional)</small>"}</h2>${tag}</div>
+    <div class="bp-used"><span class="tb-mono">${id}</span><span>used by</span>${chips}${session.req.includes(n) ? `<span class="tb-tag busy">${ink("requested now")}</span>` : ""}</div>
+    <div class="bp-form"><form class="bp-form-del" method="post" action="/keys">${hidden(n)}<label class="tb-sr" for="v-${id}">${esc(e.label)}</label><input class="tb-input" id="v-${id}" name="value" type="password" autocomplete="off" required placeholder="${set ? "Replace value" : "Enter value"}"><button class="tb-btn${set ? "" : " primary"}" type="submit">${ink(set ? "Replace" : "Save")}</button></form>${set ? `<form class="bp-form-del" method="post" action="/keys">${hidden(n)}<input type="hidden" name="action" value="delete"><button class="tb-btn danger" type="submit">${ink("Delete")}</button></form>` : ""}</div>
+  </section>`;
       })
       .join("");
-    htmlPage(res, 200, "Workspace default keys", `<p>Keys are stored in your workspace only. Teal Brick Portal never sees them. Values are never shown again.</p>${rows || "<p>No app needs a key.</p>"}`, headers);
+    // the one-time success notice: the key's label from the table (the name the form sent was checked against it)
+    const savedLabel = session.saved ? byName.get(session.saved)?.label : undefined;
+    delete session.saved;
+    const flash = savedLabel ? `\n    <div class="tb-notice live" role="status"><span><strong>Saved ${esc(savedLabel)}.</strong> Apps that use it pick it up within a minute.</span></div>` : "";
+    htmlPage(res, 200, {
+      title: "Workspace default keys",
+      workspace: t.config.workspace.name,
+      apps: [...apps.values()],
+      headers,
+      main: `
+  <section class="bp-card wide" aria-labelledby="h">
+    <h1 id="h">Workspace default keys</h1>
+    <p class="tb-soft">Keys are stored in your workspace only. Tealbrick Portal never sees them, and values are never shown again.</p>${flash}
+    ${rows ? `<div class="bp-keys">${rows}\n    </div>` : '<p class="tb-soft">No app needs a key.</p>'}
+    <p class="tb-hint">This page closes its session after ${LIFETIME_S.keyPageSession / 60} minutes. Open it again from Portal when it expires.</p>
+  </section>`,
+    });
   }
 }
 

@@ -1,6 +1,6 @@
 {
   "name": "@opt2-tealbrick/bridge",
-  "version": "0.1.28",
+  "version": "0.1.29",
   "private": true,
   "type": "module",
   "description": "Bridge core (deployed + relay forms). Never runs agents or calls models.",
@@ -19,7 +19,8 @@
     }
   },
   "files": [
-    "dist"
+    "dist",
+    "assets"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json"
