@@ -19,6 +19,8 @@ FROM node:24.21.0-bookworm-slim@sha256:d6aa754f16b3197301076f047b5def2f02ea1dbbc
 ENV NODE_ENV=production TB_DATA_DIR=/data PORT=8080 TB_INTERNAL_PORT=8788
 WORKDIR /app
 COPY --from=build /out ./
+COPY LICENSE NOTICE /app/
+LABEL org.opencontainers.image.licenses="LicenseRef-Tealbrick-Proprietary"
 RUN mkdir -p /data && chown 1000:1000 /data
 USER 1000:1000
 EXPOSE 8080 8788

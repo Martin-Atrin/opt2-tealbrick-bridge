@@ -4,7 +4,7 @@
   "private": true,
   "type": "module",
   "description": "Bridge core (deployed + relay forms). Never runs agents or calls models.",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
   "engines": {
     "node": ">=24"
   },
@@ -20,7 +20,8 @@
   },
   "files": [
     "dist",
-    "assets"
+    "assets",
+    "NOTICE"
   ],
   "scripts": {
     "build": "tsc -p tsconfig.build.json"

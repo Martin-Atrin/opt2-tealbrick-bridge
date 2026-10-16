@@ -1,0 +1,85 @@
+Tealbrick Software Licence, version 1.1
+https://tealbrick.com/software-licence
+
+TEALBRICK SOFTWARE LICENCE, VERSION 1.1
+
+Copyright 2026 Polygonface s.r.o., Sládkovičova 60, 974 05 Banská Bystrica, Slovakia, company ID (IČO) 50187210 ("Polygonface"). Tealbrick is a trademark of Polygonface.
+
+## 1. What this licence covers and how you accept it
+
+1.1 This licence covers the software that ships with it (the "Software"):
+
+- **Part A** applies to the Tealbrick bridge, the `tealbrick` command-line tool (CLI) with its relay and harness adapters, and the installer.
+- **Part B (Tealbrick SDK Licence)** applies to the SDK Packages: `miniapp-sdk`, `manifest`, `spec`, `conformance`, `create-tealbrick-miniapp` and `ui` (the design-system kit), and their successors.
+- **Parts C and D** apply to both.
+
+1.2 You accept this licence when you download, install, copy or use the Software. If you do not accept it, do not use the Software. If you have a Tealbrick account, the Tealbrick Terms of Service (https://tealbrick.com/terms) also apply and prevail.
+
+1.3 **Earlier versions.** Versions of the bridge, CLI and SDK Packages that were published with an MIT licence declaration, and without this licence, stay available under the MIT licence. This licence applies to every version that ships with it.
+
+1.4 Third-party components in the Software are licensed under their own licences, listed in the THIRD_PARTY_NOTICES file shipped with the Software. Nothing in this licence restricts rights those licences give you.
+
+## Part A — Bridge, CLI and installer
+
+A1 **Grant.** Polygonface grants you a non-exclusive, non-transferable, non-sublicensable, free-of-charge licence to install and run the Software, in object form as delivered, on infrastructure you control, for your own business or personal purposes:
+
+(a) together with Tealbrick Portal under the Tealbrick Terms of Service; or
+(b) for a bridge in standalone mode, with the last configuration that Portal signed for it.
+
+A2 **Contractors.** Your contractors may use the Software for you under terms at least as protective as this licence. You are responsible for them.
+
+## Part B — Tealbrick SDK Licence
+
+B1 **Grant.** Polygonface grants you a non-exclusive, worldwide, non-transferable, free-of-charge licence to:
+
+(a) use the SDK Packages to develop, build, test and run mini apps;
+(b) copy and distribute unmodified SDK Packages as part of a mini app, including when that mini app runs without Tealbrick Portal or without the Tealbrick bridge;
+(c) use the SDK Packages to build and run your own bridge, only for your own internal use with mini apps that you may lawfully run.
+
+B2 **Mini apps you publish.** You may license your own mini app under any licence you choose, but the SDK Packages inside it stay under this Part B. Keep this licence and the copyright notice with every copy of the SDK Packages you distribute.
+
+## Part C — Restrictions (Parts A and B)
+
+Except as this licence or mandatory law allows, you must not:
+
+C1 modify, translate or create derived works of the Software, other than configuration and the templates that `create-tealbrick-miniapp` generates for you;
+
+C2 decompile, disassemble or reverse engineer the Software, except to the extent that Articles 5(3) and 6 of Directive 2009/24/EC, as implemented in Slovak law, allow;
+
+C3 distribute, sell, rent, lease, sublicense or host the Software for third parties, except SDK Packages under B1(b);
+
+C4 use the Software, or any part of it, to build, offer or operate a control plane, signing service, configuration service, bridge or hosting service for third parties that replaces or competes with Tealbrick Portal or the Tealbrick bridge;
+
+C5 use the Tealbrick bridge or CLI with a control plane, signing service or configuration source other than Tealbrick Portal, except in standalone mode;
+
+C6 bypass licence checks, signatures, release verification or other technical protection;
+
+C7 remove or change copyright, licence or trademark notices;
+
+C8 use the names TEALBRICK, TEAL BRICK or POLYGONFACE, our logos or our look and feel, except to state truthfully, in plain text, that your mini app works with Tealbrick, as the Brand Use Policy (https://tealbrick.com/brand) allows. This licence grants no trademark right.
+
+## Part D — General (Parts A and B)
+
+D1 **Ownership.** Polygonface owns the Software. This licence grants rights of use only. All rights not granted are reserved.
+
+D2 **Security updates.** Polygonface provides security updates for the Software free of charge during the support period published at https://tealbrick.com/security. Install them without undue delay. Nothing in this licence limits Polygonface's duties under Regulation (EU) 2024/2847 (Cyber Resilience Act).
+
+D3 **No other promise.** Beyond D2, and to the extent the law allows, the Software is provided free of charge and "as is". Polygonface does not promise that it is fit for a particular purpose, uninterrupted, error-free or free of vulnerabilities.
+
+D4 **Liability.** Each sentence of this clause is independent.
+(a) Nothing in this licence limits liability for intent, gross negligence, harm to life, body or health, liability under mandatory product liability law, or any other liability that mandatory law does not allow to limit. Items (b) to (d) do not apply to these cases.
+(b) The Software is free of charge. Taking that into account, the parties agree that the highest loss Polygonface could foresee at the conclusion of this licence as a possible result of its breach (Slovak Commercial Code, § 379) is EUR 500.
+(c) Separately, Polygonface's total liability under this licence is limited to EUR 500.
+(d) Polygonface is not liable for the part of a loss that you caused or contributed to, or could have avoided, including by not installing a security update.
+(e) If you also have a Tealbrick account, section 17 of the Terms of Service applies instead of (b) to (d).
+(f) If you are a consumer, D3 and items (b) to (d) apply only as far as mandatory consumer protection law allows, and nothing in this licence limits your rights under that law.
+
+D5 **Termination.** This licence ends automatically if you breach Part C and do not cure the breach within 15 days after Polygonface tells you of it. It ends at once, without a cure period, for a breach of C4, C5 or C6. Polygonface may also end Part A for an account that it terminated for breach under the Terms of Service. When the licence ends, stop using the Software and delete your copies, except copies of SDK Packages that you already distributed inside a mini app under B1(b), which stay licensed to their recipients.
+
+D6 **Export and sanctions.** You must not use the Software in breach of EU or other applicable export control or sanctions law.
+
+D7 **Governing law and courts.** Slovak law governs this licence, excluding its conflict-of-law rules and the UN Convention on Contracts for the International Sale of Goods. For business users, the competent court of the Slovak Republic determined by the registered office of Polygonface decides disputes, and Polygonface may also bring a claim in the courts of the EU Member State or Lugano Convention state where you have your seat. If you are a consumer, you keep the protection of the mandatory law of your country of habitual residence, you may sue in the courts of the Slovak Republic or of your country of domicile, and Polygonface may sue you only in the courts of your country of domicile.
+
+D8 **Changes.** Polygonface may publish new versions of this licence. Each version of the Software is governed by the licence version shipped with it, unless you choose a later one.
+
+D9 **Contact.** legal@tealbrick.com.
