@@ -53,7 +53,7 @@ A final Portal-signed config with `standalone` freezes the bridge: it stops pull
 
 ## 9. Repo split status
 
-Done: the agent side exists in `Tealbrick/cli` (relay 0.1.0, cli 0.2.0, harnesses 0.2.0). Pending: remove the old CLI, harnesses and relay modules from here; depend on `@opt2-tealbrick/relay` from the dist host; ship a `-conformance` image tag outside the signed index; bridge 0.2.0; then flip this repo to private. TBD still pins an old bridge tarball and will break when this repo goes private (see `repos/tbd`).
+Prepared, not released: the agent side lives in `Tealbrick/opt2-tealbrick-cli` (relay 0.1.0, cli 0.2.0, harnesses 0.2.0). `relay-v0.1.0` is tagged but its release Action is blocked by the org's Actions billing, so nothing is indexed or mirrored yet; bridge 0.2.0 needs relay 0.1.0 on the dist host first (release-order rule). Pending: remove the old CLI, harnesses and relay modules from here; depend on `@opt2-tealbrick/relay` from the dist host; ship a `-conformance` image tag outside the signed index; bridge 0.2.0; then flip this repo to private. TBD still pins an old bridge tarball and will break when this repo goes private (see `repos/tbd`).
 
 ## 10. Known gaps
 

@@ -35,7 +35,7 @@ pnpm test          # builds, then node --test over packages/*/test
 pnpm conformance   # tb-conformance bridge against the real build; waivers: none
 ```
 
-Recorded at last check: 377 tests pass, conformance 251 pass, relay 10 of 10 (UNVERIFIED by running).
+Recorded at last check (bridge 0.1.30, b953d47): 384 tests pass, 0 fail, 1 skipped; conformance 251 pass, 0 waivers; relay 10 of 10.
 
 ## Releasing
 
@@ -43,4 +43,4 @@ Recorded at last check: 377 tests pass, conformance 251 pass, relay 10 of 10 (UN
 2. Tag `v<x.y.z>` (image) and `bridge-v<x.y.z>` (library tarball) on the same commit. The version equals `packages/bridge/package.json` and `bridge-server`.
 3. The release Action builds and pushes; `registry-sync` verifies labels and digest and signs the index entry. Dispatch `registry-sync` by hand after a release; the schedule is slow.
 4. Core offers the new version; each workspace owner updates. A bridge state reseal is one-way: the release record carries a rollback floor (`minRollback`), and apps may require a minimum bridge (`requires.bridge`).
-5. qa1 is rolled by the QA lane, not by the release.
+5. qa1 is rolled by Lane C, one update at a quiet point (L46: no recent tool call by anyone but the Lane C test agents), not by the release itself.
