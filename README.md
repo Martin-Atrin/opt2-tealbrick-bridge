@@ -1,41 +1,63 @@
-# opt2-tealbrick-bridge
+# Tealbrick bridge
 
-Teal Brick opt2: bridge core, deployed bridge-server, tealbrick CLI, harness adapters.
+The workspace's one public door. It verifies agents, gates and routes every call to apps on the private network, runs the hook chain, serves MCP and OAuth, proxies person launches, serves the key-entry page, and connects OUT to Portal for signed configuration.
 
-**Status: opt2 build (clean-room v2 of Teal Brick), work in progress.** This repository is part of the opt2 build and lives under `Martin-Atrin` during the build; it moves to the Teal Brick organisation as one clean commit when opt2 is released. It is not the current production system.
+- Repository: `Tealbrick/opt2-tealbrick-bridge` (GitHub organisation `Tealbrick`)
+- Licence: Proprietary.
+- Status: bridge and bridge-server 0.1.30 (forwards the upgrade-safety status fields; spec 0.1.39). CI template ci-v9.9. The target is a PRIVATE source repo; it stays public for now because a private repo cannot run Actions until the org billing is fixed. The server image is PUBLIC: `ghcr.io/tealbrick/opt2-tealbrick-bridge-server`. The repo split is half done: the agent-side code was copied to the CLI repo (`Tealbrick/opt2-tealbrick-cli`), but this repo still contains an old CLI (0.1.22), both harnesses and the relay modules. No bridge 0.2.0 exists.
 
-Owner lane: Lead · Bridge & Harness.
+Do not put secrets, tokens, keys, customer data or personal data in this repository, its issues or its pull requests. This repository is public for now and must stay clean either way. Runtime secrets live in the deployment platform (Railway variables, Woodpecker secrets), and `.env` files are never committed. A secret scan (gitleaks) is the first step of the CI pipeline (`.woodpecker/ci.yaml`), and GitHub secret scanning with push protection is enabled. An optional local guard is `pre-commit install`. If a secret is committed, rotate it first, then remove it from history.
 
-## No secrets policy
+## What this repo is and is not
 
-This repository is public. It must never contain secrets or personal data:
+The bridge DOES: verify every caller, run `gate()` on every routed call, run before, context and after hooks, forward to apps with a grant and a call proof, serve MCP, act as OAuth authorization server for its own MCP resource, proxy person launches, serve the key page, store account-default keys sealed, pull signed config, relay instance slices, report status.
 
-- No API keys, tokens, passwords, private keys, deployment secrets, `.env` files or connection strings. Use `.env.example` with placeholder values only.
-- Runtime secrets live in the deployment platform (Railway variables, Woodpecker secrets) and are copied between services without printing them.
-- No personal names, private agent configurations or customer data.
-- Every push runs a secret scan (`.woodpecker/secret-scan.yaml`, gitleaks). GitHub secret scanning with push protection is enabled. Optional local guard: `pre-commit install`.
-- If a secret is committed anyway: rotate it first, then remove it from history.
+The bridge does NOT: run agents or schedules, call any model, hold app data, holds or receipts, decide run or hold (the app does), check licences (Core withholds grants instead), send payloads or key values to Portal, or accept a connection from Portal.
+
+The bridge core is one package in two forms: `deployed` (the enforcement point; holds grants and the key store) and `relay` (local; holds only the agent identity and forwards to the deployed bridge).
+
+## Quick start
+
+pnpm workspaces; TypeScript run directly by Node 24+ (type stripping).
+
+```sh
+corepack enable && pnpm install --frozen-lockfile --ignore-scripts
+pnpm typecheck && pnpm lint && pnpm test
+pnpm conformance        # real tb-conformance against the real bridge build, plus the relay target
+pnpm build
+```
+
+Run the container image the way Core deploys it: a volume at `/data`, `TB_KEK`, `TB_PORTAL_URL`, `TB_PUBLIC_URL`, `TB_ENROL_CODE`. For your own infrastructure see the runbooks in `Tealbrick/opt2-tealbrick-docs`.
 
 ## Layout
 
-npm workspaces, TypeScript run directly by Node 24+ (type stripping, `erasableSyntaxOnly`).
-
-| Package | Role |
+| Path | Purpose |
 |---|---|
-| `packages/bridge` | Bridge core. Two forms of one package: `deployed` (enforcement point, holds grants and the key store) and `relay` (local, holds only the agent identity, forwards to the deployed bridge). Never runs agents, never calls models. |
-| `packages/bridge-server` | Deployed bridge entry (Docker, workspace private network). |
-| `packages/cli` | `tealbrick` CLI: owner mode (drafts), agent mode (agent cards), local relay, harness connection instructions. |
-| `packages/harness-claude` | Claude Agent SDK adapter. No policy. |
-| `packages/harness-eve` | Eve adapter. No policy. |
+| `packages/bridge` | Core library (`@opt2-tealbrick/bridge`): server, portal link, state, routing table, call router, MCP, OAuth, identity, person surfaces, internal listener, standalone, pages, relay |
+| `packages/bridge-server` | Docker entry: privilege drop, signal handling, `bridge-runtime.json` (platform-readable runtime descriptor) |
+| `packages/cli`, `packages/harness-claude`, `packages/harness-eve` | OLD copies. The live source is now `Tealbrick/opt2-tealbrick-cli`. To be removed in bridge 0.2.0 |
+| `packages/bridge/assets` | Generated kit CSS subset, Nunito, mark, favicon for the bridge pages |
+| `scripts/conformance.ts`, `conformance-waivers.json` | Real conformance run (waivers: none) |
+| `scripts/check-literals.ts` | Deny-list guard (old names, tailnet hosts, product names) |
+| `tealbrick-ci.json` | Repo-specific CI settings (kind `bridge`; builds the `opt2-tealbrick-bridge-server` image) |
 
-Package scope `@opt2-tealbrick/*` is a placeholder until `specs/REPOS.md` fixes names. Later wave in this repo: `buzz` (with voice), `avm`.
+## Configuration
 
-Checks: `npm run check` (typecheck, `scripts/check-literals.ts`, unit tests).
+Required: `TB_DATA_DIR`, `TB_KEK`, `TB_PORTAL_URL`, `TB_PUBLIC_URL`; `TB_ENROL_CODE` on first start; `TB_KEYS_PUBLIC_URL` for the key page. Full list and meanings: the environments document in `Tealbrick/opt2-tealbrick-docs`. There is no `.env.example`.
 
-## CI
+## CI and release
 
-Woodpecker CI (shared opt2 pipeline template from `opt2-tealbrick-platform`).
+Woodpecker CI with the shared opt2 pipeline template ci-v9.9 (`.woodpecker/ci.yaml` and `.github/workflows/opt2-release.yml` are generated copies; do not edit them, change `tealbrick-ci.json` or the template in `Tealbrick/opt2-tealbrick-platform`). Library pins (spec, manifest, conformance, miniapp SDK) come from the dist host (`Tealbrick/opt2-tealbrick-dist`).
+
+Tag `v<x>` pushes the image; tag `bridge-v<x>` attaches the library tarball; the platform `registry-sync` signs the `bridge` index entry; Core deploys the digest into customer workspaces.
 
 ## Language
 
-New code is TypeScript (Node 24+). Swift only where the macOS app requires it.
+New code is TypeScript (Node 24+).
+
+## Documentation
+
+- `ARCHITECTURE.md` explains the design.
+- `CONTRIBUTING.md` explains how to change it.
+- The contract is in `Tealbrick/opt2-tealbrick-specs`: `docs/BRIDGE.md` and `CREDENTIALS.md`.
+- System documentation (overview, environments, runbooks) lives in the private repo Tealbrick/opt2-tealbrick-docs.
