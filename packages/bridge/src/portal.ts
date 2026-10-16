@@ -9,6 +9,7 @@ import type { Manifest } from "@opt2-tealbrick/spec/manifest";
 import { isRefusal, type Json } from "./api.ts";
 import { BRIDGE_VERSION, type BridgeContext, MCP_VERSIONS, SDK_MAJORS } from "./context.ts";
 import { remintStandalone } from "./standalone.ts";
+import { upgradeFields } from "./status-fields.ts";
 import { buildTable, internalUrlAllowed, type Table } from "./table.ts";
 import { BridgeError, isRecord, jitter, nowS, sleep } from "./util.ts";
 
@@ -365,6 +366,9 @@ export function buildStatusReport(ctx: BridgeContext): StatusReport {
       ...(typeof h?.status.sliceRevision === "number" ? { sliceRevision: h.status.sliceRevision } : {}),
       // spec 0.1.28 (F89): AppStatus.attention as the app last reported it, copied unchanged; absent stays absent (L24)
       ...(isRecord(h?.status.attention) ? { attention: h.status.attention } : {}),
+      // spec 0.1.39 (C213 US-2, miniapp-sdk 0.1.25): schemaVersion / minCompatibleCode / failure, shape-checked and copied
+      // unchanged; absent or malformed stays absent (L24). Core's health-gated update and rollback read them.
+      ...upgradeFields(h?.status),
     };
   });
   const keys = (t?.config.keyRequirements ?? [])

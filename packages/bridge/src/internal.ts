@@ -11,6 +11,7 @@ import { isRefusal, type Json, type KeySet } from "./api.ts";
 import type { CallRouter } from "./calls.ts";
 import { CALL_ID_RE } from "./calls.ts";
 import { type BridgeContext, DRAIN_RETRY_AFTER_S, SDK_CURRENT_MAJOR } from "./context.ts";
+import { upgradeFields } from "./status-fields.ts";
 import { type AppRuntime, internalUrlAllowed, type Table } from "./table.ts";
 import { BridgeError, envelope, headerValue, isRecord, nowS, parseJson, readBody, sendError, sendJson, statusFor, TokenBucket } from "./util.ts";
 
@@ -212,7 +213,9 @@ export class InternalApi {
       ctx.health.set(caller.ins, { status: body, lastSeen: nowS() });
       if (!prev || prev.status.scopesRev !== body.scopesRev) void this.refreshScopeSummary(caller.ins);
       const attentionChanged = JSON.stringify(prev?.status.attention ?? null) !== JSON.stringify(body.attention ?? null);
-      if (!prev || prev.status.readiness !== body.readiness || prev.status.pendingHolds !== body.pendingHolds || attentionChanged) ctx.emit("health");
+      // spec 0.1.39 (US-2): a new schema or a failed boot reaches Portal at once too (Core's update health gate waits on it)
+      const upgradeChanged = JSON.stringify(upgradeFields(prev?.status)) !== JSON.stringify(upgradeFields(body));
+      if (!prev || prev.status.readiness !== body.readiness || prev.status.pendingHolds !== body.pendingHolds || attentionChanged || upgradeChanged) ctx.emit("health");
     }
     const wait = Math.min(Math.max(Number(url.searchParams.get("wait") ?? 0) || 0, 0), 60);
     const answer = (): AppStatusResponse | undefined => {
