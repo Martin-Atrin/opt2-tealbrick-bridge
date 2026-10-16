@@ -4,10 +4,10 @@
   "private": true,
   "type": "module",
   "description": "Deployed bridge entry for the workspace private network.",
-  "license": "MIT",
+  "license": "SEE LICENSE IN LICENSE",
   "engines": { "node": ">=24" },
   "exports": { ".": { "types": "./dist/index.d.ts", "default": "./dist/index.js" } },
-  "files": ["dist"],
+  "files": ["dist", "NOTICE"],
   "bin": { "tealbrick-bridge-server": "./dist/server.js" },
   "scripts": { "build": "tsc -p tsconfig.build.json" },
   "dependencies": { "@opt2-tealbrick/spec": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.39/opt2-tealbrick-spec-0.1.39.tgz", "@opt2-tealbrick/bridge": "workspace:*" }
