@@ -54,6 +54,23 @@ describe("F89: app attention in the status report", () => {
     assert.ok(cleared, "the app is listed");
     assert.ok(!("attention" in cleared), "no attention in the app status -> no attention key in the report");
     for (const a of buildStatusReport(w.bridge.ctx).apps) if (a.ins !== INS) assert.ok(!("attention" in a), "apps that never reported attention carry no key");
+
+    // spec 0.1.39 (C213 US-2): schemaVersion / minCompatibleCode / failure pass through (shape-checked); a change pokes Portal
+    const failure = { phase: "app_migrations", code: "migration_failed", file: "0003_bad.sql", at: "2026-10-16T14:46:23.400Z" };
+    const acks2 = w.acks.length;
+    await status({ attention: { code: "migration_failed", reason: "x" }, schemaVersion: { app: 2, sdk: 5 }, minCompatibleCode: "1.0.0", failure, preUpdateSnapshot: { file: "tb-preupdate-to-2.0.0.tar.gz" } });
+    const up = appOf(buildStatusReport(w.bridge.ctx));
+    assert.deepEqual(up?.schemaVersion, { app: 2, sdk: 5 });
+    assert.equal(up?.minCompatibleCode, "1.0.0");
+    assert.deepEqual(up?.failure, failure);
+    assert.ok(!("preUpdateSnapshot" in (up ?? {})), "only the three Portal members are forwarded");
+    await waitFor(() => w.acks.slice(acks2).some((r) => JSON.stringify(appOf(r)?.failure) === JSON.stringify(failure)), 15000);
+    // malformed values are dropped, never forwarded
+    await status({ schemaVersion: { app: -1, sdk: 5 }, minCompatibleCode: "<script>", failure: { phase: "evil", code: "x", at: "now" } });
+    const bad = appOf(buildStatusReport(w.bridge.ctx)) ?? {};
+    for (const k of ["schemaVersion", "minCompatibleCode", "failure"]) assert.ok(!(k in bad), `${k} dropped`);
+    await status({ failure: { ...failure, file: "../../etc/passwd", reason: "Some Text" } });
+    assert.deepEqual(appOf(buildStatusReport(w.bridge.ctx))?.failure, { phase: failure.phase, code: failure.code, at: failure.at }, "bad file/reason dropped, rest kept");
   });
 });
 
