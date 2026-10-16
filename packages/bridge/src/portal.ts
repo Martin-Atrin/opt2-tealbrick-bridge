@@ -333,7 +333,6 @@ function reconcileConnections(ctx: BridgeContext, table: Table): void {
 /** con → epoch s of the status report that first carried it (memory; re-reported after restart). */
 const reportedAtS = new Map<string, number>();
 
-
 /** BRIDGE §5.6. */
 export function buildStatusReport(ctx: BridgeContext): StatusReport {
   const t = ctx.table;
