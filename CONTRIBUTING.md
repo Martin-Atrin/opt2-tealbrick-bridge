@@ -35,7 +35,7 @@ pnpm test          # builds, then node --test over packages/*/test
 pnpm conformance   # tb-conformance bridge against the real build; waivers: none
 ```
 
-Recorded at last check (bridge 0.1.30, b953d47): 384 tests pass, 0 fail, 1 skipped; conformance 251 pass, 0 waivers; relay 10 of 10.
+Recorded at last check (bridge 0.1.31): 390 tests pass, 0 fail, 1 skipped; conformance 251 pass, 0 waivers; relay 10 of 10.
 
 ## Releasing
 
