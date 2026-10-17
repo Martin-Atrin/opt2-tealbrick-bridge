@@ -4,8 +4,8 @@
 // its own pin says otherwise. This test fails as soon as they differ, so a manifest re-pin of the bridge also forces a
 // relay re-pin or a pnpm override ("@opt2-tealbrick/relay>@opt2-tealbrick/manifest").
 import assert from "node:assert/strict";
-import { createRequire } from "node:module";
 import { existsSync, readFileSync } from "node:fs";
+import { createRequire } from "node:module";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
 
