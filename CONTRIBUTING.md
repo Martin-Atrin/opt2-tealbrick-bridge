@@ -23,7 +23,7 @@ This file is the short version. The full engineering practice is in the Tealbric
 
 - A new refuse code or claim goes in the spec first (L24).
 - The bridge never decides a hold and never stores holds, receipts or app data.
-- Logs carry ids, codes and digests only. Never an input, an output, a token, a ticket, a code or a key value.
+- Logs carry ids, codes and digests only. Never an input, an output, a token, a ticket, a code or a key value. Never `req.url`, a path or a query: `/v/<product>/tbv_…`, `/tb/v1/views/…` and `/a/<product>/_p/…`, `_d/…` carry a secret. `packages/bridge/test/no-tokens-in-logs.test.ts` plants tokens and fails on any log line that holds one.
 - Public repo code may not import this repo (the CLI repo has a gate that enforces the other direction). This repo imports the agent side only through `@opt2-tealbrick/relay` and never carries a copy of it: `scripts/agent-side-gate.ts` (one owner per module, L1) fails `pnpm lint` and `pnpm test` if a relay or MCP-client symbol or module comes back. The agent-side code (relay, MCP client, CLI, harnesses) is changed in `Tealbrick/opt2-tealbrick-cli`, then this repo bumps the pinned relay tarball (dist URL, integrity in the lockfile).
 
 ## Checks before you push
@@ -35,7 +35,7 @@ pnpm test          # agent-side-gate, builds, then node --test over packages/*/t
 pnpm conformance   # tb-conformance bridge against the real build; waivers: none
 ```
 
-Recorded at last check (bridge 0.2.2): 358 tests pass, 0 fail, 0 skipped; conformance bridge target 251 pass, 1 not applicable, 0 fail, 0 waivers (the relay target runs in the CLI repo).
+Recorded at last check (bridge 0.2.3): 369 tests pass, 0 fail, 0 skipped; conformance bridge target 251 pass, 1 not applicable, 0 fail, 0 waivers (the relay target runs in the CLI repo).
 
 ## Releasing
 

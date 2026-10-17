@@ -14,7 +14,7 @@ import type {
   JsonValue,
   OpResult,
 } from "@opt2-tealbrick/spec/bridge";
-import { BRIDGE_OP_PATH, type BridgeOp, type CallId, type InstanceId, LIFETIME_S, TYP } from "@opt2-tealbrick/spec/credentials";
+import { BRIDGE_OP_PATH, type BridgeOp, type CallId, type CompanionGrantClaims, type InstanceId, LIFETIME_S, TYP } from "@opt2-tealbrick/spec/credentials";
 import { type CrudAction, type DynamicCatalogEntry, type DynamicResolution, EFFECTS, type Effect, type HoldFamily } from "@opt2-tealbrick/spec/manifest";
 import type { Json, OperationView } from "@opt2-tealbrick/spec/sdk";
 import type { BridgeContext } from "./context.ts";
@@ -296,7 +296,12 @@ export class CallRouter {
     return g.token;
   }
 
-  private runGate(t: Table, caller: Caller, target: Target, op: OperationView, grant: string): void {
+  /**
+   * Gate (and, for a companion call, the grant-subject checks). Returns the presented companion grant's `prd` (GRANT-PRD,
+   * spec 0.1.46: the product of the calling instance, signed with the grant) when the grant carries one; the manifest
+   * library has already shape-checked it (a malformed `prd` is `grant_invalid` in gate()).
+   */
+  private runGate(t: Table, caller: Caller, target: Target, op: OperationView, grant: string): string | undefined {
     const now = nowS();
     const paused =
       caller.type === "agent"
@@ -312,7 +317,9 @@ export class CallRouter {
       // re-reads its slice once and retries (grant_expired stays the code for exp)
       const current = sliceGrants(t.apps.get(caller.ins));
       if (current && !current.includes(grant)) throw new BridgeError("grant_stale", 403, "the grant is from an older slice revision; re-read the slice");
+      return (v.claims as CompanionGrantClaims).prd;
     }
+    return undefined;
   }
 
   /**
@@ -432,16 +439,25 @@ export class CallRouter {
         throw new BridgeError("input_invalid", 400, "idempotency key required");
       }
       // 5. gate
-      this.runGate(t0, caller, target, op, grant);
+      const grantPrd = this.runGate(t0, caller, target, op, grant);
+      // HOOK-CALLER-PRODUCT + GRANT-PRD (spec 0.1.46): the product of an app caller comes from the bridge's own signed
+      // config (the instance table). When the presented companion grant also carries `prd` and it differs, the two
+      // sources disagree: the hook request carries NO product (a policy app then treats the caller as unverified) and the
+      // mismatch is logged (both product ids; no tokens). No `prd` (an older Core, an agent) → the table's product.
+      const tableProduct = caller.type === "app" ? t0.apps.get(caller.ins)?.entry.product : undefined;
+      let callerProduct = tableProduct;
+      if (caller.type === "app" && grantPrd !== undefined && grantPrd !== tableProduct) {
+        callerProduct = undefined;
+        ctx.log.warn("bridge.hooks.caller_product_mismatch", { ins: caller.ins, tableProduct: tableProduct ?? null, grantProduct: grantPrd, detail: `${tableProduct ?? "-"}|${grantPrd}` });
+      }
       const callInfo = {
         id: call,
         ws: t0.ws,
         caller:
           caller.type === "agent"
             ? { type: "agent" as const, id: caller.agt, ...(t0.agents.get(caller.agt) ? { mode: t0.agents.get(caller.agt)?.mode } : {}) }
-            : // HOOK-CALLER-PRODUCT (spec 0.1.45): the product of an app caller comes from the bridge's own signed config (the
-              // instance table), never from input, a header or a manifest name; an instance the table cannot map carries none
-              { type: "app" as const, id: caller.ins, ...(t0.apps.get(caller.ins)?.entry.product ? { product: t0.apps.get(caller.ins)?.entry.product } : {}) },
+            : // never from input, a header or a manifest name; an instance the table cannot map carries none (see above)
+              { type: "app" as const, id: caller.ins, ...(callerProduct ? { product: callerProduct } : {}) },
         target: {
           instance: target.app.entry.ins,
           product: target.app.entry.product,

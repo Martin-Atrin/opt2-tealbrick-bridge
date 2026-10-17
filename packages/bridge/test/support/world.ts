@@ -2,6 +2,7 @@
  * Test world: a fake Portal (enrol, config long-poll, ack), a fake app (SDK routes) and a real
  * deployed bridge started on free ports with the manifest test double.
  */
+import { webcrypto } from "node:crypto";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
@@ -141,6 +142,8 @@ export interface World {
   agentToken(): Promise<string>;
   mcp(token: string, body: unknown, session?: string): Promise<{ status: number; json: any; session: string | null }>;
   signPortal(typ: string, claims: object): Promise<string>;
+  /** like signPortal but WITHOUT the library's claim check: a token the library itself would refuse to sign (a malformed claim, GRANT-PRD tests) */
+  signPortalUnchecked(typ: string, claims: object): Promise<string>;
   /** access token for any connection of the config (key method, the world's agent key) */
   agentTokenFor(agt: string, con: string): Promise<string>;
   /** requests the bridge's public listener received on this path, across restarts (failure diagnostics) */
@@ -487,6 +490,12 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
     publicRequests: (path) => seen.get(path) ?? 0,
     mcp,
     signPortal: sign,
+    signPortalUnchecked: async (typ, claims) => {
+      const enc = (v: unknown) => Buffer.from(JSON.stringify(v), "utf8").toString("base64url");
+      const input = `${enc({ alg: "EdDSA", typ, kid: signingKey.kid })}.${enc(claims)}`;
+      const sig = Buffer.from(await webcrypto.subtle.sign({ name: "Ed25519" }, signingKey.privateKey, Buffer.from(input, "ascii"))).toString("base64url");
+      return `${input}.${sig}`;
+    },
     async amend(change) {
       change(base);
       return publish();
