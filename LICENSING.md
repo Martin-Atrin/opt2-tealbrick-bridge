@@ -18,4 +18,6 @@ The Tealbrick Software Licence applies from the next version of each package tha
 
 Rule if a version is missing from the table: every version up to and including the last tag before the merge date of that pull request stays under MIT. A version tagged on or after the merge date carries this licence.
 
+From bridge 0.2.0 the CLI and the two harnesses are no longer in this repository (their source is `Tealbrick/opt2-tealbrick-cli`); the rows above stay as history of what was released from here.
+
 The release index is the signed `registry` release of `Tealbrick/opt2-tealbrick-dist` (`index.json`). It lists only the versions mirrored there. The git tags in this repository list every version that was built.

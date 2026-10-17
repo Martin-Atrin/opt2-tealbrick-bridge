@@ -13,7 +13,7 @@ import { resolve } from "node:path";
 import { PassThrough } from "node:stream";
 import { after, before, describe, test } from "node:test";
 import { fileURLToPath } from "node:url";
-import { type RunningRelay, startRelay } from "../src/relay.ts";
+import { type RunningRelay, startRelay } from "@opt2-tealbrick/relay";
 import { AGT, APP_CODE, BRG, CON, INS, makeWorld, type World, WS, waitFor } from "./support/world.ts";
 
 const ENTRY = resolve(fileURLToPath(new URL("../../bridge-server/test/conformance-entry.ts", import.meta.url)));

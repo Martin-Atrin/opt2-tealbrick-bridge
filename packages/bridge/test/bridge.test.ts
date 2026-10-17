@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import { PassThrough } from "node:stream";
 import { after, before, describe, test } from "node:test";
-import { startRelay } from "../src/relay.ts";
+import { startRelay } from "@opt2-tealbrick/relay";
 import { AGT, AGT2, APP_CODE, BRG, CON, INS, makeWorld, SVC_CODE, type World, WS, waitFor } from "./support/world.ts";
 
 const now = () => Math.floor(Date.now() / 1000);

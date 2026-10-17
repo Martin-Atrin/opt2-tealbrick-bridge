@@ -4,9 +4,9 @@
  * (K7) at half-life and applies the owner's admin overlay (S9). Admin = exactly 4 ops.
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { isRefusal } from "@opt2-tealbrick/relay";
 import type { AdminTicketResult, InstanceSlice, WorkspaceConfig } from "@opt2-tealbrick/spec/bridge";
 import { type AgentId, type ConnectionId, type GrantClaims, LIFETIME_S, type OwnerAssertionClaims, TYP } from "@opt2-tealbrick/spec/credentials";
-import { isRefusal } from "./api.ts";
 import type { BridgeContext } from "./context.ts";
 import { revokeLocal } from "./identity.ts";
 import { buildTable, internalUrlAllowed, peekClaims, portalKeySet } from "./table.ts";

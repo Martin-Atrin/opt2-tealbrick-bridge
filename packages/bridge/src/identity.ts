@@ -2,9 +2,10 @@
  * Agent sessions (K5) and caller verification at the bridge (BRIDGE §6, CREDENTIALS §8, §10).
  * Only K5 access tokens are accepted at /mcp; no person credential is ever accepted (R-P1).
  */
+
+import { isRefusal } from "@opt2-tealbrick/relay";
 import type { PairingConnectionRecord } from "@opt2-tealbrick/spec/bridge";
 import { type AgentId, type AgentSessionClaims, type ConnectionId, LIFETIME_S, TYP } from "@opt2-tealbrick/spec/credentials";
-import { isRefusal } from "./api.ts";
 import type { BridgeContext } from "./context.ts";
 import { BridgeError, nowS } from "./util.ts";
 

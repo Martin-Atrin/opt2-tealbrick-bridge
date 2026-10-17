@@ -4,14 +4,13 @@
  *     --test-roots` (conformance 0.1.8: the strict key-set checks run by default with test roots). The harness entry
  *     starts the built bridge and passes the suite's test roots to the programmatic `portalRootKeys` option; as a
  *     process the suite captures its logs (B11.no_log). The suite brings its own fake Portal, apps and agents.
- *   - relay:  `tb-conformance relay` with the real CLI (`tealbrick bridge serve --stdio`, `tealbrick agent login`)
+ *   The relay target runs in the CLI repo (`Tealbrick/opt2-tealbrick-cli`) since bridge 0.2.0 (C158).
  * Fails on any failing or not-run check, except the exact waivers in scripts/conformance-waivers.json (id + status).
  * Requires `npm run build` first. Reports go to .tb-ci/conformance/ (git-ignored).
  */
 import { BRIDGE_GROUP_ORDER } from "@opt2-tealbrick/conformance";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { mkdirSync, readFileSync } from "node:fs";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 
@@ -43,7 +42,6 @@ const waivers = (JSON.parse(readFileSync(join(root, "scripts", "conformance-waiv
 const FAILING = new Set(["fail", "not_run", "not_implemented"]);
 const node = process.execPath;
 const entry = join(root, "packages", "bridge-server", "test", "conformance-entry.ts");
-const tealbrick = join(root, "packages", "cli", "dist", "main.js");
 
 function run(target: string, args: string[], env: NodeJS.ProcessEnv = process.env, name = target): Report {
   const base = join(out, name);
@@ -89,22 +87,9 @@ for (const [g, why] of Object.entries(SKIP_GROUPS)) console.log(`bridge: group $
 const groupArgs = Object.keys(SKIP_GROUPS).length ? ["--groups", GROUPS.filter((g) => !(g in SKIP_GROUPS)).join(",")] : [];
 problems.push(...judge("bridge", run("bridge", ["--cmd", `"${node}" "${entry}"`, "--test-roots", ...groupArgs, "--timeout", "15000"])));
 
-const home = mkdtempSync(join(tmpdir(), "tb-relay-conf-"));
-try {
-  const relayEnv = { ...process.env, HOME: home, XDG_CONFIG_HOME: join(home, ".config"), TB_CREDENTIAL_STORE: "file" };
-  problems.push(
-    ...judge(
-      "relay",
-      run("relay", ["--cmd", `"${node}" "${tealbrick}" bridge serve --stdio`, "--login-cmd", `"${node}" "${tealbrick}" agent login --create --harness generic-mcp --label conformance`, "--timeout", "15000"], relayEnv),
-    ),
-  );
-} finally {
-  rmSync(home, { recursive: true, force: true });
-}
-
 if (problems.length) {
   for (const p of problems) console.error(p);
   console.error(`conformance: ${problems.length} failing check(s); reports in .tb-ci/conformance/`);
   process.exit(1);
 }
-console.log("conformance: bridge + relay pass (waivers listed above, if any)");
+console.log("conformance: bridge passes (waivers listed above, if any)");

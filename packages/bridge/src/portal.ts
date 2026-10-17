@@ -3,11 +3,13 @@
  * Every request after enrolment carries a bridge assertion (`TB-Assert`, typ tb-bridge-assert+jwt).
  * Portal never connects in.
  */
+
+import { isRefusal, MCP_VERSIONS, SDK_MAJORS } from "@opt2-tealbrick/relay";
 import type { AppEntry, EnrolRequest, EnrolResponse, StatusReport, WorkspaceConfig } from "@opt2-tealbrick/spec/bridge";
 import { type ConnectionId, LIFETIME_S, type PortalKeyEntry, TYP } from "@opt2-tealbrick/spec/credentials";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
-import { isRefusal, type Json } from "./api.ts";
-import { BRIDGE_VERSION, type BridgeContext, MCP_VERSIONS, SDK_MAJORS } from "./context.ts";
+import type { Json } from "@opt2-tealbrick/spec/sdk";
+import { BRIDGE_VERSION, type BridgeContext } from "./context.ts";
 import { remintStandalone } from "./standalone.ts";
 import { upgradeFields } from "./status-fields.ts";
 import { buildTable, internalUrlAllowed, type Table } from "./table.ts";

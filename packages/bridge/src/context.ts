@@ -6,9 +6,10 @@
 import { randomUUID } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
+import type { ManifestApi } from "@opt2-tealbrick/relay";
 import type { AppStatus, } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, Ed25519PublicJwk, InstanceId } from "@opt2-tealbrick/spec/credentials";
-import type { KeySet, ManifestApi } from "./api.ts";
+import type { KeySet } from "@opt2-tealbrick/spec/sdk";
 import type { BridgeState, Identity } from "./state.ts";
 import type { Rejection, Table } from "./table.ts";
 import type { Logger } from "./util.ts";
@@ -16,7 +17,6 @@ import { nowS } from "./util.ts";
 
 /** This package's version, read from its package.json (the one place; `src/` and `dist/` both sit beside it). */
 export const BRIDGE_VERSION: string = (JSON.parse(readFileSync(new URL("../package.json", import.meta.url), "utf8")) as { version: string }).version;
-export const SDK_MAJORS = [1];
 /** F57a / L21: Retry-After (seconds) on tool and companion calls refused while the bridge drains (nothing ran) */
 export const DRAIN_RETRY_AFTER_S = 2;
 
@@ -25,10 +25,6 @@ export const DRAIN_RETRY_AFTER_S = 2;
  * deploy). 0.1.x bridges are dev-channel builds; the cutover release switches to "prod".
  */
 export const PORTAL_ROOT_CHANNEL: "dev" | "prod" = "dev";
-
-/** The SDK major this bridge is built for; `sdkMajorServed` (manifest, C44) also serves the one before. */
-export const SDK_CURRENT_MAJOR = 1;
-export const MCP_VERSIONS = ["2025-06-18", "2025-03-26"];
 
 export interface BridgeOptions {
   api: ManifestApi;

@@ -2,6 +2,9 @@
  * The routing table: everything the bridge derives from one verified workspace config (BRIDGE §5.3).
  * Built off to the side and swapped as one pointer; calls in flight keep the table they started with.
  */
+
+import type { ManifestApi } from "@opt2-tealbrick/relay";
+import { isRefusal } from "@opt2-tealbrick/relay";
 import type { AgentEntry, AppEntry, HookEntry, WorkspaceConfig } from "@opt2-tealbrick/spec/bridge";
 import type {
   AgentId,
@@ -15,8 +18,7 @@ import type {
   WorkspaceId,
 } from "@opt2-tealbrick/spec/credentials";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
-import type { KeySet, ManifestApi, OperationView, TrustContext } from "./api.ts";
-import { isRefusal } from "./api.ts";
+import type { KeySet, OperationView, TrustContext } from "@opt2-tealbrick/spec/sdk";
 
 export interface AppRuntime {
   entry: AppEntry;

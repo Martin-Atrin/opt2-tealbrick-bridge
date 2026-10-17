@@ -1,21 +1,19 @@
 /**
- * @opt2-tealbrick/bridge — the workspace's one door (BRIDGE.md). Two forms of one package:
- * deployed (full: gate, hooks, routing, MCP, OAuth AS, key store) and relay (stdio, identity only).
+ * @opt2-tealbrick/bridge — the workspace's one door (BRIDGE.md): the deployed form (gate, hooks, routing, MCP,
+ * OAuth AS, key store). The agent side (stdio relay, MCP client, manifest binding, protocol constants) lives in
+ * `@opt2-tealbrick/relay`, which this package imports (private → public only).
  *
  * Does: verify callers, gate every routed call, run the hook chain, route to apps on the private
  * network, serve MCP, person launch, the key-entry page and health.
  * Does NOT: run agents, call models, hold app data, store holds or receipts (apps do), count caps,
  * send tool payloads to Portal, or accept inbound connections from Portal.
  */
-export type { Kek, ManifestApi } from "./api.ts";
 export { redact } from "./calls.ts";
 export type { BridgeContext } from "./context.ts";
-export { BRIDGE_VERSION, DRAIN_RETRY_AFTER_S, MCP_VERSIONS, SDK_CURRENT_MAJOR, SDK_MAJORS } from "./context.ts";
-export { type RelayOptions, type RelaySigner, type RelayStatus, type RunningRelay, startRelay } from "./relay.ts";
+export { BRIDGE_VERSION, DRAIN_RETRY_AFTER_S } from "./context.ts";
 export { type BridgeServerOptions, DRAIN_BOUND_MS, enrolBridge, onStopSignals, ownInfraEnv, type RunningBridge, startBridge } from "./server.ts";
 export { jsonLogger, type Logger, silentLogger } from "./util.ts";
 
-/** Two forms of the same package (DECISION-LOG C5). */
-export type BridgeForm = "deployed" | "relay";
-export { dropPrivileges, loadManifestApi, manifestApi, PrivilegeDropError, RUN_GID, RUN_UID } from "./manifest-adapter.ts";
-export { connectMcp, type HeldResult, heldOf, MCP_CALL_TIMEOUT_MS, type McpClient, McpTimeoutError, type McpTool, type McpToolResult, pollHold, type StdioTarget } from "./mcp-client.ts";
+/** The one form this package has (the relay form lives in `@opt2-tealbrick/relay`). */
+export type BridgeForm = "deployed";
+export { dropPrivileges, loadManifestApi, PrivilegeDropError, RUN_GID, RUN_UID } from "./manifest-adapter.ts";

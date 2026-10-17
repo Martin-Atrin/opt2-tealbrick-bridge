@@ -120,7 +120,7 @@ describe("C62: proofs, oracle, revocation reporting", () => {
 
 describe("C62 BSD-07: internalUrl allow-list", () => {
   test("BRIDGE §5.7: railway.internal, or ownInfra + TB_OWN_INFRA_ORIGINS (isPrivateInternalUrl)", async () => {
-    const { manifestApi } = await import("../src/manifest-adapter.ts");
+    const { manifestApi } = await import("@opt2-tealbrick/relay");
     const api = manifestApi();
     const ok = (u: string, own = false, list: string[] = []) => internalUrlAllowed(api, u, own, list);
     assert.equal(ok("http://knowledge.railway.internal:8080"), true);
@@ -159,7 +159,7 @@ describe("C133: plaintext state of a bridge before 0.1.12 is refused, never read
   test("a 0.1.11 data dir fails with a clear error; nothing is read or rewritten; sealed state alone loads (quiet)", async () => {
     const { mkdtempSync, rmSync, mkdirSync } = await import("node:fs");
     const { tmpdir } = await import("node:os");
-    const { manifestApi } = await import("../src/manifest-adapter.ts");
+    const { manifestApi } = await import("@opt2-tealbrick/relay");
     const { BridgeState, keksFromEnv } = await import("../src/state.ts");
     const api = manifestApi();
     const data = mkdtempSync(join(tmpdir(), "tb-plain-"));

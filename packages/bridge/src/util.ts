@@ -1,6 +1,6 @@
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { tooDeep } from "@opt2-tealbrick/relay";
 import type { BridgeErrorCode, ErrorEnvelope } from "@opt2-tealbrick/spec/bridge";
-import { tooDeep } from "./json-limits.ts";
 
 /** A refusal or failure that maps to the one error envelope (CORE §8). */
 export class BridgeError extends Error {

@@ -7,8 +7,7 @@ import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync, w
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, test } from "node:test";
-import type { ManifestApi } from "../src/api.ts";
-import { manifestApi } from "../src/manifest-adapter.ts";
+import { type ManifestApi, manifestApi } from "@opt2-tealbrick/relay";
 import { BridgeState, keksFromEnv } from "../src/state.ts";
 import { AGT, BRG, CON, INS, makeWorld, WS, waitFor } from "./support/world.ts";
 
