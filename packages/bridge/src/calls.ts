@@ -439,7 +439,9 @@ export class CallRouter {
         caller:
           caller.type === "agent"
             ? { type: "agent" as const, id: caller.agt, ...(t0.agents.get(caller.agt) ? { mode: t0.agents.get(caller.agt)?.mode } : {}) }
-            : { type: "app" as const, id: caller.ins },
+            : // HOOK-CALLER-PRODUCT (spec 0.1.45): the product of an app caller comes from the bridge's own signed config (the
+              // instance table), never from input, a header or a manifest name; an instance the table cannot map carries none
+              { type: "app" as const, id: caller.ins, ...(t0.apps.get(caller.ins)?.entry.product ? { product: t0.apps.get(caller.ins)?.entry.product } : {}) },
         target: {
           instance: target.app.entry.ins,
           product: target.app.entry.product,

@@ -14,7 +14,6 @@ import type { AddressInfo } from "node:net";
 import { type Logger, RateLimiter, sleep } from "./util.ts";
 import {
   getCapped,
-  isViewerDocument,
   sendFetchError,
   sendViewerError,
   sendViewerJson,
@@ -144,7 +143,7 @@ export async function startViews(o: ViewsRoleOptions): Promise<RunningViews> {
       } catch (e) {
         return sendFetchError(res, e, "the page");
       }
-      const answer = shapeViewerAnswer(raw, isViewerDocument(target));
+      const answer = shapeViewerAnswer(raw, target);
       if (!answer) {
         // product only: the path carries the viewer's token
         o.logger.warn("views.document_unsafe", { code: "viewer_document_unsafe", product: target.product });

@@ -14,7 +14,6 @@ import type { AppRuntime } from "./table.ts";
 import { envelope, headerValue, sendJson } from "./util.ts";
 import {
   getCapped,
-  isViewerDocument,
   sendFetchError,
   sendViewerError,
   sendViewerJson,
@@ -96,7 +95,7 @@ export class ViewsRoute {
         return sendFetchError(res, e, "the app");
       }
       // 5. the same shaping tb-views applies (floor, dropped headers, the `_d` gate): defence in depth
-      const answer = shapeViewerAnswer(raw, isViewerDocument(target));
+      const answer = shapeViewerAnswer(raw, target);
       if (!answer) {
         ctx.log.warn("bridge.views.document_unsafe", { ins: app.entry.ins, code: "viewer_document_unsafe" });
         return sendViewerError(res, 502, "viewer_document_unsafe", "this document's content-security-policy is not a safe sandbox");

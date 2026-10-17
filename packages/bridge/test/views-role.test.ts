@@ -41,6 +41,25 @@ describe("views role: it refuses to be a second bridge", () => {
   });
 });
 
+describe("views role: key rotation touches the bridge only", () => {
+  test("a TB_VIEWS_KEY_PREVIOUS in the views role's env is ignored: only TB_VIEWS_KEY is sent, the old key never leaves", async () => {
+    const OLD = randomBytes(32).toString("base64url");
+    const up = await fake((_req, res) => void res.writeHead(200).end("ok"));
+    const logs: string[] = [];
+    const sink = (e: string, f?: Record<string, unknown>) => void logs.push(JSON.stringify({ e, f }));
+    const edge = await startViews({ env: good(up.url, { TB_VIEWS_KEY_PREVIOUS: OLD }), logger: { info: sink, warn: sink, error: sink, debug: sink } as never, port: 0 });
+    try {
+      assert.equal((await rawGet(`http://127.0.0.1:${edge.port}/v/notes/x`, { "TB-Views-Key": OLD })).status, 200);
+      for (const seen of up.seen) assert.equal(seen.headers["tb-views-key"], KEY, "the service's own key, never the client's or the previous one");
+      assert.ok(!JSON.stringify(up.seen).includes(OLD));
+      assert.ok(!logs.some((l) => l.includes(OLD) || l.includes(KEY)));
+    } finally {
+      await edge.stop();
+      await up.close();
+    }
+  });
+});
+
 describe("views role: serves /v/* and health only, forwards with the key and the allow-list", () => {
   let up: Fake;
   let upstreamAnswer: (req: import("node:http").IncomingMessage, res: import("node:http").ServerResponse) => void;

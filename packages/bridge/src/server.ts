@@ -193,6 +193,10 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
   const viewsKeyRaw = env.TB_VIEWS_KEY?.trim();
   const viewsKey = viewsKeyRaw && viewsKeyRaw.length >= VIEWS_KEY_MIN_LENGTH ? viewsKeyRaw : undefined;
   if (viewsKeyRaw && !viewsKey) logger.warn("bridge.views.key_unusable", { code: "views_key_too_short" });
+  // key rotation: the retiring key, accepted only while set (Core removes it after tb-views runs the new key)
+  const viewsKeyPrevRaw = env.TB_VIEWS_KEY_PREVIOUS?.trim();
+  const viewsKeyPrevious = viewsKeyPrevRaw && viewsKeyPrevRaw.length >= VIEWS_KEY_MIN_LENGTH ? viewsKeyPrevRaw : undefined;
+  if (viewsKeyPrevRaw && !viewsKeyPrevious) logger.warn("bridge.views.key_unusable", { code: "views_key_previous_too_short" });
   const internalBind = internalListenHost(form, env);
   // the advertised internal address: the Railway private domain, else the bound address when it is one host
   const boundHost = WILDCARD_HOSTS.has(internalBind.host) ? undefined : internalBind.host.includes(":") ? `[${internalBind.host}]` : internalBind.host;
@@ -206,6 +210,7 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
     keysUrl,
     viewsUrl,
     viewsKey,
+    viewsKeyPrevious,
     internalUrl: `http://${privateHost}:${internalPort}`,
     form,
     ownInfraOrigins: (env.TB_OWN_INFRA_ORIGINS ?? "").split(",").map((h) => h.trim()).filter(Boolean),
