@@ -13,9 +13,10 @@
 import { randomBytes } from "node:crypto";
 import { closeSync, existsSync, fsyncSync, mkdirSync, openSync, readFileSync, renameSync, unlinkSync, writeSync } from "node:fs";
 import { join } from "node:path";
+import type { Kek, ManifestApi } from "@opt2-tealbrick/relay";
 import type { ClaimRecord, PairingConnectionRecord } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, BridgeId, ConnectionId, Ed25519PublicJwk, PortalKeyEntry, SealedBlob, Sha256Digest, WorkspaceId } from "@opt2-tealbrick/spec/credentials";
-import type { Ed25519KeyPair, Kek, ManifestApi, PinnedKeySet } from "./api.ts";
+import type { Ed25519KeyPair, PinnedKeySet } from "@opt2-tealbrick/spec/sdk";
 
 const isPinned = (v: unknown): v is PinnedKeySet =>
   !!v && typeof v === "object" && Number.isInteger((v as PinnedKeySet).seq) && typeof (v as PinnedKeySet).kss === "string";

@@ -1,9 +1,9 @@
 {
   "name": "@opt2-tealbrick/bridge",
-  "version": "0.1.32",
+  "version": "0.2.0",
   "private": true,
   "type": "module",
-  "description": "Bridge core (deployed + relay forms). Never runs agents or calls models.",
+  "description": "Bridge core (the deployed form). Never runs agents or calls models. The agent side is @opt2-tealbrick/relay.",
   "license": "SEE LICENSE IN LICENSE",
   "engines": {
     "node": ">=24"
@@ -12,10 +12,6 @@
     ".": {
       "types": "./dist/index.d.ts",
       "default": "./dist/index.js"
-    },
-    "./relay": {
-      "types": "./dist/relay-entry.d.ts",
-      "default": "./dist/relay-entry.js"
     }
   },
   "files": [
@@ -27,6 +23,7 @@
     "build": "tsc -p tsconfig.build.json"
   },
   "dependencies": {
+    "@opt2-tealbrick/relay": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-cli-relay-v0.1.0/opt2-tealbrick-relay-0.1.0.tgz",
     "@opt2-tealbrick/spec": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-specs-spec-v0.1.40/opt2-tealbrick-spec-0.1.40.tgz",
     "@opt2-tealbrick/manifest": "https://github.com/Tealbrick/opt2-tealbrick-dist/releases/download/opt2-tealbrick-sdk-manifest-v0.1.18/opt2-tealbrick-manifest-0.1.18.tgz"
   }

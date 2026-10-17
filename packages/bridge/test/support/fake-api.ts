@@ -6,7 +6,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import * as realManifest from "@opt2-tealbrick/manifest";
 import { isPrivateInternalUrl as realIsPrivateInternalUrl } from "@opt2-tealbrick/manifest";
-import type { ManifestApi } from "../../src/api.ts";
+import type { ManifestApi } from "@opt2-tealbrick/relay";
 
 const b64 = (v: unknown) => Buffer.from(JSON.stringify(v)).toString("base64url");
 const unb64 = (s: string) => JSON.parse(Buffer.from(s, "base64url").toString("utf8"));

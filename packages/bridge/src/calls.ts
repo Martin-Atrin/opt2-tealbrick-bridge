@@ -3,6 +3,8 @@
  * before hooks → context hooks → config age → re-gate → forward → after hooks → result.
  * The bridge gates; the app's authorize() decides run/hold (C10). The bridge never counts or holds.
  */
+
+import { tooDeep } from "@opt2-tealbrick/relay";
 import type {
   AfterHookResponse,
   BeforeHookResponse,
@@ -14,9 +16,8 @@ import type {
 } from "@opt2-tealbrick/spec/bridge";
 import { BRIDGE_OP_PATH, type BridgeOp, type CallId, type InstanceId, LIFETIME_S, TYP } from "@opt2-tealbrick/spec/credentials";
 import { type CrudAction, type DynamicCatalogEntry, type DynamicResolution, EFFECTS, type Effect, type HoldFamily } from "@opt2-tealbrick/spec/manifest";
-import type { Json, OperationView } from "./api.ts";
+import type { Json, OperationView } from "@opt2-tealbrick/spec/sdk";
 import type { BridgeContext } from "./context.ts";
-import { tooDeep } from "./json-limits.ts";
 import { type AppRuntime, grantKey, insRef, pauseFor, type Table, trustFor } from "./table.ts";
 import { BridgeError, isRecord, nowS, readCapped, readCappedJson } from "./util.ts";
 

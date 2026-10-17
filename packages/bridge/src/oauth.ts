@@ -6,6 +6,7 @@
  */
 
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { isRefusal, type Kek } from "@opt2-tealbrick/relay";
 import type { DcrResponse, PairingConnectionRecord, ProtectedResourceMetadata, TokenResponse } from "@opt2-tealbrick/spec/bridge";
 import {
   type AgentAssertionClaims,
@@ -17,7 +18,6 @@ import {
   type SealedBlob,
   TYP,
 } from "@opt2-tealbrick/spec/credentials";
-import { isRefusal, type Kek } from "./api.ts";
 import type { BridgeContext } from "./context.ts";
 import { connectionState, issueAccess, revokeLocal, rotateRefresh } from "./identity.ts";
 import { ARROW, esc, htmlPage, ink, type Message, messagePage, portalButton, steps } from "./pages.ts";

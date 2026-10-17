@@ -1,8 +1,11 @@
 /**
- * F26 / L21 (real agent, S2): `agent serve` hung when the bridge restarted mid-call: the relay wrote no answer for the
- * in-flight request and the MCP client waited forever. Real path: real bridge (test world), in-process relay, real
- * MCP client, the real serveLoop. The first inbox poll hangs in the app while the bridge restarts underneath it; serve
- * must recover by itself and process the next message.
+ * F26 / L21 (real relay <-> real bridge, L2): the agent's MCP client hung when the bridge restarted mid-call, because
+ * the relay wrote no answer for the in-flight request. Real path: real bridge (test world), the in-process relay from
+ * `@opt2-tealbrick/relay`, the real MCP client from the same package. A call hangs in the app while the bridge restarts
+ * underneath it: the RELAY must answer it with an error at once (not the client's timeout), and after a new
+ * `initialize` (what `agent serve` does on reconnect) the next call must work.
+ * Moved from the CLI repo's serve-restart.test.ts (C158). The `serveLoop` part has no public export; the CLI repo's
+ * serve tests cover the loop against fakes.
  */
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
@@ -11,9 +14,8 @@ import type { ServerResponse } from "node:http";
 import { basename } from "node:path";
 import { PassThrough } from "node:stream";
 import { after, before, describe, test } from "node:test";
-import { connectMcp, McpTimeoutError, startRelay } from "@opt2-tealbrick/bridge";
-import { AGT, BRG, CON, makeWorld, type World } from "../../bridge/test/support/world.ts";
-import { type ServeState, serveLoop, validateServeConfig } from "../src/serve.ts";
+import { connectMcp, McpTimeoutError, startRelay } from "@opt2-tealbrick/relay";
+import { AGT, BRG, CON, makeWorld, type World } from "./support/world.ts";
 
 /**
  * Failure diagnostics (C171): the test bridge listens on 127.0.0.1 only (world default), so a failure is never a
@@ -30,7 +32,7 @@ function diagnose(w: World, e: unknown): never {
   };
   console.error(
     [
-      `serve-restart diagnostics: /oauth/token requests seen by the test bridge = ${w.publicRequests("/oauth/token")}, /mcp = ${w.publicRequests("/mcp")}`,
+      `relay-restart diagnostics: /oauth/token requests seen by the test bridge = ${w.publicRequests("/oauth/token")}, /mcp = ${w.publicRequests("/mcp")}`,
       `lsof -nP -i :${w.ports.public} (public)`,
       lsof(w.ports.public),
       `lsof -nP -i :${w.ports.internal} (internal)`,
@@ -43,7 +45,7 @@ function diagnose(w: World, e: unknown): never {
 /** above the relay's 20 s /oauth/token bound: a stuck token request is answered by the relay, not by this timeout */
 const CALL_TIMEOUT_MS = 25_000;
 
-describe("agent serve survives a bridge restart mid-call (F26)", () => {
+describe("the agent side survives a bridge restart mid-call (F26)", () => {
   let w: World;
   before(async () => {
     w = await makeWorld({ real: true });
@@ -57,14 +59,14 @@ describe("agent serve survives a bridge restart mid-call (F26)", () => {
     }
   });
 
-  test("the in-flight call fails fast (relay answers), serve backs off, reconnects and handles the next message", () => restartCase().catch((e) => diagnose(w, e)));
+  test("the in-flight call fails fast (the relay answers), a new initialize reconnects and the next call works", () => restartCase().catch((e) => diagnose(w, e)));
 
   async function restartCase(): Promise<void> {
     const toRelay = new PassThrough();
     const fromRelay = new PassThrough();
     const relay = startRelay({ api: w.api, bridgeUrl: w.publicUrl, connection: { con: CON as never, agt: AGT as never, bridgeId: BRG as never }, signer: { sign: (i) => w.signRaw(i), publicJwk: () => w.agentKey.publicJwk }, stdin: toRelay, stdout: fromRelay });
     const mcp = connectMcp({ streams: { input: fromRelay, output: toRelay }, callTimeoutMs: CALL_TIMEOUT_MS });
-    await mcp.initialize("serve-restart-test");
+    await mcp.initialize("relay-restart-test");
 
     let polls = 0;
     let restarted = false;
@@ -84,54 +86,32 @@ describe("agent serve survives a bridge restart mid-call (F26)", () => {
       return true;
     };
 
-    const abort = new AbortController();
-    const turns: string[] = [];
-    const logs: string[] = [];
-    const started = Date.now();
-    let firstErrorMs: number | undefined;
-    let state: ServeState = { cursors: {}, seen: {}, primed: {} };
-    const done = serveLoop(
-      validateServeConfig({ format: "tealbrick.agent-serve/1", harness: { kind: "command", command: ["true"] }, inboxes: [{ tool: "notes__notes_list", items: "messages", id: "seq", wake: "all" }], backlog: true, pollSeconds: 5 }),
-      {
-        mcp,
-        async runTurn(prompt) {
-          turns.push(prompt);
-          abort.abort();
-          return { ok: true };
-        },
-        loadState: async () => structuredClone(state),
-        saveState: async (s) => {
-          state = structuredClone(s);
-        },
-        log: (e) => {
-          if (e === "serve.error" && firstErrorMs === undefined) firstErrorMs = Date.now() - started;
-          logs.push(e);
-        },
-        sleep: (ms, signal) =>
-          new Promise((r) => {
-            const t = setTimeout(r, Math.min(ms, 200));
-            signal.addEventListener("abort", () => r(undefined), { once: true });
-            void t;
-          }),
-        now: () => Date.now(),
-        reconnect: async () => {
-          await mcp.initialize("serve-restart-test");
-        },
-      },
-      abort.signal,
-    );
-    const guard = setTimeout(() => abort.abort(), 25_000);
-    await done;
-    clearTimeout(guard);
-    relay.stop();
-    mcp.close();
-    w.appOps.override = undefined;
-    assert.ok(restarted, "the bridge restarted mid-call");
-    assert.ok(logs.includes("serve.error"), "the lost call surfaced as an error (no silent hang)");
-    assert.ok((firstErrorMs ?? Infinity) < 10_000, `the RELAY answered the lost call (error after ${firstErrorMs} ms, client timeout is ${CALL_TIMEOUT_MS / 1000} s)`);
-    assert.ok(logs.includes("serve.reconnected"));
-    assert.equal(turns.length, 1, "serve recovered by itself and processed the next message");
-    assert.match(turns[0] as string, /after the restart/);
+    try {
+      const started = Date.now();
+      await assert.rejects(mcp.callTool("notes__notes_list", {}), "the lost call surfaced as an error (no silent hang)");
+      const lostAfterMs = Date.now() - started;
+      assert.ok(lostAfterMs < 10_000, `the RELAY answered the lost call (error after ${lostAfterMs} ms, client timeout is ${CALL_TIMEOUT_MS / 1000} s)`);
+      for (let i = 0; i < 100 && !restarted; i++) await new Promise((r) => setTimeout(r, 100));
+      assert.ok(restarted, "the bridge restarted mid-call");
+
+      // what `agent serve` does after a failed poll: initialize again, then poll again (a few tries while the bridge comes up)
+      let result: Awaited<ReturnType<typeof mcp.callTool>> | undefined;
+      for (let i = 0; i < 20 && !result; i++) {
+        try {
+          await mcp.initialize("relay-restart-test");
+          result = await mcp.callTool("notes__notes_list", {});
+        } catch {
+          await new Promise((r) => setTimeout(r, 200));
+        }
+      }
+      assert.ok(result, "the relay reconnected by itself and the next call was answered");
+      assert.notEqual(result.isError, true, JSON.stringify(result));
+      assert.match(JSON.stringify(result), /after the restart/);
+    } finally {
+      relay.stop();
+      mcp.close();
+      w.appOps.override = undefined;
+    }
   }
 
   test("an MCP call with no answer at all fails after the per-call timeout (never waits forever)", async () => {

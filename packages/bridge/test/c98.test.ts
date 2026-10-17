@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { PassThrough } from "node:stream";
 import { after, before, describe, test } from "node:test";
 import { deriveIdempotencyKey } from "@opt2-tealbrick/manifest";
-import { startRelay } from "../src/relay.ts";
+import { startRelay } from "@opt2-tealbrick/relay";
 import { freePort, type RealSdkApp, startRealSdkApp } from "./support/sdk-app.ts";
 import { AGT, BRG, CON, makeWorld, type World, waitFor } from "./support/world.ts";
 

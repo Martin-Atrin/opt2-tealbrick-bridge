@@ -141,9 +141,9 @@ describe("G4b relay: toolCallMeta is added to every tools/call", () => {
     await w.close();
   });
 
-  test("the claim reaches the bridge in params._meta; the client's own _meta keys win; other methods untouched", async () => {
+  test("the claim reaches the bridge in params._meta; the relay's claim wins for its key (BRG-13) and the client's other _meta keys are kept; other methods untouched", async () => {
     const { PassThrough } = await import("node:stream");
-    const { startRelay } = await import("../src/relay.ts");
+    const { startRelay } = await import("@opt2-tealbrick/relay");
     const { BRG, waitFor } = await import("./support/world.ts");
     const sent: { method?: string; params?: { _meta?: Record<string, unknown> } }[] = [];
     const stdin = new PassThrough();
@@ -172,11 +172,15 @@ describe("G4b relay: toolCallMeta is added to every tools/call", () => {
     rpc({ method: "notifications/initialized" });
     rpc({ id: 2, method: "tools/call", params: { name: "notes__notes_list", arguments: {} } });
     rpc({ id: 3, method: "tools/call", params: { name: "notes__notes_list", arguments: {}, _meta: { "tealbrick/onBehalfOf": { kind: "person", id: "own" }, "tealbrick/idempotencyKey": "retry-12345678" } } });
-    await waitFor(() => lines.some((l) => l.id === 3) && lines.some((l) => l.id === 2));
-    const calls = sent.filter((m) => m.method === "tools/call");
-    assert.deepEqual(calls[0]?.params?._meta, { "tealbrick/onBehalfOf": claim });
-    assert.deepEqual(calls[1]?.params?._meta, { "tealbrick/onBehalfOf": { kind: "person", id: "own" }, "tealbrick/idempotencyKey": "retry-12345678" }, "the client's own keys win");
-    assert.ok(!sent.some((m) => m.method !== "tools/call" && m.params?._meta), "other methods are forwarded unchanged");
-    relay.stop();
+    try {
+      await waitFor(() => lines.some((l) => l.id === 3) && lines.some((l) => l.id === 2));
+      const calls = sent.filter((m) => m.method === "tools/call");
+      assert.deepEqual(calls[0]?.params?._meta, { "tealbrick/onBehalfOf": claim });
+      // BRG-13 / L13 (relay 0.1.0): the turn's sender claim cannot be replaced or dropped by the harness; its other keys stay
+      assert.deepEqual(calls[1]?.params?._meta, { "tealbrick/onBehalfOf": claim, "tealbrick/idempotencyKey": "retry-12345678" }, "the relay's claim wins; the client's other keys are kept");
+      assert.ok(!sent.some((m) => m.method !== "tools/call" && m.params?._meta), "other methods are forwarded unchanged");
+    } finally {
+      relay.stop();
+    }
   });
 });

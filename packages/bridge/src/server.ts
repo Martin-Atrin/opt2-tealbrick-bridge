@@ -8,8 +8,8 @@ import { createServer, type IncomingMessage, type Server, type ServerResponse } 
 import type { Socket } from "node:net";
 import { hostname } from "node:os";
 import { join } from "node:path";
+import type { ManifestApi } from "@opt2-tealbrick/relay";
 import type { Ed25519PublicJwk } from "@opt2-tealbrick/spec/credentials";
-import type { ManifestApi } from "./api.ts";
 import { CallRouter } from "./calls.ts";
 import { BridgeContext } from "./context.ts";
 import { InternalApi } from "./internal.ts";

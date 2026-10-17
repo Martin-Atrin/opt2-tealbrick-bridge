@@ -5,7 +5,7 @@
 import { TOOL_NAME_RULE } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, GrantClaims } from "@opt2-tealbrick/spec/credentials";
 import { type DynamicCatalogEntry, EFFECTS, type JsonSchemaObject } from "@opt2-tealbrick/spec/manifest";
-import type { OperationView } from "./api.ts";
+import type { OperationView } from "@opt2-tealbrick/spec/sdk";
 import type { CallRouter } from "./calls.ts";
 import type { BridgeContext } from "./context.ts";
 import { type AppRuntime, agtRef, type Table } from "./table.ts";

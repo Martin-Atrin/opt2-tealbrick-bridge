@@ -4,13 +4,14 @@
  * assertions (`TB-Assert`, typ tb-instance-assert+jwt, bound to method, path and body).
  */
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { isRefusal, SDK_CURRENT_MAJOR } from "@opt2-tealbrick/relay";
 import type { AppStatus, AppStatusResponse, CallEnvelope, ClaimRequest, ClaimResponse, KeyFetchResponse } from "@opt2-tealbrick/spec/bridge";
 import { type InstanceAssertionClaims, type InstanceId, LIFETIME_S, TYP } from "@opt2-tealbrick/spec/credentials";
 import type { Manifest } from "@opt2-tealbrick/spec/manifest";
-import { isRefusal, type Json, type KeySet } from "./api.ts";
+import type { Json, KeySet } from "@opt2-tealbrick/spec/sdk";
 import type { CallRouter } from "./calls.ts";
 import { CALL_ID_RE } from "./calls.ts";
-import { type BridgeContext, DRAIN_RETRY_AFTER_S, SDK_CURRENT_MAJOR } from "./context.ts";
+import { type BridgeContext, DRAIN_RETRY_AFTER_S } from "./context.ts";
 import { upgradeFields } from "./status-fields.ts";
 import { type AppRuntime, internalUrlAllowed, type Table } from "./table.ts";
 import { BridgeError, envelope, headerValue, isRecord, nowS, parseJson, readBody, sendError, sendJson, statusFor, TokenBucket } from "./util.ts";

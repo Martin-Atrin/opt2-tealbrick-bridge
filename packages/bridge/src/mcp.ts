@@ -5,15 +5,15 @@
  */
 import { randomBytes } from "node:crypto";
 import type { IncomingMessage, ServerResponse } from "node:http";
+import { MCP_VERSIONS, tooDeep, validRpcId } from "@opt2-tealbrick/relay";
 import type { HeldToolResult, JsonObject, JsonValue } from "@opt2-tealbrick/spec/bridge";
 import { TOOL_NAME_RULE } from "@opt2-tealbrick/spec/bridge";
 import type { AgentId, ConnectionId } from "@opt2-tealbrick/spec/credentials";
 import type { Skill } from "@opt2-tealbrick/spec/manifest";
-import type { Json } from "./api.ts";
+import type { Json } from "@opt2-tealbrick/spec/sdk";
 import type { CallRouter } from "./calls.ts";
-import { BRIDGE_VERSION, type BridgeContext, DRAIN_RETRY_AFTER_S, MCP_VERSIONS } from "./context.ts";
+import { BRIDGE_VERSION, type BridgeContext, DRAIN_RETRY_AFTER_S } from "./context.ts";
 import { authenticateAgent } from "./identity.ts";
-import { tooDeep, validRpcId } from "./json-limits.ts";
 import type { Table } from "./table.ts";
 import { agentPausedOrEmpty, buildToolIndex, grantedProducts, type ToolIndex, type ToolRoute } from "./tools.ts";
 import { BridgeError, envelope, headerValue, isRecord, readBody, sendError, sendJson, TokenBucket } from "./util.ts";
