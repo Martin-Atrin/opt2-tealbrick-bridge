@@ -332,6 +332,31 @@ function reconcileConnections(ctx: BridgeContext, table: Table): void {
   if (ctx.state.claims.length !== before) ctx.state.saveClaims();
 }
 
+/** LA-1: the tb-views probe is bounded (BRIDGE §9.2): a slow viewer service is a "not ok", never a stuck report. */
+const VIEWS_PROBE_TIMEOUT_MS = 3_000;
+/** between reports the probe runs this often, so a viewer service that breaks (or heals) reaches Portal promptly */
+const VIEWS_PROBE_EVERY_MS = 60_000;
+
+/**
+ * LA-1 / L3: probes the workspace views service (`TB_VIEWS_PUBLIC_URL` + `/readyz`) and records ok / not ok with the check
+ * time. A broken viewer is a health signal for Core, not silence. No views service → nothing. Returns true when `ok` changed since the previous probe.
+ */
+export async function probeViews(ctx: BridgeContext): Promise<boolean> {
+  if (!ctx.viewsUrl) return false;
+  const was = ctx.views?.ok;
+  let ok = false;
+  try {
+    const r = await ctx.fetch(new URL("/readyz", ctx.viewsUrl), { redirect: "error", signal: AbortSignal.timeout(VIEWS_PROBE_TIMEOUT_MS) });
+    ok = r.status === 200;
+    await r.body?.cancel().catch(() => undefined);
+  } catch {
+    ok = false;
+  }
+  ctx.views = { ok, lastCheckAt: new Date().toISOString() };
+  if (was !== undefined && was !== ok) ctx.log.warn("bridge.views.health_changed", { ok });
+  return was !== undefined && was !== ok;
+}
+
 /** con → epoch s of the status report that first carried it (memory; re-reported after restart). */
 const reportedAtS = new Map<string, number>();
 
@@ -401,6 +426,8 @@ export function buildStatusReport(ctx: BridgeContext): StatusReport {
       return { kind, code, count, ...(ins ? { ins: ins as never } : {}) };
     }),
     toolsOmitted: [...ctx.toolsOmitted.values()],
+    // spec 0.1.43 (LA-1): only when the workspace has a views service (TB_VIEWS_PUBLIC_URL); a probe has not run yet → not ok
+    ...(ctx.viewsUrl ? { views: { url: ctx.viewsUrl, ok: ctx.views?.ok ?? false, lastCheckAt: ctx.views?.lastCheckAt ?? new Date(0).toISOString() } } : {}),
   };
 }
 
@@ -436,8 +463,11 @@ export function startStatusLoop(ctx: BridgeContext, signal: AbortSignal): { poke
   const fire = async () => {
     timer = undefined;
     if (signal.aborted || !ctx.identity) return;
+    await probeViews(ctx);
     const r = buildStatusReport(ctx);
     const { appliedAt: _a, ...stable } = r;
+    // the check time moves on every probe: only ok / not ok is content (it would defeat the "send on change" digest)
+    if (stable.views) stable.views = { ...stable.views, lastCheckAt: "" };
     const d = ctx.api.digest(stable as never);
     if (d === lastDigest && !(ctx.state.reports.revoked.length || ctx.rejected.size)) return;
     lastDigest = d;
@@ -465,6 +495,11 @@ export function startStatusLoop(ctx: BridgeContext, signal: AbortSignal): { poke
     if (timer) clearTimeout(timer);
   });
   ctx.on("table", poke);
+  if (ctx.viewsUrl) {
+    const probe = setInterval(() => void probeViews(ctx).then((changed) => changed && poke()), VIEWS_PROBE_EVERY_MS);
+    probe.unref();
+    signal.addEventListener("abort", () => clearInterval(probe));
+  }
   return { poke };
 }
 

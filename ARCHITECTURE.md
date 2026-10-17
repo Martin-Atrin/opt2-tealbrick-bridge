@@ -9,7 +9,7 @@ State: verified against the repo on 2026-10-16. Claims cite paths in this repo. 
 
 Public routes: `/healthz`, `/readyz`, `/mcp` (POST, GET SSE, DELETE), `/.well-known/oauth-protected-resource[/mcp]`, `/.well-known/oauth-authorization-server`, `/oauth/{register,authorize,pair/callback,token,revoke}`, `/agent/connection/revoke`, `/a/<product>/*` (person launch, app UI proxy, WebSocket for UI paths), `/p/<product>/<path>` (declared public routes only, 1 MiB cap), `/admin/v1/*` (answers only in standalone mode), `/_tb/*` (exact static allow-list). `/readyz` is 200 only when identity and a routing table exist. It does not check config age (the platform RUNBOOK says it does: mismatch).
 
-Internal routes: `POST /tb/v1/claim`, `POST /tb/v1/status` (long-poll up to 60 s), `GET /tb/v1/keys/<name>`, `POST /tb/v1/call` (app to app; 503 with `Retry-After` while draining), `GET /metrics` (Prometheus text, no auth, so the private bind matters). Callers prove themselves with an instance assertion (`tb-instance-assert+jwt`, bound to method, path and body, 60 s, one-use `jti`, proofs issued before bridge boot refused for 90 s).
+Internal routes: `GET /tb/v1/views/<product>/<rest>` and `GET /tb/v1/views/_ready` (0.2.1, section 11; own key check, not an instance assertion), `POST /tb/v1/claim`, `POST /tb/v1/status` (long-poll up to 60 s), `GET /tb/v1/keys/<name>`, `POST /tb/v1/call` (app to app; 503 with `Retry-After` while draining), `GET /metrics` (Prometheus text, no auth, so the private bind matters). Callers prove themselves with an instance assertion (`tb-instance-assert+jwt`, bound to method, path and body, 60 s, one-use `jti`, proofs issued before bridge boot refused for 90 s).
 
 ## 2. Enrolment and the Portal link (`packages/bridge/src/portal.ts`, `state.ts`)
 
@@ -62,3 +62,19 @@ Part 1 done in bridge 0.2.0 (C158). The agent side lives in `Tealbrick/opt2-teal
 - In-memory replay and session sets reset on restart (90 s mitigation). One instance only (no HA).
 - `/metrics` is unauthenticated (internal bind only).
 - A private repo cannot run Actions until the org billing is fixed; this repo is public until then.
+
+## 11. The two roles (0.2.1, LA-1, C232; `views-edge.ts`, `views-route.ts`, `views-shared.ts`)
+
+One image, two roles by `TB_ROLE` (`packages/bridge-server/src/server.ts`, `roleOf`): `bridge` (default) or `views`.
+
+```
+viewer → https://<tb-views domain>/v/<product>/<token>[/…]          tb-views (TB_ROLE=views, public, stateless)
+       → http://<bridge private host>:8788/tb/v1/views/<product>/<rest>   bridge PRIVATE listener (TB-Views-Key)
+       → http://<app private URL>/v/<product>/<rest>                the app's `viewer` public route (unchanged path)
+```
+
+- **Views role** (`startViews`). No volume, Portal, enrolment or keys; refuses to start with `TB_ENROL_CODE`, `TB_KEK`, `TB_KEK_PREVIOUS` or `TB_PORTAL_URL` set, or without `TB_VIEWS_UPSTREAM` and `TB_VIEWS_KEY` (messages name variables, never values). Serves `/v/<product>/<rest>`, `/healthz`, `/readyz` (ready = the bridge `_ready` answers; reused 2 s); everything else 404; HEAD and OPTIONS 405. Only the allow-listed request headers go on (`VIEWER_REQUEST_HEADERS`; absent stays absent) plus `TB-Views-Key`. 120 requests per minute per client (first `X-Forwarded-For` hop, else the socket address; over → 429 + Retry-After), 32 in flight (over → 503 + Retry-After), a body over 2 MiB → 502, no answer in 10 s → 504, bridge unreachable → 503 "viewer address not ready". It logs no path and no query (the path carries the viewer token). A process started as root drops to 1000 first.
+- **Bridge private route** (`ViewsRoute`, called from `InternalApi`). The key (`TB_VIEWS_KEY`, at least 16 characters) is compared in constant time; missing, wrong or unset is a 404 identical to an unknown path. Refuses (400) a request with Cookie, Authorization or any `TB-*` besides the key. Routes by product to the instance whose manifest has a `viewer` public route (else 404; app down → 503 retry). Workspace or instance pause from the signed config → 503 `paused`; a config past its 12 h life → 503 `config_expired`. Its own in-flight cap (32) keeps `/mcp` free. Forwards `GET /v/<product>/<rest>` with the allow-listed headers, 2 MiB, 10 s.
+- **Both** shape the answer with one function (`shapeViewerAnswer`): `Set-Cookie`, `Access-Control-*`, `X-Frame-Options` dropped; `VIEWER_HEADER_FLOOR` set, the app replacing only `Content-Security-Policy` (all its values kept); for `/v/<product>/_d/…` (also written `%5Fd` or with doubled slashes) the answer needs a safe sandbox over all CSP values, else 502 `viewer_document_unsafe` with no path in the body.
+- **Status.** With `TB_VIEWS_PUBLIC_URL` the bridge probes `<views>/readyz` (3 s) before each report and every 60 s, and reports `views {url, ok, lastCheckAt}` (a change of `ok` pokes a report; `lastCheckAt` alone does not). Without it the member is absent.
+- **Origins.** The main origin and the keys origin answer 404 for `/v/*`; the private route does not exist on the public listener.

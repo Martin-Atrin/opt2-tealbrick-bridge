@@ -3,7 +3,7 @@
  * change notifications. One instance per process.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID, timingSafeEqual } from "node:crypto";
 import { EventEmitter } from "node:events";
 import { readFileSync } from "node:fs";
 import type { ManifestApi } from "@opt2-tealbrick/relay";
@@ -39,6 +39,10 @@ export interface BridgeOptions {
   form: "deployed" | "own_infra";
   /** BSD-07 (BRIDGE §5.7): owner-set allow-list of own-infrastructure app origins (TB_OWN_INFRA_ORIGINS) */
   ownInfraOrigins?: string[];
+  /** LA-1 (TB_VIEWS_KEY): the Core-generated key tb-views presents to the private views route; never logged, never reported */
+  viewsKey?: string | undefined;
+  /** LA-1 (TB_VIEWS_PUBLIC_URL): the tb-views origin; set → the bridge probes its /readyz and reports `StatusReport.views` */
+  viewsUrl?: string | undefined;
   /** BSD-08: Portal Root Keys; default = this build's channel. Only a test harness replaces them (start option). */
   portalRoots?: Ed25519PublicJwk[];
   fetch?: typeof fetch;
@@ -59,6 +63,11 @@ export class BridgeContext extends EventEmitter {
   readonly internalUrl: string;
   readonly form: "deployed" | "own_infra";
   readonly ownInfraOrigins: string[];
+  /** tb-views origin (TB_VIEWS_PUBLIC_URL) or undefined: the workspace has no views service */
+  readonly viewsUrl: string | undefined;
+  /** the last probe of tb-views `/readyz` (undefined until the first probe, and always when there is no views service) */
+  views: { ok: boolean; lastCheckAt: string } | undefined;
+  readonly #viewsKey: string | undefined;
   readonly portalRoots: Ed25519PublicJwk[];
   readonly fetch: typeof fetch;
   readonly boot = randomUUID();
@@ -95,8 +104,21 @@ export class BridgeContext extends EventEmitter {
     this.internalUrl = o.internalUrl;
     this.form = o.form;
     this.ownInfraOrigins = o.ownInfraOrigins ?? [];
+    this.viewsUrl = o.viewsUrl;
+    this.#viewsKey = o.viewsKey;
     this.portalRoots = o.portalRoots ?? o.api.portalRootKeys(PORTAL_ROOT_CHANNEL);
     this.fetch = o.fetch ?? fetch;
+  }
+
+  /**
+   * LA-1: does `got` equal the views key? Constant time (digests of equal length); false when no key is configured, so a
+   * bridge without TB_VIEWS_KEY answers every views request 404.
+   */
+  viewsKeyMatches(got: string | undefined): boolean {
+    if (!this.#viewsKey || !got) return false;
+    const a = createHash("sha256").update(this.#viewsKey).digest();
+    const b = createHash("sha256").update(got).digest();
+    return timingSafeEqual(a, b);
   }
 
   get bridgeRef(): `tb:brg:brg_${string}` {
