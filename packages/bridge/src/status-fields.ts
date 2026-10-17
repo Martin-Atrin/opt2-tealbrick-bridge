@@ -1,4 +1,4 @@
-// spec 0.1.39 (C213 US-2, C219): AppStatus members the bridge forwards to Portal besides attention (miniapp-sdk 0.1.25 upgrade safety).
+// spec 0.1.39/0.1.40 (C213 US-2, C219): AppStatus members the bridge forwards to Portal besides attention (miniapp-sdk 0.1.25 upgrade safety).
 // L1: spec 0.1.39 exports only TYPES for these members (no runtime phase list, no validators, no JSON Schema), so the
 // shape checks stay local but are typed against the spec: BOOT_PHASES must name every BootFailure["phase"] exactly once
 // (tsc fails on a missing or an extra phase) and the output type is the StatusReport app entry's own members.
@@ -6,9 +6,8 @@ import type { BootFailure, PreUpdateSnapshotRef, StatusReport } from "@opt2-teal
 import { isRecord } from "./util.ts";
 
 export type BootPhase = BootFailure["phase"];
-// C219: spec 0.1.39 types preUpdateSnapshot on AppStatus (and Health) but NOT on StatusReport.apps[]; the member is typed here against
-// the spec's own PreUpdateSnapshotRef until a later spec adds it to the report entry. Core reads report members tolerantly.
-export type UpgradeFields = Pick<StatusReport["apps"][number], "schemaVersion" | "minCompatibleCode" | "failure"> & { preUpdateSnapshot?: PreUpdateSnapshotRef | null };
+// C219: spec 0.1.40 types preUpdateSnapshot on StatusReport.apps[] too, so all four members come from the report entry itself.
+export type UpgradeFields = Pick<StatusReport["apps"][number], "schemaVersion" | "minCompatibleCode" | "failure" | "preUpdateSnapshot">;
 
 /** Compile-time exhaustive against the spec union: `satisfies` refuses a missing key and an excess key. */
 const PHASES = {
