@@ -83,12 +83,12 @@ export function fakeApi(): ManifestApi {
       if (!input.op.crud.every((c) => g.claims.crud.includes(c))) return { decision: "refuse", reason: "crud_exceeds_grant" };
       if (input.op.audience !== "agent") return { decision: "refuse", reason: "audience_not_agent" };
       if (!input.op.standard && input.op.scopeType && !input.declaredScopeTypes.includes(input.op.scopeType)) return { decision: "refuse", reason: "scope_type_unknown" };
-      if (!realManifest.opInGrantWorkflow(g.claims, input.op.id)) return { decision: "refuse", reason: "not_in_workflow" };
+      if (!realManifest.opInGrantWorkflow(g.claims, input.op.id, input.op.standard ? undefined : input.op.listing)) return { decision: "refuse", reason: "not_in_workflow" };
       return { decision: "pass", reason: "ok" };
     },
     // L1: the listing and workflow rules are never re-implemented, not even in the test double
     opVisibleToGrant: (op, claims, declared) => realManifest.opVisibleToGrant(op, claims, declared),
-    opInGrantWorkflow: (claims, opId) => realManifest.opInGrantWorkflow(claims, opId),
+    opInGrantWorkflow: (claims: { mode: string; wf: readonly string[] }, opId: string, listing?: string) => realManifest.opInGrantWorkflow(claims, opId, listing),
     sdkMajorServed: (v, current) => {
       const m = /^(\d+)\.\d+\.\d+/.exec(v);
       if (!m) return false;

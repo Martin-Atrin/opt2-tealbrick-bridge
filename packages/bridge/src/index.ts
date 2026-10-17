@@ -13,6 +13,7 @@ export type { BridgeContext } from "./context.ts";
 export { BRIDGE_VERSION, DRAIN_RETRY_AFTER_S } from "./context.ts";
 export { type BridgeServerOptions, DRAIN_BOUND_MS, enrolBridge, onStopSignals, ownInfraEnv, type RunningBridge, startBridge } from "./server.ts";
 export { jsonLogger, type Logger, silentLogger } from "./util.ts";
+export { BRIDGE_ONLY_ENV, type RunningViews, startViews, type ViewsRoleEnv, ViewsRoleError, type ViewsRoleOptions, viewsRoleEnv } from "./views-edge.ts";
 
 /** The one form this package has (the relay form lives in `@opt2-tealbrick/relay`). */
 export type BridgeForm = "deployed";

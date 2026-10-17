@@ -21,6 +21,8 @@ import { applyConfig, ensureEnrolled, runConfigLoop, startManifestRetry, startSt
 import { remintStandalone, StandaloneAdmin, startStandaloneLoop } from "./standalone.ts";
 import { BridgeState, keksFromEnv } from "./state.ts";
 import { assertOrigin, clientIp, envelope, headerValue, jsonLogger, type Logger, OpenCounter, proxyTrusted, sendError, sendJson, setProxyTrust } from "./util.ts";
+import { ViewsRoute } from "./views-route.ts";
+import { VIEWS_KEY_MIN_LENGTH, type ViewsLimits } from "./views-shared.ts";
 
 export interface BridgeServerOptions {
   api: ManifestApi;
@@ -31,8 +33,8 @@ export interface BridgeServerOptions {
   form?: "deployed" | "own_infra";
   /** test hook: listen on these instead of env ports (0 = any free port) */
   ports?: { public: number; internal: number };
-  /** test hook: listener limits (defaults: {@link DEFAULT_LIMITS}) */
-  limits?: Partial<ListenerLimits> & { mcp?: Partial<McpLimits> };
+  /** test hook: listener limits (defaults: {@link DEFAULT_LIMITS}; views: 32 in flight, 2 MiB, 10 s) */
+  limits?: Partial<ListenerLimits> & { mcp?: Partial<McpLimits>; views?: Partial<ViewsLimits> };
   /**
    * BSD-08 test harness only (CONFORMANCE §7): replaces this build's pinned Portal Root Keys. Never read from env;
    * the production entry (bridge-server) never passes it.
@@ -76,7 +78,7 @@ export const DRAIN_BOUND_MS = 25_000;
  * restart, update) drains: new calls are refused retryably, in-flight calls finish up to the bound, every request id
  * is answered; SIGINT stops at once. The process exits 0 after either.
  */
-export function onStopSignals(running: RunningBridge, logger: Logger, exit: (code: number) => void = (c) => process.exit(c)): void {
+export function onStopSignals(running: Pick<RunningBridge, "drain" | "stop">, logger: Logger, exit: (code: number) => void = (c) => process.exit(c)): void {
   let stopping = false;
   const stop = async (signal: "SIGTERM" | "SIGINT") => {
     if (stopping) return;
@@ -186,6 +188,11 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
   const state = new BridgeState(dataDir, o.api, keks);
   logResealed(logger, state.load());
   const form = o.form ?? "deployed";
+  // LA-1: the views key (a secret: never logged, never reported) and the tb-views origin; both optional, set by Core
+  const viewsUrl = env.TB_VIEWS_PUBLIC_URL?.trim() ? assertOrigin(env.TB_VIEWS_PUBLIC_URL.trim(), "TB_VIEWS_PUBLIC_URL") : undefined;
+  const viewsKeyRaw = env.TB_VIEWS_KEY?.trim();
+  const viewsKey = viewsKeyRaw && viewsKeyRaw.length >= VIEWS_KEY_MIN_LENGTH ? viewsKeyRaw : undefined;
+  if (viewsKeyRaw && !viewsKey) logger.warn("bridge.views.key_unusable", { code: "views_key_too_short" });
   const internalBind = internalListenHost(form, env);
   // the advertised internal address: the Railway private domain, else the bound address when it is one host
   const boundHost = WILDCARD_HOSTS.has(internalBind.host) ? undefined : internalBind.host.includes(":") ? `[${internalBind.host}]` : internalBind.host;
@@ -197,6 +204,8 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
     portalUrl,
     publicUrl,
     keysUrl,
+    viewsUrl,
+    viewsKey,
     internalUrl: `http://${privateHost}:${internalPort}`,
     form,
     ownInfraOrigins: (env.TB_OWN_INFRA_ORIGINS ?? "").split(",").map((h) => h.trim()).filter(Boolean),
@@ -214,7 +223,8 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
   const mcp = new McpServer(ctx, router, o.limits?.mcp);
   const oauth = new OAuthServer(ctx, keks);
   const person = new PersonSurfaces(ctx);
-  const internal = new InternalApi(ctx, router);
+  const views = new ViewsRoute(ctx, o.limits?.views);
+  const internal = new InternalApi(ctx, router, views);
   const admin = new StandaloneAdmin(ctx);
 
   const abort = new AbortController();
@@ -333,7 +343,7 @@ export async function startBridge(o: BridgeServerOptions): Promise<RunningBridge
       const started = Date.now();
       ctx.draining = true;
       ctx.log.info("bridge.draining", { inFlight: router.activeCount(), boundMs });
-      while (router.activeCount() > 0 && Date.now() - started < boundMs) await new Promise((r) => setTimeout(r, 50));
+      while (router.activeCount() + views.active > 0 && Date.now() - started < boundMs) await new Promise((r) => setTimeout(r, 50));
       let aborted = 0;
       if (router.activeCount() > 0) {
         // the bound: cut off every forward still running; each call still answers its request id (app_unavailable)

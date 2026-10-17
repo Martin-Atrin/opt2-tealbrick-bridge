@@ -3,7 +3,7 @@
  * deployed bridge started on free ports with the manifest test double.
  */
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
-import { createServer, type IncomingMessage, type Server, type ServerResponse } from "node:http";
+import { createServer, type IncomingHttpHeaders, type IncomingMessage, type Server, type ServerResponse } from "node:http";
 import type { AddressInfo, Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -15,6 +15,7 @@ import type { Ed25519KeyPair } from "@opt2-tealbrick/spec/sdk";
 import type { McpLimits } from "../../src/mcp.ts";
 import { type ListenerLimits, type RunningBridge, startBridge } from "../../src/server.ts";
 import { type Logger, silentLogger } from "../../src/util.ts";
+import type { ViewsLimits } from "../../src/views-shared.ts";
 import { fakeApi } from "./fake-api.ts";
 
 export const WS = "ws_01HZZZZZZZZZZZZZZZZZZZZZZZ";
@@ -143,6 +144,8 @@ export interface World {
   agentTokenFor(agt: string, con: string): Promise<string>;
   /** requests the bridge's public listener received on this path, across restarts (failure diagnostics) */
   publicRequests(path: string): number;
+  /** LA-1: the fake notes app's viewer route (`GET /v/notes/…`): every request it received, and the handler that answers (404 when none) */
+  viewer: { seen: { url: string; headers: IncomingHttpHeaders }[]; handler?: (req: IncomingMessage, res: ServerResponse) => void };
   /** test hook in the fake app's op route: return true when it answered the request itself */
   appOps: { override?: (op: string, body: Record<string, unknown>, res: ServerResponse) => boolean };
 }
@@ -155,7 +158,7 @@ export interface WorldOptions {
   manifestFailures?: number;
   /** bridge env overrides (e.g. an https TB_PUBLIC_URL) */
   env?: Record<string, string>;
-  limits?: Partial<ListenerLimits> & { mcp?: Partial<McpLimits> };
+  limits?: Partial<ListenerLimits> & { mcp?: Partial<McpLimits>; views?: Partial<ViewsLimits> };
   /** extra key connections of the first agent */
   extraConnections?: string[];
   /** BSD-08: a test root signs key-set statements; the bridge pins it (start option) and Portal sends them.
@@ -201,6 +204,7 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
   const appLog: AppLog = { ops: [], hooks: [] };
   const hookMode: World["hookMode"] = { mode: "allow" };
   const appOps: World["appOps"] = {};
+  const viewer: World["viewer"] = { seen: [] };
   let down = false;
   let pulls = 0;
   let ackFails = false;
@@ -256,6 +260,11 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
     if (url.pathname.startsWith("/tb/v1/bridge/")) {
       await body(req);
       return res.writeHead(200, { "content-type": "application/json" }).end("[]");
+    }
+    if (url.pathname.startsWith("/v/notes/")) {
+      viewer.seen.push({ url: req.url ?? "", headers: req.headers });
+      if (viewer.handler) return viewer.handler(req, res);
+      return res.writeHead(404).end();
     }
     if (url.pathname.startsWith("/a/notes/") || url.pathname.startsWith("/p/notes/")) {
       const b = req.method === "POST" ? await new Promise<string>((r) => { let s = ""; req.on("data", (c) => (s += c)); req.on("end", () => r(s)); }) : "";
@@ -471,6 +480,7 @@ export async function makeWorld(opts: WorldOptions = {}): Promise<World> {
     agentToken,
     agentTokenFor,
     appOps,
+    viewer,
     publicRequests: (path) => seen.get(path) ?? 0,
     mcp,
     signPortal: sign,

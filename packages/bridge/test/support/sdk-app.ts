@@ -11,7 +11,7 @@ import { fileURLToPath } from "node:url";
 import { validateManifest } from "@opt2-tealbrick/manifest";
 import { defineApp, startApp } from "@opt2-tealbrick/miniapp-sdk";
 import { statementKeys } from "../../src/portal.ts";
-import { AGT, BRG, notesManifest, type World, WS, waitFor as waitForRaw } from "./world.ts";
+import { AGT, AGT2, BRG, notesManifest, type World, WS, waitFor as waitForRaw } from "./world.ts";
 
 const now = () => Math.floor(Date.now() / 1000);
 
@@ -65,6 +65,9 @@ export interface RealSdkAppOptions {
   hookHandlers?: Record<string, unknown>;
   /** manifest version (a new version = a new digest, like an app update) */
   version?: string;
+  /** LA-1: manifest publicRoutes (e.g. a `viewer` route at `/v`) and the handlers `defineApp` registers by path */
+  publicRoutes?: Record<string, unknown>[];
+  publicHandlers?: Record<string, unknown>;
 }
 
 /** Starts a real SDK app on `o.port` (the world must list `http://127.0.0.1:<port>` in extraOwnInfraOrigins). */
@@ -77,7 +80,7 @@ export async function startRealSdkApp(w: World, o: RealSdkAppOptions): Promise<R
     name: o.product,
     operations: o.operations,
     settings: { ...notesManifest.settings, keys: [] },
-    publicRoutes: [],
+    publicRoutes: o.publicRoutes ?? [],
     runtime: { ...(notesManifest as { runtime: Record<string, unknown> }).runtime, port: o.port },
     ...(o.hooks ? { hooks: o.hooks } : {}),
     ...(o.version ? { version: o.version } : {}),
@@ -89,6 +92,7 @@ export async function startRealSdkApp(w: World, o: RealSdkAppOptions): Promise<R
     handlers: (o.handlers ?? {}) as never,
     ...(o.dynamic ? { dynamic: o.dynamic as never } : {}),
     ...(o.hookHandlers ? { hooks: o.hookHandlers as never } : {}),
+    ...(o.publicHandlers ? { publicRoutes: o.publicHandlers as never } : {}),
     migrations: fileURLToPath(new URL("../fixtures/sdk-app/migrations", import.meta.url)),
   });
   const entry = (slice: string) => ({ ins: o.ins as never, product: o.product, version: String(manifest.version), sdkMajor: 1, manifestDigest: app.digest, internalUrl: `http://127.0.0.1:${o.port}`, ownInfra: true, entitled: true, slice }) as never;
@@ -129,7 +133,11 @@ export async function startRealSdkApp(w: World, o: RealSdkAppOptions): Promise<R
     revoked: { jtis: [] },
     personNbf: 0,
     grants: [],
-    agents: [],
+    // miniapp-sdk 0.1.26 refuses an agent the slice does not list (`agent_unknown`): Core lists the world's agents
+    agents: [
+      { id: AGT, name: "Agent One", mode: "free", status: "active" },
+      { id: AGT2, name: "Agent Two", mode: "free", status: "active" },
+    ],
   });
   const grant = o.agentGrantCrud
     ? await w.signPortal("tb-grant+jwt", { iss: "tb:portal", sub: `tb:agt:${AGT}`, aud: `tb:ins:${o.ins}`, iat: now(), exp: now() + 43200, jti: w.api.ulid(), ws: WS, cnf: { brg: BRG }, crud: o.agentGrantCrud, mode: "free", held: [], caps: {}, wf: [], polrev: 1 })

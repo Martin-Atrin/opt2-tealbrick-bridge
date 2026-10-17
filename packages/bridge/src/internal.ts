@@ -15,6 +15,7 @@ import { type BridgeContext, DRAIN_RETRY_AFTER_S } from "./context.ts";
 import { upgradeFields } from "./status-fields.ts";
 import { type AppRuntime, internalUrlAllowed, type Table } from "./table.ts";
 import { BridgeError, envelope, headerValue, isRecord, nowS, parseJson, readBody, sendError, sendJson, statusFor, TokenBucket } from "./util.ts";
+import { VIEWS_ROUTE_PREFIX, type ViewsRoute } from "./views-route.ts";
 
 interface InstanceCaller {
   ins: InstanceId;
@@ -27,15 +28,17 @@ export const APP_INITIATED_LIMIT = { perMinute: 120, burst: 30 } as const;
 export class InternalApi {
   private readonly ctx: BridgeContext;
   private readonly router: CallRouter;
+  private readonly views: ViewsRoute | undefined;
   private readonly seenJtis = new Map<string, number>();
   private readonly waiters = new Set<() => void>();
   private readonly appInitiated = new TokenBucket(APP_INITIATED_LIMIT.perMinute / 60, APP_INITIATED_LIMIT.burst);
   /** BRG-12 (L31): digests of one-time codes whose claim is in progress (reserved before the first await) */
   private readonly claiming = new Set<string>();
 
-  constructor(ctx: BridgeContext, router: CallRouter) {
+  constructor(ctx: BridgeContext, router: CallRouter, views?: ViewsRoute) {
     this.ctx = ctx;
     this.router = router;
+    this.views = views;
     ctx.on("table", () => this.wake());
     ctx.on("keys", () => this.wake());
   }
@@ -94,6 +97,11 @@ export class InternalApi {
   async handle(req: IncomingMessage, res: ServerResponse, requestId: string): Promise<void> {
     const url = new URL(req.url ?? "/", "http://internal");
     try {
+      // LA-1: the private views route (tb-views is its caller). Own key check, own errors (they carry the viewer floor).
+      if (url.pathname === VIEWS_ROUTE_PREFIX || url.pathname.startsWith(`${VIEWS_ROUTE_PREFIX}/`)) {
+        if (!this.views) return sendJson(res, 404, envelope("not_found", "not found", requestId));
+        return await this.views.handle(req, res, requestId);
+      }
       if (req.method === "POST" && url.pathname === "/tb/v1/claim") return await this.claim(req, res);
       if (req.method === "POST" && url.pathname === "/tb/v1/status") return await this.status(req, res, url);
       if (req.method === "GET" && url.pathname.startsWith("/tb/v1/keys/")) return await this.keyFetch(req, res, decodeURIComponent(url.pathname.slice(12)));
