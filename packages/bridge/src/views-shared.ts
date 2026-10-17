@@ -1,14 +1,14 @@
 /**
  * Viewer pages (LA-1, C232; BRIDGE §9.2 "the two roles"): what the views service (`TB_ROLE=views`) and the bridge's
  * private views route share. Every rule that has a name in `@opt2-tealbrick/manifest` (VIEWER_HEADER_FLOOR,
- * VIEWER_REQUEST_HEADERS, viewerResponseHeaderDropped, isViewerDocumentPath, viewerDocumentCspOk) is IMPORTED here,
+ * VIEWER_REQUEST_HEADERS, viewerResponseHeaderDropped, isViewerDocumentPath, viewerDocumentCspOk, viewerFloorOverride) is IMPORTED here,
  * never written a second time (L1). Nothing in this file logs a path, a query or a header value: a viewer link carries
  * its token in the path.
  */
 import type { IncomingHttpHeaders, ServerResponse } from "node:http";
 import { request as httpRequest } from "node:http";
 import { request as httpsRequest } from "node:https";
-import { isViewerDocumentPath, ulid, VIEWER_HEADER_FLOOR, VIEWER_REQUEST_HEADERS, viewerDocumentCspOk, viewerResponseHeaderDropped } from "@opt2-tealbrick/manifest";
+import { isViewerDocumentPath, ulid, VIEWER_HEADER_FLOOR, VIEWER_REQUEST_HEADERS, viewerDocumentCspOk, viewerFloorOverride, viewerResponseHeaderDropped } from "@opt2-tealbrick/manifest";
 
 /** The header that carries the Core-generated views key from tb-views to the bridge private route. */
 export const VIEWS_KEY_HEADER = "tb-views-key";
@@ -162,6 +162,7 @@ const FLOOR_NAMES: ReadonlySet<string> = new Set(Object.keys(VIEWER_HEADER_FLOOR
 /** connection-level headers belong to one hop, never to the answer we write */
 const HOP_BY_HOP: ReadonlySet<string> = new Set(["connection", "keep-alive", "proxy-authenticate", "proxy-connection", "te", "trailer", "transfer-encoding", "upgrade", "content-length"]);
 const CSP = "content-security-policy";
+const CACHE_CONTROL = "cache-control";
 
 /** The floor as a plain header object. Every answer on the viewer path carries it, errors too. */
 export function floorHeaders(): Record<string, string> {
@@ -178,19 +179,29 @@ export interface ViewerAnswer {
  * The one shaping of a viewer answer, applied by the bridge route AND by tb-views (defence in depth, same code):
  *  - the `_d` gate over ALL Content-Security-Policy values the upstream sent (a missing policy is not safe) → undefined,
  *  - headers the viewer must never get are dropped (viewerResponseHeaderDropped) and hop-by-hop headers are not copied,
- *  - VIEWER_HEADER_FLOOR is set, and the upstream may replace ONLY `content-security-policy` (all its values are kept;
- *    none, or only empty ones → the floor's).
+ *  - VIEWER_HEADER_FLOOR is set. A floor header the upstream also sends replaces the floor's ONLY when the manifest's
+ *    `viewerFloorOverride(name, value, path)` says so (manifest 0.1.22): `content-security-policy` always (all its values
+ *    are kept; none, or only empty ones → the floor's), and `cache-control` only as ONE `public, max-age=<n>, immutable`
+ *    value on `/v/<product>/_s/…` (never on a token page, a data answer or a `_d` document: they stay `no-store`).
+ *    The path is the normalised app-visible path; a doubled-slash path never counts as an asset path.
  */
-export function shapeViewerAnswer(raw: RawViewerResponse, document: boolean): ViewerAnswer | undefined {
+export function shapeViewerAnswer(raw: RawViewerResponse, target: ViewerTarget): ViewerAnswer | undefined {
+  const document = isViewerDocument(target);
+  const path = `/v/${target.product}${target.rest}`;
   const csp = (raw.headers[CSP] ?? []).filter((v) => v.trim() !== "");
   if (document && !viewerDocumentCspOk(csp)) return undefined;
   const headers: Record<string, string | string[]> = floorHeaders();
   for (const [name, values] of Object.entries(raw.headers)) {
     const n = name.toLowerCase();
-    if (values.length === 0 || viewerResponseHeaderDropped(n) || HOP_BY_HOP.has(n) || FLOOR_NAMES.has(n)) continue;
+    if (values.length === 0 || viewerResponseHeaderDropped(n) || HOP_BY_HOP.has(n)) continue;
+    if (FLOOR_NAMES.has(n)) {
+      // a floor header is replaced only by the manifest rule; several Cache-Control lines never count as one value
+      if (n === CACHE_CONTROL && !document && values.length === 1 && viewerFloorOverride(n, values[0] as string, path)) headers[n] = values[0] as string;
+      continue;
+    }
     headers[n] = values.length === 1 ? (values[0] as string) : values;
   }
-  if (csp.length) headers[CSP] = csp.length === 1 ? (csp[0] as string) : csp;
+  if (csp.length && viewerFloorOverride(CSP, csp[0] as string, path)) headers[CSP] = csp.length === 1 ? (csp[0] as string) : csp;
   if (raw.status !== 304 && raw.status !== 204 && raw.status >= 200) headers["content-length"] = String(raw.body.length);
   return { status: raw.status, headers, body: raw.body };
 }

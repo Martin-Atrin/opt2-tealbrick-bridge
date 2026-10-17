@@ -41,6 +41,8 @@ export interface BridgeOptions {
   ownInfraOrigins?: string[];
   /** LA-1 (TB_VIEWS_KEY): the Core-generated key tb-views presents to the private views route; never logged, never reported */
   viewsKey?: string | undefined;
+  /** LA-1 key rotation (TB_VIEWS_KEY_PREVIOUS): the key being retired; accepted by the private views route only while set; never logged, never reported */
+  viewsKeyPrevious?: string | undefined;
   /** LA-1 (TB_VIEWS_PUBLIC_URL): the tb-views origin; set → the bridge probes its /readyz and reports `StatusReport.views` */
   viewsUrl?: string | undefined;
   /** BSD-08: Portal Root Keys; default = this build's channel. Only a test harness replaces them (start option). */
@@ -68,6 +70,7 @@ export class BridgeContext extends EventEmitter {
   /** the last probe of tb-views `/readyz` (undefined until the first probe, and always when there is no views service) */
   views: { ok: boolean; lastCheckAt: string } | undefined;
   readonly #viewsKey: string | undefined;
+  readonly #viewsKeyPrevious: string | undefined;
   readonly portalRoots: Ed25519PublicJwk[];
   readonly fetch: typeof fetch;
   readonly boot = randomUUID();
@@ -106,19 +109,26 @@ export class BridgeContext extends EventEmitter {
     this.ownInfraOrigins = o.ownInfraOrigins ?? [];
     this.viewsUrl = o.viewsUrl;
     this.#viewsKey = o.viewsKey;
+    this.#viewsKeyPrevious = o.viewsKeyPrevious;
     this.portalRoots = o.portalRoots ?? o.api.portalRootKeys(PORTAL_ROOT_CHANNEL);
     this.fetch = o.fetch ?? fetch;
   }
 
   /**
-   * LA-1: does `got` equal the views key? Constant time (digests of equal length); false when no key is configured, so a
-   * bridge without TB_VIEWS_KEY answers every views request 404.
+   * LA-1: does `got` equal the views key (TB_VIEWS_KEY) or, during a rotation, the previous one (TB_VIEWS_KEY_PREVIOUS,
+   * only while set)? Constant time (digests of equal length); false when no key is configured, so a bridge without
+   * TB_VIEWS_KEY answers every views request 404.
    */
   viewsKeyMatches(got: string | undefined): boolean {
-    if (!this.#viewsKey || !got) return false;
-    const a = createHash("sha256").update(this.#viewsKey).digest();
+    if (!got) return false;
     const b = createHash("sha256").update(got).digest();
-    return timingSafeEqual(a, b);
+    // both keys are always compared (no early exit), each in constant time over equal-length digests
+    let ok = false;
+    for (const key of [this.#viewsKey, this.#viewsKeyPrevious]) {
+      if (!key) continue;
+      if (timingSafeEqual(createHash("sha256").update(key).digest(), b)) ok = true;
+    }
+    return ok;
   }
 
   get bridgeRef(): `tb:brg:brg_${string}` {

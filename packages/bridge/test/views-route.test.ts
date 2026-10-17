@@ -1,5 +1,5 @@
 /**
- * Bridge 0.2.1 (LA-1, C232): the private views route `GET /tb/v1/views/<product>/<rest>` of the REAL bridge (a fake Portal
+ * Bridge 0.2.1 (LA-1, C232; 0.2.2 adds the key rotation): the private views route `GET /tb/v1/views/<product>/<rest>` of the REAL bridge (a fake Portal
  * and a fake app, as in every world). L34: each refusal fires on the bad request and stays quiet on the good one.
  */
 import assert from "node:assert/strict";
@@ -248,6 +248,79 @@ describe("bridge private views route: no TB_VIEWS_KEY configured", () => {
     const short = await makeWorld({ real: true, env: { TB_VIEWS_KEY: "short" } });
     try {
       assert.equal((await rawGet(route(short, "/_ready"), { "TB-Views-Key": "short" })).status, 404);
+    } finally {
+      await short.close();
+    }
+  });
+});
+
+describe("bridge private views route: TB_VIEWS_KEY rotation (TB_VIEWS_KEY_PREVIOUS)", () => {
+  const OLD = randomBytes(32).toString("base64url");
+  const NEW = randomBytes(32).toString("base64url");
+  let w: World;
+  const logged: string[] = [];
+  const sink = (e: string, f?: Record<string, unknown>) => void logged.push(JSON.stringify({ e, f }));
+  const status = async (key: string | undefined): Promise<number> => (await rawGet(route(w, "/notes/tok"), key === undefined ? {} : { "TB-Views-Key": key })).status;
+  const ready = () => waitFor(() => !!w.bridge.ctx.table && w.bridge.ctx.table.rev === w.rev(), 15000);
+
+  before(async () => {
+    // step 1 of the rotation: Core sets PREVIOUS = the old key and the new key as TB_VIEWS_KEY on the bridge
+    w = await makeWorld({ real: true, env: { TB_VIEWS_KEY: NEW, TB_VIEWS_KEY_PREVIOUS: OLD }, logger: { info: sink, warn: sink, error: sink, debug: sink } as never });
+    await publishViewerApp(w);
+  });
+  after(async () => {
+    await w.close();
+  });
+
+  test("while PREVIOUS is set both keys pass; a wrong, missing or near-miss key is the same 404", async () => {
+    answer(w, 200);
+    assert.equal(await status(NEW), 200, "the new key");
+    assert.equal(await status(OLD), 200, "the old key, still in rotation");
+    const unknown = await rawGet(`${w.internalUrl}/tb/v1/nothing`);
+    for (const key of [undefined, "", "wrong", NEW.slice(0, -1), `${OLD}x`, OLD.toUpperCase(), `${NEW}${OLD}`]) {
+      const r = await rawGet(route(w, "/notes/tok"), key === undefined ? {} : { "TB-Views-Key": key });
+      assert.equal(r.status, 404, String(key));
+      assert.equal(r.text.replace(/req_\w+/, ""), unknown.text.replace(/req_\w+/, ""), "no oracle: same answer as an unknown path");
+    }
+  });
+
+  test("after PREVIOUS is removed (Core's last step) the old key is a 404 and the new key still passes", async () => {
+    w.setEnv("TB_VIEWS_KEY_PREVIOUS", "");
+    await w.restart();
+    await ready();
+    answer(w, 200);
+    assert.equal(await status(NEW), 200, "the new key");
+    assert.equal(await status(OLD), 404, "the old key is gone with PREVIOUS");
+  });
+
+  test("an empty or absent key never matches, with PREVIOUS unset", async () => {
+    assert.equal(await status(""), 404);
+    assert.equal(await status(undefined), 404);
+  });
+
+  test("neither key is ever logged, reported or in the metrics", async () => {
+    const report = JSON.stringify(buildStatusReport(w.bridge.ctx));
+    const metrics = (await rawGet(`${w.internalUrl}/metrics`)).text;
+    for (const secret of [OLD, NEW]) {
+      assert.ok(!logged.some((l) => l.includes(secret)), "log");
+      assert.ok(!report.includes(secret), "status report");
+      assert.ok(!metrics.includes(secret), "metrics");
+    }
+  });
+});
+
+describe("bridge private views route: an unusable PREVIOUS key", () => {
+  test("a too-short PREVIOUS is not a key (404 for it), warned about without its value; the main key still works", async () => {
+    const logged: string[] = [];
+    const sink = (e: string, f?: Record<string, unknown>) => void logged.push(JSON.stringify({ e, f }));
+    const short = await makeWorld({ real: true, env: { TB_VIEWS_KEY: KEY, TB_VIEWS_KEY_PREVIOUS: "tooshort" }, logger: { info: sink, warn: sink, error: sink, debug: sink } as never });
+    try {
+      await publishViewerApp(short);
+      answer(short, 200);
+      assert.equal((await rawGet(route(short, "/notes/tok"), { "TB-Views-Key": "tooshort" })).status, 404);
+      assert.equal((await rawGet(route(short, "/notes/tok"), { "TB-Views-Key": KEY })).status, 200);
+      assert.ok(logged.some((l) => l.includes("views_key_previous_too_short")), "warned");
+      assert.ok(!logged.some((l) => l.includes("tooshort")), "the value is never logged");
     } finally {
       await short.close();
     }
